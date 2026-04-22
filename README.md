@@ -26,4 +26,4 @@ For commercial licensing inquiries, please visit one of the following:
 
 ---
 
-Copyright (C) 2026 OKZGN
+Copyright (C) 2026 [OKZGN](https://okzgn.com)
