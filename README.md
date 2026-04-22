@@ -16,15 +16,58 @@ A cross-platform, high-performance HTTP web server with a real-time, visual mana
 
 ## Architecture & Design Philosophy
 
-Turbo is engineered as a high-performance, single-binary solution with a focus on both efficiency and intellectual property protection.
+Turbo is engineered as a high-performance, single-binary solution with a focus on both efficiency, developer experience, and architectural integrity.
 
-*   **Real-Time Admin Interface:** Turbo provides a fully embedded, zero-dependency Web GUI. This allows for real-time management of sites, SSL, and traffic policies without the need for external tooling or complex deployments.
-*   **Source Code Integrity:** To protect the intellectual property of our core routing engine and management logic, the backend source code utilizes an intentional architectural obfuscation pattern. This design choice safeguards our proprietary algorithms and logic from unauthorized cloning or distribution, while ensuring that the administrative web interface remains fully operational, performant, and user-friendly for legitimate operators.
+*   **Real-Time Admin Interface:** Turbo provides a fully embedded, zero-dependency Web GUI, enabling real-time management of domains, SSL certificates, and traffic policies without requiring external tooling or complex deployments.
+
+*   **Source Code Integrity:** Turbo is open-source, and its source code is available for review and modification. However, the backend logic is intentionally obfuscated to raise the barrier against casual code copying. This design choice safeguards our core routing engine and management logic from trivial reproduction, while still allowing dedicated users to analyze, audit, or modify the codebase through the necessary effort of reverse-engineering and analysis.
+
+## Requirements
+
+### Operating Systems
+- **Windows:** Windows 11, 10. Windows 8, 7 (only with Go 1.20 or earlier).
+- **Linux:** Alpine, Amazon Linux, Ubuntu, and other mainstream distributions
+- **macOS:** Compatible (not extensively tested)
+
+### System Architecture
+- **x86-64** (Intel/AMD 64-bit processors)
+- **ARM64** (ARMv8 and later, including AWS Graviton processors)
+
+### Dependencies
+- **Go 1.18+** (for building from source)
+- No external runtime dependencies, Turbo is distributed as a single, self-contained binary
+
+### Minimum Requirements
+- **RAM:** 512 MB minimum (runtime) · 1 GB+ recommended (build from source)
+- **Storage:** ~100 MB for binary + websites + configuration files
+- **Network:** Standard HTTP/HTTPS ports (80, 443) require elevated privileges on Linux/macOS
 
 ## Installation
+
+### From Source
 ```bash
+git clone https://github.com/okzgn/turbo-go.git
+cd turbo-go
 go build -ldflags "-s -w" -o turbo .
-./turbo
+sudo ./turbo
+```
+
+### Supported Platforms
+```bash
+# Linux x86-64
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o turbo-linux-amd64 .
+
+# Linux ARM64 (AWS Graviton, Raspberry Pi, etc.)
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o turbo-linux-arm64 .
+
+# Windows
+GOOS=windows GOARCH=amd64 go build -o turbo.exe .
+
+# macOS x86-64
+GOOS=darwin GOARCH=amd64 go build -o turbo-darwin-amd64 .
+
+# macOS ARM64 (Apple Silicon)
+GOOS=darwin GOARCH=arm64 go build -o turbo-darwin-arm64 .
 ```
 
 ## Project Status: In Development
