@@ -20,6 +20,8 @@ This program is free software: you can redistribute it and/or modify it under th
 2. **Commercial License:**
 If you wish to use **Turbo** in a proprietary project, integrate it into a closed product, or do not wish to comply with the AGPL v3 requirements, you may purchase a commercial license.
 
-For commercial licensing inquiries, please visit: https://okzgn.com/#contact
+For commercial licensing inquiries, please visit one of the following:
+- https://okzgn.com/#contact
+- https://okzgn.github.io/#contact
 
 Copyright (C) 2026 OKZGN
