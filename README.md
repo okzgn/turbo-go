@@ -43,6 +43,9 @@ For commercial licensing inquiries, please visit one of the following:
 - https://okzgn.com/#contact
 - https://okzgn.github.io/#contact
 
+3. **Third-Party Components:**
+The `customNetHttp` package contains a modified version of the Go standard library `net/http` (based on Go v1.19/1.18), which is distributed under the **BSD 3-Clause License**. Please refer to the `customNetHttp/LICENSE` and `customNetHttp/NOTICE` files within that directory for full details and attribution.
+
 ---
 
 Copyright (C) 2026 [OKZGN](https://okzgn.com)
