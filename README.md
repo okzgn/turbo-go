@@ -4,7 +4,7 @@ A cross-platform, high-performance HTTP web server with a real-time, visual mana
 
 ## Project Status: In Development
 
-This repository is currently undergoing maintenance and initial setup. We are actively finalizing the architecture and documentation for the upcoming version 2.3.**rc1** release.
+This repository is currently undergoing maintenance and initial setup, actively finalizing the architecture and documentation for the upcoming version 2.3.**rc1** release.
 
 While this repository is currently empty, the source code and initial files will be available shortly.
 
