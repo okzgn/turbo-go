@@ -50,6 +50,14 @@ git clone https://github.com/okzgn/turbo-go.git
 cd turbo-go
 go build -ldflags "-s -w" -o turbo .
 sudo ./turbo
+
+# Or:
+
+# Alternative without sudo (Linux)
+sudo setcap cap_net_bind_service=+ep ./turbo
+
+# Run the binary as a standard user
+./turbo
 ```
 
 ### Supported Platforms
