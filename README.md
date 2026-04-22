@@ -1,6 +1,25 @@
 # Turbo
 
+![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)
+![Go Version](https://img.shields.io/github/go-mod/go-version/okzgn/turbo-go)
+![Status](https://img.shields.io/badge/Status-In%20Development-yellow)
+
 A cross-platform, high-performance HTTP web server with a real-time, visual management interface. Manage unlimited domains and multi-level wildcard subdomains, SSL certificates, URI rewrites, request preprocessing, fine-grained request rate and size limiting, as well as custom aliases, headers, MIMEs, and indexes.
+
+## Key Features
+- **High-Performance:** Built for speed and efficiency.
+- **Visual Management:** Real-time, intuitive administrative interface.
+- **Flexible Domain Handling:** Unlimited domains and multi-level wildcard subdomains and aliases.
+- **Security:** Integrated SSL certificate management and concurrency safety.
+- **Traffic Control:** Fine-grained request rate and size limiting.
+- **Deep Customization:** URI rewrites, request preprocessing, headers/MIMEs, and indexes.
+
+
+## Installation
+```bash
+go build -ldflags "-s -w" -o turbo .
+./turbo
+```
 
 ## Project Status: In Development
 
@@ -10,7 +29,7 @@ While this repository is currently empty, the source code and initial files will
 
 ---
 
-## Licensing
+## License
 
 **Turbo** uses a dual licensing model.
 
