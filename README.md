@@ -14,6 +14,12 @@ A cross-platform, high-performance HTTP web server with a real-time, visual mana
 - **Traffic Control:** Fine-grained request rate and size limiting.
 - **Deep Customization:** URI rewrites, request preprocessing, headers/MIMEs, and indexes.
 
+## Architecture & Design Philosophy
+
+Turbo is engineered as a high-performance, single-binary solution with a focus on both efficiency and intellectual property protection.
+
+*   **Real-Time Admin Interface:** Turbo provides a fully embedded, zero-dependency Web GUI. This allows for real-time management of sites, SSL, and traffic policies without the need for external tooling or complex deployments.
+*   **Source Code Integrity:** To protect the intellectual property of our core routing engine and management logic, the backend source code utilizes an intentional architectural obfuscation pattern. This design choice safeguards our proprietary algorithms and logic from unauthorized cloning or distribution, while ensuring that the administrative web interface remains fully operational, performant, and user-friendly for legitimate operators.
 
 ## Installation
 ```bash
