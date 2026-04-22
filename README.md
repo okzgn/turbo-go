@@ -25,7 +25,7 @@ Turbo is engineered as a high-performance, single-binary solution with a focus o
 ## Requirements
 
 ### Operating Systems
-- **Windows:** Windows 11, 10. Windows 8, 7 (only with Go 1.20 or earlier).
+- **Windows:** Windows 11, 10 (Go 1.18+). Windows 8, 7 (only with Go 1.20 or earlier).
 - **Linux:** Alpine, Amazon Linux, Ubuntu, and other mainstream distributions
 - **macOS:** Compatible (not extensively tested)
 
