@@ -33,17 +33,17 @@ While this repository is currently empty, the source code and initial files will
 
 **Turbo** uses a dual licensing model.
 
-* 1. **Open Source (AGPL v3):** 
+* **Open Source (AGPL v3):** 
     This program is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General Public License (AGPL v3) as published by the Free Software Foundation. If you modify this software and offer it as a service over a network, you must release your modifications under the same license. See: https://www.gnu.org/licenses/agpl-3.0.html
 
-* 2. **Commercial License:**
+* **Commercial License:**
     If you wish to use **Turbo** in a proprietary project, integrate it into a closed product, or do not wish to comply with the AGPL v3 requirements, you may purchase a commercial license.
 
     For commercial licensing inquiries, please visit one of the following:
     - https://okzgn.com/#contact
     - https://okzgn.github.io/#contact
 
-* 3. **Third-Party Components:**
+* **Third-Party Components:**
     The `customNetHttp` package contains a modified version of the Go standard library `net/http` (based on Go v1.19/1.18), which is distributed under the **BSD 3-Clause License**. Please refer to the `customNetHttp/LICENSE` and `customNetHttp/NOTICE` files within that directory for full details and attribution.
 
 ---
