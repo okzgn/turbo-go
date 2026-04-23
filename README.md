@@ -29,7 +29,7 @@ Turbo is engineered as a high-performance, single-binary solution with a focus o
 - **Linux:** Alpine, Amazon Linux, Ubuntu, and other mainstream distributions
 - **macOS:** Compatible (not extensively tested)
 
-*For Windows 8-7 compilation only available with Go 1.20 or earlier.
+*Windows 8-7 compilation is only available with Go 1.20 or earlier.
 
 ### System Architecture
 - **x86-64** (Intel/AMD 64-bit processors)
