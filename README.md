@@ -82,9 +82,7 @@ GOOS=darwin GOARCH=arm64 go build -o turbo-darwin-arm64 .
 
 ## Project Status: In Development
 
-This repository is currently undergoing maintenance and initial setup, actively finalizing the architecture and documentation for the upcoming version 2.3.**rc1** release.
-
-While this repository is currently empty, the source code and initial files will be available shortly.
+This repository is actively being finalized ahead of the upcoming version 2.3.**rc1** release. The source code and initial files will be published shortly.
 
 ---
 
@@ -97,17 +95,16 @@ While this repository is currently empty, the source code and initial files will
    - **Environment:**
      - OS and version (e.g., Ubuntu 22.04, Windows 11)
      - Architecture (e.g., x86-64, ARM64)
-     - Environment description (e.g., RAM, disk space, running processes...)
+     - Environment/Image/VM description (e.g., RAM, disk space, running processes, capabilities, limitations...)
      - Go version (if building from source)
      - Relevant Turbo configuration files, denial logs, visit logs (redact sensitive data before sharing)
      - Turbo version or commit hash
 
 2. **Suggest Features:** Describe your use case and expected behavior in a GitHub issue.
 
-3. **Security Concerns:** For non-critical vulnerabilities, open a  GitHub issue. For critical vulnerabilities, please contact us privately before disclosing publicly at:
+3. **Security Concerns:** For non-critical vulnerabilities, open a GitHub issue. For critical vulnerabilities, please contact us privately before disclosing publicly at:
    - https://okzgn.com/#contact
    - https://okzgn.github.io/#contact
-
 
 ---
 
