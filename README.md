@@ -9,7 +9,7 @@ A cross-platform, high-performance HTTP web server with a real-time, visual mana
 ## Key Features
 - **High-Performance:** Built for speed and efficiency.
 - **Visual Management:** Real-time, intuitive administrative interface.
-- **Flexible Domain Handling:** Unlimited domains and multi-level wildcard subdomains and aliases.
+- **Flexible Domain Handling:** Unlimited domains, multi-level wildcard subdomains and aliases.
 - **Security:** Integrated SSL certificate management and concurrency safety.
 - **Traffic Control:** Fine-grained request rate and size limiting.
 - **Deep Customization:** URI rewrites, request preprocessing, headers/MIMEs, and indexes.
