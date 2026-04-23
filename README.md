@@ -1,10 +1,10 @@
+![Turbo Icon](turbo.nano.png)
+
 # Turbo
 
 ![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)
 ![Go Version](https://img.shields.io/github/go-mod/go-version/okzgn/turbo-go)
 ![Status](https://img.shields.io/badge/Status-In%20Development-yellow)
-
-![Turbo Icon](turbo.nano.png)
 
 A cross-platform, high-performance HTTP web server with a real-time, visual management interface. Manage unlimited domains and multi-level wildcard subdomains, SSL certificates, URI rewrites, request preprocessing, fine-grained request rate and size limiting, as well as custom aliases, headers, MIMEs, and indexes.
 
