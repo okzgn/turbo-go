@@ -16,7 +16,7 @@ A cross-platform, high-performance HTTP web server with a real-time, visual mana
 
 ## Architecture & Design Philosophy
 
-Turbo is engineered as a high-performance, single-binary solution with a focus on both efficiency, developer experience, and architectural integrity.
+Turbo is engineered as a high-performance, single-binary solution with a focus on efficiency, developer experience, and architectural integrity.
 
 *   **Real-Time Admin Interface:** Turbo provides a fully embedded, zero-dependency Web GUI, enabling real-time management of domains, SSL certificates, and traffic policies without requiring external tooling or complex deployments.
 
@@ -25,9 +25,10 @@ Turbo is engineered as a high-performance, single-binary solution with a focus o
 ## Requirements
 
 ### Operating Systems
-- **Windows:** Windows 11, 10 (Go 1.18+). Windows 8, 7 (only with Go 1.20 or earlier).
+- **Windows:** Windows 11, 10, 8*, 7*
 - **Linux:** Alpine, Amazon Linux, Ubuntu, and other mainstream distributions
 - **macOS:** Compatible (not extensively tested)
+*For Windows 8-7 compilation only available with Go 1.20 or earlier.
 
 ### System Architecture
 - **x86-64** (Intel/AMD 64-bit processors)
