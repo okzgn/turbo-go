@@ -79,12 +79,6 @@ sudo setcap cap_net_bind_service=+ep ./turbo
 ./turbo
 ```
 
-### Execution
-- **Windows:** Run `turbo.exe` as Administrator for ports 80/443.
-- **Linux:** Grant execution permissions with `chmod +x` and run it: `./turbo` (requires free ports 80 and 443).
-
----
-
 ### Supported Platforms
 ```bash
 # Linux x86-64
@@ -102,6 +96,11 @@ GOOS=darwin GOARCH=amd64 go build -o turbo-darwin-amd64 .
 # macOS ARM64 (Apple Silicon)
 GOOS=darwin GOARCH=arm64 go build -o turbo-darwin-arm64 .
 ```
+
+### Execution
+- **Windows:** Run `turbo.exe` as Administrator for ports 80/443.
+- **Linux:** Grant execution permissions with `chmod +x` and run it: `./turbo` (requires free ports 80 and 443).
+
 ---
 
 ## Getting Started
