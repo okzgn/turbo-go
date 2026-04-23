@@ -88,7 +88,7 @@ While this repository is currently empty, the source code and initial files will
 
 ## License
 
-**Turbo** uses a dual licensing model.
+Turbo uses a dual licensing model.
 
 * **Open Source (AGPL v3):**
 
@@ -96,7 +96,7 @@ While this repository is currently empty, the source code and initial files will
 
 * **Commercial License:**
 
-    If you wish to use **Turbo** in a proprietary project, integrate it into a closed product, or do not wish to comply with the AGPL v3 requirements, you may purchase a commercial license.
+    If you wish to use Turbo in a proprietary project, integrate it into a closed product, or do not wish to comply with the AGPL v3 requirements, you may purchase a commercial license.
 
     For commercial licensing inquiries, please visit one of the following:
     - https://okzgn.com/#contact
