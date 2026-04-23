@@ -1,4 +1,4 @@
-![Turbo Icon](turbo.png)
+![Turbo Icon](turbo.small.png)
 
 # Turbo
 
