@@ -104,6 +104,22 @@ GOOS=darwin GOARCH=arm64 go build -o turbo-darwin-arm64 .
 ```
 ---
 
+## Getting Started
+
+Once Turbo is running, access the admin interface at:
+
+- `http://localhost/admin:`
+- `http://<your-server-ip>/admin:`
+- `http://<your-domain>/admin:`
+
+**Default credentials:**
+- **Username:** `Turbo`
+- **Password:** `Admin`
+
+> Change the default credentials immediately after your first login.
+
+---
+
 ### Known Limitations
 - Windows 8, 7 support requires Go 1.20 or earlier for compilation.
 - Linux distributions like Alpine or Amazon Linux have not been tested.
