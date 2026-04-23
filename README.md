@@ -42,7 +42,7 @@ Turbo is engineered as a high-performance, single-binary solution with a focus o
 ### Operating Systems
 - **Windows:** Windows 11, 10, 8*, 7*
 - **Linux:** Alpine, Amazon Linux, Ubuntu, and other mainstream distributions
-- **macOS:** Compatible (not extensively tested)
+- **macOS:** Compatible (not tested)
 
 *Windows 8-7 compilation is only available with Go 1.20 or earlier.
 
@@ -158,7 +158,7 @@ Turbo uses a dual licensing model.
 
 * **Commercial License:**
 
-    If you wish to use Turbo in a proprietary project, integrate it into a closed product, or do not wish to comply with the AGPL v3 requirements, you may purchase a commercial license.
+    For those who intend to use Turbo in a proprietary project, integrate it into a closed-source product, or opt out of the AGPL v3 requirements, a commercial license is available for purchase.
 
     For commercial licensing inquiries, please visit one of the following:
     - https://okzgn.com/#contact
