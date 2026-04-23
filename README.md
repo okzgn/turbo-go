@@ -22,7 +22,8 @@ A cross-platform, high-performance HTTP web server with a real-time, visual mana
 
 ## Project Status
 
-This repository codebase is actively being finalized ahead of the upcoming version 2.3.**rc1** release. The source code and initial files will be published shortly.
+This repository codebase is actively being finalized ahead of a stable release. 
+The binaries for v2.3.rc1 are available in the Releases section.
 
 ---
 
