@@ -10,12 +10,6 @@ A cross-platform, high-performance HTTP web server with a real-time, visual mana
 
 ---
 
-## Project Status
-
-This repository codebase is actively being finalized ahead of the upcoming version 2.3.**rc1** release. The source code and initial files will be published shortly.
-
----
-
 ## Key Features
 - **High-Performance:** Built for speed and efficiency.
 - **Visual Management:** Real-time, intuitive administrative interface.
@@ -23,6 +17,12 @@ This repository codebase is actively being finalized ahead of the upcoming versi
 - **Security:** Integrated SSL certificate management and concurrency safety.
 - **Traffic Control:** Fine-grained request rate and size limiting.
 - **Deep Customization:** URI rewrites, request preprocessing, headers/MIMEs, and indexes.
+
+---
+
+## Project Status
+
+This repository codebase is actively being finalized ahead of the upcoming version 2.3.**rc1** release. The source code and initial files will be published shortly.
 
 ---
 
