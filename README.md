@@ -106,7 +106,7 @@ Turbo uses a dual licensing model.
 
 * **Third-Party Components:**
 
-    The `customNetHttp` package contains a modified version of the Go standard library `net/http` (based on Go v1.19/1.18), which is distributed under the **BSD 3-Clause License**. Please refer to the `customNetHttp/LICENSE` and `customNetHttp/NOTICE` files within that directory for full details and attribution.
+    The `customNetHttp` package contains a modified version of the Go standard library `net/http` (based on Go v1.19/1.18), which is distributed under the **BSD 3-Clause License**. Please refer to the `customNetHttp/LICENSE`, `customNetHttp/PATENTS` and `customNetHttp/NOTICE` files within that directory for full details and attribution.
 
 ---
 
