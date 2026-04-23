@@ -78,6 +78,10 @@ sudo setcap cap_net_bind_service=+ep ./turbo
 ./turbo
 ```
 
+### Execution
+- **Windows:** Run `turbo.exe` as Administrator for ports 80/443.
+- **Linux:** Grant execution permissions with `chmod +x` and run it: `./turbo` (requires free ports 80 and 443).
+
 ---
 
 ### Supported Platforms
@@ -97,6 +101,13 @@ GOOS=darwin GOARCH=amd64 go build -o turbo-darwin-amd64 .
 # macOS ARM64 (Apple Silicon)
 GOOS=darwin GOARCH=arm64 go build -o turbo-darwin-arm64 .
 ```
+---
+
+### Known Limitations
+- Windows 8, 7 support requires Go 1.20 or earlier for compilation.
+- Linux distributions like Alpine or Amazon Linux have not been tested.
+- Admin interface not extensively tested on older OS versions or old browsers.
+
 ---
 
 ## Contributing
