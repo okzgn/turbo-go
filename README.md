@@ -6,6 +6,14 @@
 
 A cross-platform, high-performance HTTP web server with a real-time, visual management interface. Manage unlimited domains and multi-level wildcard subdomains, SSL certificates, URI rewrites, request preprocessing, fine-grained request rate and size limiting, as well as custom aliases, headers, MIMEs, and indexes.
 
+---
+
+## Project Status: In Development
+
+This repository is actively being finalized ahead of the upcoming version 2.3.**rc1** release. The source code and initial files will be published shortly.
+
+---
+
 ## Key Features
 - **High-Performance:** Built for speed and efficiency.
 - **Visual Management:** Real-time, intuitive administrative interface.
@@ -14,6 +22,8 @@ A cross-platform, high-performance HTTP web server with a real-time, visual mana
 - **Traffic Control:** Fine-grained request rate and size limiting.
 - **Deep Customization:** URI rewrites, request preprocessing, headers/MIMEs, and indexes.
 
+---
+
 ## Architecture & Design Philosophy
 
 Turbo is engineered as a high-performance, single-binary solution with a focus on efficiency, developer experience, and architectural integrity.
@@ -21,6 +31,8 @@ Turbo is engineered as a high-performance, single-binary solution with a focus o
 *   **Real-Time Admin Interface:** Turbo provides a fully embedded, zero-dependency Web GUI, enabling real-time management of domains, SSL certificates, and traffic policies without requiring external tooling or complex deployments.
 
 *   **Source Code Integrity:** Turbo is open-source, and its source code is available for review and modification. However, the backend logic is intentionally obfuscated to raise the barrier against casual code copying. This design choice safeguards our core routing engine and management logic from trivial reproduction, while still allowing dedicated users to analyze, audit, or modify the codebase through the necessary effort of reverse-engineering and analysis.
+
+---
 
 ## Requirements
 
@@ -44,6 +56,8 @@ Turbo is engineered as a high-performance, single-binary solution with a focus o
 - **Storage:** ~100 MB for binary + websites + configuration files
 - **Network:** Standard HTTP/HTTPS ports (80, 443) require elevated privileges on Linux/macOS
 
+---
+
 ## Installation
 
 ### From Source
@@ -62,6 +76,8 @@ sudo setcap cap_net_bind_service=+ep ./turbo
 ./turbo
 ```
 
+---
+
 ### Supported Platforms
 ```bash
 # Linux x86-64
@@ -79,11 +95,6 @@ GOOS=darwin GOARCH=amd64 go build -o turbo-darwin-amd64 .
 # macOS ARM64 (Apple Silicon)
 GOOS=darwin GOARCH=arm64 go build -o turbo-darwin-arm64 .
 ```
-
-## Project Status: In Development
-
-This repository is actively being finalized ahead of the upcoming version 2.3.**rc1** release. The source code and initial files will be published shortly.
-
 ---
 
 ## Contributing
