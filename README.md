@@ -102,7 +102,7 @@ This repository is actively being finalized ahead of the upcoming version 2.3.**
 
 2. **Suggest Features:** Describe your use case and expected behavior in a GitHub issue.
 
-3. **Security Concerns:** For non-critical vulnerabilities, open a GitHub issue. For critical vulnerabilities, please contact us privately before disclosing publicly at:
+3. **Security Concerns:** For non-critical vulnerabilities, open a GitHub issue. For critical vulnerabilities, please contact us privately and await our response and decision before disclosing publicly at:
    - https://okzgn.com/#contact
    - https://okzgn.github.io/#contact
 
