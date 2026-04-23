@@ -88,6 +88,29 @@ While this repository is currently empty, the source code and initial files will
 
 ---
 
+## Contributing
+
+1. **Report Issues:** Found a bug? Open an issue and include:
+   - **Steps to reproduce:** A clear, step-by-step description of how to trigger the issue.
+   - **Expected behavior:** What you expected to happen.
+   - **Actual behavior:** What actually happened, including any error messages or logs.
+   - **Environment:**
+     - OS and version (e.g., Ubuntu 22.04, Windows 11)
+     - Architecture (e.g., x86-64, ARM64)
+     - Environment description (e.g., RAM, disk space, running processes...)
+     - Go version (if building from source)
+     - Relevant Turbo configuration files, denial logs, visit logs (redact sensitive data before sharing)
+     - Turbo version or commit hash
+
+2. **Suggest Features:** Describe your use case and expected behavior in a GitHub issue.
+
+3. **Security Concerns:** For non-critical vulnerabilities, open a  GitHub issue. For critical vulnerabilities, please contact us privately before disclosing publicly at:
+   - https://okzgn.com/#contact
+   - https://okzgn.github.io/#contact
+
+
+---
+
 ## License
 
 Turbo uses a dual licensing model.
