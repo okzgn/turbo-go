@@ -1,4 +1,4 @@
-![Turbo Icon](turbo.png){: width="150" }
+![Turbo Icon](turbo.png)
 
 # Turbo
 
