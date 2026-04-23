@@ -120,7 +120,7 @@ Once Turbo is running, access the admin interface at:
 
 ---
 
-### Known Limitations
+## Known Limitations
 - Windows 8, 7 support requires Go 1.20 or earlier for compilation.
 - Linux distributions like Alpine or Amazon Linux have not been tested.
 - Admin interface not extensively tested on older OS versions or old browsers.
