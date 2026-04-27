@@ -10,12 +10,6 @@ A cross-platform, high-performance HTTP web server with a real-time, visual mana
 
 ---
 
-## Documentation
-
-**Documentation (website aliases):** [turbo.okzgn.com](https://turbo.okzgn.com), [turbo-server.github.io](https://turbo-server.github.io)
-
----
-
 ## Key Features
 - **High-Performance:** Built for speed and efficiency.
 - **Visual Management:** Real-time, intuitive administrative interface.
@@ -26,9 +20,15 @@ A cross-platform, high-performance HTTP web server with a real-time, visual mana
 
 ---
 
+## Documentation
+
+**Documentation (website aliases):** [turbo.okzgn.com](https://turbo.okzgn.com), [turbo-server.github.io](https://turbo-server.github.io)
+
+---
+
 ## Project Status
 
-This repository codebase is actively being finalized ahead of a stable release. 
+This **repository codebase is actively being finalized** ahead of a stable release. 
 The binaries for v2.3.rc1 are available in the Releases section.
 
 ---
