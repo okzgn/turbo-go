@@ -28,8 +28,8 @@ A cross-platform, high-performance HTTP web server with a real-time, visual mana
 
 ## Project Status
 
+The binaries for **v2.3.rc1 are available** in the Releases section.
 This **repository codebase is actively being finalized** ahead of a stable release. 
-The binaries for v2.3.rc1 are available in the Releases section.
 
 ---
 
