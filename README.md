@@ -4,7 +4,7 @@
 
 ![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)
 ![Go Version](https://img.shields.io/github/go-mod/go-version/okzgn/turbo-go)
-![Status](https://img.shields.io/badge/Status-In%20Development-yellow)
+![Status](https://img.shields.io/badge/Status-Release%20Candidate-orange)
 
 A cross-platform, high-performance HTTP web server with a real-time, visual management interface. Manage unlimited domains and multi-level wildcard subdomains, SSL certificates, URI rewrites, request preprocessing, fine-grained request rate and size limiting, as well as custom aliases, headers, MIMEs, and indexes.
 
@@ -14,7 +14,7 @@ A cross-platform, high-performance HTTP web server with a real-time, visual mana
 - **High-Performance:** Built for speed and efficiency.
 - **Visual Management:** Real-time, intuitive administrative interface.
 - **Flexible Domain Handling:** Unlimited domains, multi-level wildcard subdomains and aliases.
-- **Security:** Integrated SSL certificate management and concurrency safety.
+- **Security:** Integrated SSL certificate management and concurrency safety. See [Dependencies](#dependencies).
 - **Traffic Control:** Fine-grained request rate and size limiting.
 - **Deep Customization:** URI rewrites, request preprocessing, headers/MIMEs, and indexes.
 
@@ -22,48 +22,30 @@ A cross-platform, high-performance HTTP web server with a real-time, visual mana
 
 ## Documentation
 
-**Documentation (website aliases):** [turbo.okzgn.com](https://turbo.okzgn.com), [turbo-server.github.io](https://turbo-server.github.io)
-
----
-
-## Project Status
-
-The binaries for **v2.3.rc1 are available** in the Releases section.
-This **repository codebase is actively being finalized** ahead of a stable release. 
-
----
-
-## Architecture & Design Philosophy
-
-Turbo is engineered as a high-performance, single-binary solution with a focus on efficiency, developer experience, and architectural integrity.
-
-*   **Real-Time Admin Interface:** Turbo provides a fully embedded, zero-dependency Web GUI, enabling real-time management of domains, SSL certificates, and traffic policies without requiring external tooling or complex deployments.
-
-*   **Source Code Integrity:** Turbo is open-source, and its source code is available for review and modification. However, the backend logic is intentionally obfuscated to raise the barrier against casual code copying. This design choice safeguards our core routing engine and management logic from trivial reproduction, while still allowing dedicated users to analyze, audit, or modify the codebase through the necessary effort of reverse-engineering and analysis.
+**Website aliases:** [turbo.okzgn.com](https://turbo.okzgn.com), [turbo-server.github.io](https://turbo-server.github.io)
 
 ---
 
 ## Requirements
 
 ### Operating Systems
-- **Windows:** Windows 11, 10, 8*, 7*
-- **Linux:** Alpine, Amazon Linux, Ubuntu, and other mainstream distributions
-- **macOS:** Compatible (not tested)
-
-*Windows 8-7 compilation is only available with Go 1.20 or earlier.
+- **Windows:** Windows 11, 10, 8*, 7*.
+- **Linux:** Ubuntu, Alpine, Amazon Linux, and other mainstream distributions.
+- **macOS:** Compatible.
 
 ### System Architecture
-- **x86-64** (Intel/AMD 64-bit processors)
-- **ARM64** (ARMv8 and later, including AWS Graviton processors)
+- **x86-64** (Intel/AMD 64-bit processors).
+- **ARM64** (ARMv8 and later, including AWS Graviton processors).
 
 ### Dependencies
-- **Go 1.18+** (for building from source)
-- No external runtime dependencies, Turbo is distributed as a single, self-contained binary
+- **Go 1.18+** (for building from source).
+- No external runtime dependencies — Turbo is distributed as a single, self-contained binary, except for **[Certbot](https://certbot.eff.org/)** for SSL certificate issuance.
 
 ### Minimum Requirements
-- **RAM:** 512 MB minimum (runtime) · 1 GB+ recommended (build from source)
-- **Storage:** ~100 MB for binary + websites + configuration files
-- **Network:** Standard HTTP/HTTPS ports (80, 443) require elevated privileges on Linux/macOS
+- **CPU:** 1 vCPU minimum (2.5 GHz clock speed or higher recommended).
+- **RAM:** 128 MB minimum (runtime) or 1 GB+ recommended (build from source).
+- **Storage:** ~100 MB for binary + websites + configuration files.
+- **Network:** Standard HTTP/HTTPS ports (80, 443) require elevated privileges on Linux/macOS.
 
 ---
 
@@ -121,14 +103,42 @@ Once Turbo is running, access the admin interface at:
 - **Username:** `Turbo`
 - **Password:** `Admin`
 
-> Change the default credentials immediately after your first login.
+> Change the default credentials immediately after your first login, **or compile from source**. See [GUI section](https://turbo-server.github.io/#Get-started-on-interface).
 
 ---
 
 ## Known Limitations
-- Windows 8, 7 support requires Go 1.20 or earlier for compilation.
-- Linux distributions like Alpine or Amazon Linux have not been tested.
-- Admin interface not extensively tested on older OS versions or old browsers.
+- GUI and API only available in spanish language.
+- Linux distributions like Alpine or Amazon Linux have not been tested*. macOS has not been tested.
+- Admin interface (GUI) not extensively tested on older OS versions or old browsers.
+- *Windows 8, 7 support requires Go 1.20 or earlier for compilation.
+- The [HTTP/2 Rapid Reset vulnerability](https://blog.cloudflare.com/technical-breakdown-http2-rapid-reset-ddos-attack) patch has not been implemented in this open-source release; it is available exclusively in the [commercial version](#commercial-version).
+
+*Ubuntu 24.04 LTS has been tested and is supported. **Previous versions were successfully and extensively tested on Alpine and Amazon Linux.**
+
+---
+
+## Commercial Version
+
+The commercial license includes the following features:
+
+- **Rust Plugins:** Extend and customize Turbo's behavior with high-performance native plugins written in Rust (e.g., dynamic content serving as a [CGI alternative](https://turbo-server.github.io/#so-3), and more).
+- **HTTP/2 Rapid Reset Mitigation:** Full patch and protection against the [HTTP/2 Rapid Reset vulnerability](https://blog.cloudflare.com/technical-breakdown-http2-rapid-reset-ddos-attack) (CVE-2023-44487).
+- **Multilingual GUI and API:** Full support for multiple languages in both the admin interface and API responses.
+
+Interested in the commercial version? Contact us:
+- https://okzgn.com/#contact
+- https://okzgn.github.io/#contact
+
+---
+
+## Architecture & Design Philosophy
+
+Turbo is engineered as a high-performance, single-binary solution with a focus on efficiency, developer experience, and architectural integrity.
+
+*   **Real-Time Admin Interface:** Turbo provides a fully embedded, zero-dependency Web GUI, enabling real-time management of domains, SSL certificates, and traffic policies without requiring external tooling or complex deployments. See [Dependencies](#dependencies).
+
+*   **Source Code Integrity:** Turbo is open-source, and its source code is available for review and modification. However, the backend logic is **intentionally obfuscated** to raise the barrier against casual code copying. This design choice safeguards our core routing engine and management logic from trivial reproduction, while still allowing dedicated users to analyze, audit, or modify the codebase through the necessary effort of reverse-engineering and analysis.
 
 ---
 
