@@ -39,10 +39,10 @@ A cross-platform, high-performance HTTP web server with a real-time, visual mana
 
 ### Dependencies
 - **Go 1.18+** (for building from source).
-- No external runtime dependencies — Turbo is distributed as a single, self-contained binary, except for **[Certbot](https://certbot.eff.org/)** for SSL certificate issuance.
+- No external runtime dependencies — Turbo is distributed as a single, self-contained binary, except for **[Certbot](https://certbot.eff.org/)** for SSL certificate issuance. See [Commercial Version](#commercial-version).
 
 ### Minimum Requirements
-- **CPU:** 1 vCPU minimum (2.5 GHz clock speed or higher recommended).
+- **CPU:** 1 vCPU minimum (2.2 GHz clock speed or higher recommended).
 - **RAM:** 128 MB minimum (runtime) or 1 GB+ recommended (build from source).
 - **Storage:** ~100 MB for binary + websites + configuration files.
 - **Network:** Standard HTTP/HTTPS ports (80, 443) require elevated privileges on Linux/macOS.
@@ -105,16 +105,26 @@ Once Turbo is running, access the admin interface at:
 
 > Change the default credentials immediately after your first login, **or compile from source**. See [GUI section](https://turbo-server.github.io/#Get-started-on-interface).
 
+**Notes:**
+
+- If you run `./turbo` directly or without a `turbo.config` file, the folder to be served must be registered through the GUI using the exact site name routed to your server, the exact IP address, or `localhost` if running locally.
+- The **GUI can be customized or fully replaced** by modifying the files inside the `turbo.dev` folder.
+- On Windows, use [`rsrc`](https://github.com/akavel/rsrc) (installed beforehand) to generate a `.syso` file from `turbo.windows.manifest` and `turbo.icon.png`, then link it with the executable to produce an `.exe` with a custom icon.
+
+**Logs:**
+- To log rate-limiter denials, create an accessible file named `turbo.denials`; to log every access to every file or route on the server, create one named `turbo.visits`. Do not create these files if logging is not needed, as they can grow very large.
+- Any other log will be shown at `stdout` or `console`.
+
 ---
 
 ## Known Limitations
-- GUI and API only available in spanish language.
-- Linux distributions like Alpine or Amazon Linux have not been tested*. macOS has not been tested.
+- Open-source GUI and API only available in spanish language.
+- Linux distributions like Alpine or Amazon Linux have not been tested. macOS has not been tested.
+  > **Ubuntu 24.04 LTS has been tested and is supported. Previous versions were successfully and extensively tested on Alpine and Amazon Linux.**
 - Admin interface (GUI) not extensively tested on older OS versions or old browsers.
-- *Windows 8, 7 support requires Go 1.20 or earlier for compilation.
+- Windows 8*-7* support requires Go 1.20 or earlier for compilation.
 - The [HTTP/2 Rapid Reset vulnerability](https://blog.cloudflare.com/technical-breakdown-http2-rapid-reset-ddos-attack) patch has not been implemented in this open-source release; it is available exclusively in the [commercial version](#commercial-version).
-
-*Ubuntu 24.04 LTS has been tested and is supported. **Previous versions were successfully and extensively tested on Alpine and Amazon Linux.**
+- **See [Commercial Version](#commercial-version) features.**
 
 ---
 
@@ -122,11 +132,12 @@ Once Turbo is running, access the admin interface at:
 
 The commercial license includes the following features:
 
-- **Rust Plugins:** Extend and customize Turbo's behavior with high-performance native plugins written in Rust (e.g., dynamic content serving as a [CGI alternative](https://turbo-server.github.io/#so-3), and more).
 - **HTTP/2 Rapid Reset Mitigation:** Full patch and protection against the [HTTP/2 Rapid Reset vulnerability](https://blog.cloudflare.com/technical-breakdown-http2-rapid-reset-ddos-attack) (CVE-2023-44487).
+- **Rust Plugins:** Extend and customize Turbo's behavior with high-performance native plugins written in Rust (e.g., dynamic content serving as a [CGI alternative](https://turbo-server.github.io/#so-3), and more).
 - **Multilingual GUI and API:** Full support for multiple languages in both the admin interface and API responses.
+- **More powerful features:** Integrated SSL certificate issuance, smarter rate-limiting, **unobfuscated variables, updated customNetHttp**, and more.
 
-Interested in the commercial version? Contact us:
+Interested in the commercial version? Contact:
 - https://okzgn.com/#contact
 - https://okzgn.github.io/#contact
 
@@ -138,7 +149,9 @@ Turbo is engineered as a high-performance, single-binary solution with a focus o
 
 *   **Real-Time Admin Interface:** Turbo provides a fully embedded, zero-dependency Web GUI, enabling real-time management of domains, SSL certificates, and traffic policies without requiring external tooling or complex deployments. See [Dependencies](#dependencies).
 
-*   **Source Code Integrity:** Turbo is open-source, and its source code is available for review and modification. However, the backend logic is **intentionally obfuscated** to raise the barrier against casual code copying. This design choice safeguards our core routing engine and management logic from trivial reproduction, while still allowing dedicated users to analyze, audit, or modify the codebase through the necessary effort of reverse-engineering and analysis.
+*   **Source Code Integrity:** Turbo is open-source, and its source code is available for review and modification. However, **some of the logic is intentionally obfuscated** to raise the barrier against casual code copying. This design choice safeguards our core routing engine and management logic from trivial reproduction, while still allowing dedicated users to analyze, audit, or modify the codebase through the necessary effort of reverse-engineering and analysis.
+
+*   **Logic Transparency & Auditability:** Turbo maintains a distinct separation between internal state abstraction and operational logic. While internal variable naming is obfuscated, function signatures and system workflows remain descriptive and transparent. This architectural balance ensures that the server’s operational flow remains fully auditable for security review and compliance, providing the necessary transparency for professional evaluation while effectively deterring the trivial reproduction of proprietary implementation details. **The consistent structure of the function flow facilitates mapping via standard static analysis or automated refactoring tools, allowing qualified auditors to de-obfuscate the codebase for deep inspection whenever necessary.**
 
 ---
 

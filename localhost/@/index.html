@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html spellcheck="false" lang="en">
+<head>
+	<meta charset="UTF-8">
+
+	<title>index.html | Turbo</title>
+	<link rel="icon" href="/admin:i.png">
+
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<meta name="description" content="A cross-platform, high-performance HTTP web server with a real-time, visual management interface. Manage unlimited domains and multi-level wildcard subdomains, SSL certificates, URI rewrites, request preprocessing, fine-grained request rate and size limiting, as well as custom aliases, headers, MIMEs, and indexes.">
+    <meta name="author" content="OKZGN">
+
+	<meta name="format-detection" content="telephone=no">
+
+	<meta name="theme-color" content="#f4f4f5" media="(prefers-color-scheme: light)">
+	<meta name="theme-color" content="#000d1a" media="(prefers-color-scheme: dark)">
+
+	<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self'; child-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'">
+
+    <style>
+        :root {
+            --white: #fff;
+            --silver: #ccc;
+            --bg: #f4f4f5;
+            --black: #000d1a;
+            --accent: #f26522;
+            --accentDark: #d95a1e;
+            --blue: #004e9b;
+            --themeColor: #ffb164;
+        }
+        *, ::after, ::before {
+            border: 0;
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+
+            scrollbar-color: var(--themeColor) var(--accentDark);
+            scrollbar-width: thin;
+
+            font-family: -apple-system, BlinkMacSystemFont,
+            "Segoe UI", system-ui, Roboto, Oxygen-Sans, Ubuntu, Cantarell,
+            "Helvetica Neue", sans-serif;
+
+            font-size: inherit;
+            word-spacing: 0.1rem;
+            line-height: 1.25;
+            accent-color: var(--accent);
+            outline: 2px solid transparent;
+            color-scheme: light dark;
+        }
+        :active, :focus { -webkit-tap-highlight-color: transparent; }
+        ::selection {
+            opacity: 1;
+            background: var(--accentDark);
+            color: var(--white);
+        }
+        ::placeholder {
+            color: var(--black);
+            opacity: 0.5;
+        }
+        ::-webkit-scrollbar {
+            width: 0.5rem;
+            height: 0.5rem;
+        }
+        ::-webkit-scrollbar-thumb { background: var(--themeColor); }
+        ::-webkit-scrollbar-track { background: var(--accentDark); }
+        html, body {
+            width: 100%;
+            min-height: 100vh;
+            min-height: 100dvh;
+        }
+        body {
+            background: var(--bg);
+            overflow-x: hidden;
+            scroll-behavior: smooth;
+            gap: 1.5rem;
+            padding: 1rem 1.5rem 2.75rem 1.5rem;
+        }
+        body, h1 a, main {
+            display: flex;
+            flex-flow: column;
+            justify-content: center;
+            align-items: center;
+            gap: 1.5rem;
+        }
+        a {
+            transition: all 0.25s;
+            color: var(--accentDark);
+            text-decoration: none;
+            padding: 0.5rem 1rem;
+            border-radius: 1rem;
+            border: 2px solid transparent;
+        }
+        a:hover, a:active, a:focus {
+            border-color: var(--accentDark);
+        }
+        a:focus-visible {
+            outline-color: var(--accentDark);
+            outline-offset: 2px;
+        }
+        h1 { font-size: 2rem; }
+        h1 a { color: var(--black); }
+        h1 img {
+            height: 6rem;
+            position: relative;
+            top: 0.75rem;
+            animation: fire 3s linear infinite alternate;
+        }
+        @keyframes fire {
+            100% {
+                transform: scale(1.1);
+                filter: drop-shadow(0 0 0.5rem var(--accent));
+            }
+        }
+        nav { font-size: 1.5rem; }
+        nav span {
+            padding: 0 1rem 1.5rem 1rem;
+            min-width: 50vw;
+            display: block;
+            color: var(--blue);
+        }
+        nav div {
+            padding-top: 1.5rem;
+            gap: 0.5rem;
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        main p {
+            width: 50%;
+            border: 2px solid var(--silver);
+            padding: 1rem;
+            border-radius: 1rem;
+            background: var(--white);
+            box-shadow: 0 0 1rem var(--silver);
+        }
+        main p a {
+            display: inline;
+            padding: 0;
+            border: 0;
+        }
+        main p a:hover, main p a:active, main p a:focus {
+            text-decoration: underline;
+        }
+        h1 a:hover, h1 a:active, h1 a:focus {
+            border-color: var(--silver);
+        }
+        .cta {
+            font-size: 1.5rem;
+            color: var(--blue);
+        }
+        .cta:hover, .cta:active, .cta:focus {
+            background: var(--blue);
+            color: var(--white);
+            border-color: var(--blue);
+        }
+        p a {
+            padding: 0.125rem 0.25rem;
+            display: inline-block;
+        }
+        #license strong {
+            font-size: 1.25rem;
+            margin-bottom: 0.5rem;
+            display: block;
+        }
+        #license span {
+            display: block;
+            margin-top: 0.5rem;
+        }
+        h1 a, nav, footer {
+            text-align: center;
+        }
+        footer, nav div {
+            border-top: 1px solid var(--silver);
+        }
+        footer {
+            padding-top: 1rem;
+            width: 50%;
+            opacity: 0.5;
+        }
+        @media screen and (max-width: 640px) {
+            main p, footer { width: 100% }
+        }
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #000d1a;
+                --black: #f4f4f5;
+                --white: #002447;
+                --silver: #004e9b;
+                --blue: #8ac4ff;
+                --accentDark: var(--themeColor);
+            }
+            *, ::after, ::before {
+                scrollbar-color: var(--blue) var(--silver);
+            }
+            ::-webkit-scrollbar-thumb { background: var(--blue); }
+            ::-webkit-scrollbar-track { background: var(--silver); }
+        }
+    </style>
+    <script>
+        document.addEventListener('DOMContentLoaded', function(){
+            var a = document.getElementById('license'), b = document.getElementById('license_link');
+            if(b){
+                b.addEventListener('click', function(c){
+                    c.preventDefault(), a.toggleAttribute('hidden')
+                });
+            }
+        });
+    </script>
+</head>
+<body>
+	<header>
+        <h1>
+            <a target="_blank" href="https://github.com/okzgn/turbo-go">
+                <img src="/admin:i.png" alt="Turbo Server Logo">
+                <b>Turbo</b>
+            </a>
+        </h1>
+    </header>
+	<main>
+		<p>
+            <b>A cross-platform, high-performance HTTP web server with a <a href="/admin:">real-time, visual management interface</a>. Manage unlimited domains and multi-level wildcard subdomains, SSL certificates, URI rewrites, request preprocessing, fine-grained request rate and size limiting, as well as custom aliases, headers, MIMEs, and indexes.</b>
+        </p>
+        <nav>
+            <span>index.html</span>
+            <div>
+                <a class="cta" href="/admin:"><b>Go admin ↗</b></a>
+                <a target="_blank" href="https://github.com/okzgn/turbo-go">Docs ↗</a>
+                <a id="license_link" href="#license">License ↙</a>
+                <a target="_blank" href="https://okzgn.github.io/#contact">Author ↗</a>
+            </div>
+        </nav>
+		<p id="license" hidden>
+            <strong>License</strong>
+            <span>This software is distributed under the GNU Affero General Public License v3.0 (AGPL v3) as detailed above (or see <a target="_blank" href="https://www.gnu.org/licenses/agpl-3.0.html">https://www.gnu.org/licenses/agpl-3.0.html</a>).</span>
+            <span>If you wish to use Turbo in a commercial/proprietary product without complying with the provisions of the AGPL v3 (such as the requirement to release source code of modifications accessible over a network), you must obtain a commercial license.</span>
+            <span>A commercial license grants you the right to use, modify, and distribute Turbo in proprietary applications without the obligations of the AGPL v3.</span>
+            <span>For commercial licensing inquiries, please visit one of the following:
+                <br>- <a target="_blank" href="https://okzgn.com/#contact">https://okzgn.com/#contact</a>
+                <br>- <a target="_blank" href="https://okzgn.github.io/#contact">https://okzgn.github.io/#contact</a>
+            </span>
+        </p>
+    </main>
+	<footer>Copyright &copy; 2026 OKZGN</footer>
+</body>
+</html>

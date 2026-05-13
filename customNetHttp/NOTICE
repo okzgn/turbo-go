@@ -1,0 +1,17 @@
+NOTICE
+
+This directory (customNetHttp) contains a modified version of the
+Go standard library package net/http, as well as components from
+golang.org/x/net and golang.org/x/text, based on Go version 1.19, or 1.18.
+
+Original source: https://github.com/golang/go
+Copyright 2009 The Go Authors. All rights reserved.
+
+The original code is licensed under the BSD 3-Clause License,
+reproduced in the LICENSE file in this directory.
+
+The additional patent grant from Google Inc. is reproduced in
+the PATENTS file in this directory.
+
+Modifications made by OKZGN, 2026.
+The modifications are also distributed under the BSD 3-Clause License.

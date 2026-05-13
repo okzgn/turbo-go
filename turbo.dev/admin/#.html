@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html spellcheck="false" data-signin>
+
+<head>
+<title>Turbo | Administración</title>
+<link rel="icon" href="/admin:i.png">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, user-scalable=no">
+<meta name="description" content="Acceso a la interfaz de administración del servidor web.">
+<meta name="author" content="Elías A. Soshina">
+<meta name="theme-color" content="#004e9b">
+<link rel="stylesheet" href="/admin:m.css">
+<style>
+body { display: flex; justify-content: center; }
+h1 { margin-top: 2rem; }
+h1 img { margin-right: 1rem; height: 3.125rem; }
+h1, h1 a { line-height: 0; color: #000; }
+h1 img, h1 span { display: inline-block; vertical-align: middle; }
+h1 span { font-size: 1.875rem; }
+h1, h2 { margin-bottom: 1rem; }
+h2 { font-size: 1.25rem; color: rgba(0, 0, 0, 0.5); }
+form { text-align: center; align-self: center; }
+fieldset { background: linear-gradient(to bottom, #fff , transparent 1rem); box-shadow: 0 0 3rem rgba(0, 0, 0, 0.125); width: 15rem; }
+[data-l] { position: relative; left: 0; animation: a 0.5s linear 0s alternate infinite forwards; box-shadow: 0 0 0.5rem rgba(0, 0, 0, 0.125); }
+@keyframes a { to { left: 0.25rem; background: #331b68; color: rgba(255, 255, 255, 0.75); } }
+input { border: 0; line-height: 1; background: transparent; display: inline-block; }
+input[type="text"], input[type="password"] { padding: 1rem; border-top: 1px solid rgba(0, 0, 0, 0.25); background: rgba(255, 255, 255, 0.5); width: 100%; }
+input[type="text"]:hover, input[type="password"]:hover, input[type="text"]:focus, input[type="password"]:focus { border-color: #000; background: #fff; }
+input[type="submit"]{ padding-top: 1rem; padding-bottom: 1rem; background: #004e9b; color: #fff; font-weight: bold; cursor: pointer; margin: 0 0 0.5rem auto; width: calc(100% - 6rem); font-size: 1.125rem; }
+input[type="submit"]:hover, input[type="submit"]:active, input[type="submit"]:focus { background: #001b68; color: rgba(255, 255, 255, 0.875); }
+[data-ok], [data-err] { padding: 1rem; background: #c00; color: #fff; }
+[data-ok] { background: #090; }
+[data-hidden] { display: none; }
+</style>
+<script>
+function $(a, b, c, d, e, f, g, h, i, j, k){
+	f = typeof b == 'function',
+	h = function(g){
+		d = (!f ? d : c), d = (typeof d != 'function' ? function(a, b){ console.error(b + ': ' + a); } : d),
+		d.call(this, g, this.status);
+	}
+	e = new XMLHttpRequest(),
+	e.onerror = function(){ h.call(this, 'Intente nuevamente'); },
+	e.onabort = function(){ h.call(this, 'Petición cancelada'); },
+	e.onload = function(){
+		g = this.responseText;
+		switch(this.status){
+			case 200: case 201: case 304:
+				if(g = _(g)){ return h.call(this, g); }
+				(!f ? c : b).call(this, this.responseText, this.status);
+			break;
+			default: h.call(this, g);
+		}
+	};
+	if(self['URLSearchParams']){
+		k = a.indexOf('?'), i = (k != -1 ? a.slice(k + 1) : ''), j = new URLSearchParams(i);
+		a = !i ? a : a.substring(0, k) + (j.toString() || i);
+	}
+	e.open('POST', a), e.send(!f ? b : null);
+}
+function _(a){ return (a.indexOf('data-signin') != -1 ? 'Sin respuesta' : (!a ? 'Vuelva a intentarlo' : null)); }
+function A(a, b){
+	delete G.dataset.ok; delete G.dataset.err;
+	G.dataset[b || 'err'] = '', G.innerText = a, clearTimeout(E.T), E.T = setTimeout(function(){ G.dataset.hidden = ''; }, 6789);
+}
+document.addEventListener('DOMContentLoaded', function(G, E, T, U, P){
+	document.ondragstart = document.onselectstart = function(a){ return a.preventDefault(); };
+	G = document.getElementById('G'), E = document.getElementById('E'),
+	T = document.querySelector('[type="submit"]'),
+	U = document.querySelector('[name="u"]'), P = document.querySelector('[name="p"]');
+	E.onsubmit = function(I, M){
+		I.preventDefault(), M = 'ok';
+		if(!U.value.length){ return U.focus(); }
+		if(!P.value.length){ return P.focus(); }
+		T.blur(), T.dataset.l = '', delete G.dataset.hidden,
+		$(E.getAttribute('action'), new FormData(E),
+		function(Z){
+			delete T.dataset.l;
+			if(Z.indexOf(M) === 0){
+				setTimeout(function(){ self.location = '/admin:inside:?' + Z; }, 567);
+				return A('Ingresando. . .', M);
+			}
+			A(Z);
+		},
+		function(Z){ delete T.dataset.l, U.value = '', P.value = '', A('Inautorizado'); });
+	};
+});
+</script>
+</head>
+<body>
+<form id="E" action="/admin:" method="post">
+<fieldset>
+	<h1><a target="_blank" href="https://okzgn.com"><img src="/admin:i.png" alt="Logotipo de OKZGN"><span>Turbo</span></a></h1>
+	<h2>Administración</h2>
+	<p id="G" data-hidden></p>
+	<input type="text" name="u" placeholder="Usuario">
+	<input type="password" name="p" placeholder="Contraseña"><input type="submit" value="Entrar >">
+</fieldset>
+</form>
+</body>
+</html>
