@@ -135,7 +135,7 @@ The commercial license includes the following features:
 - **HTTP/2 Rapid Reset Mitigation:** Full patch and protection against the [HTTP/2 Rapid Reset vulnerability](https://blog.cloudflare.com/technical-breakdown-http2-rapid-reset-ddos-attack) (CVE-2023-44487).
 - **Rust Plugins:** Extend and customize Turbo's behavior with high-performance native plugins written in Rust (e.g., dynamic content serving as a [CGI alternative](https://turbo-server.github.io/#so-3), and more).
 - **Multilingual GUI and API:** Full support for multiple languages in both the admin interface and API responses.
-- **More powerful features:** Integrated SSL certificate issuance, smarter rate-limiting, **unobfuscated variables, updated `customNetHttp`**, and more.
+- **More powerful features:** Integrated SSL certificate issuance, smarter rate-limiting and routing engine, cleaner code (unobfuscated variables), **updated `customNetHttp`**, and more.
 
 Interested in the commercial version? Contact:
 - https://okzgn.com/#contact
