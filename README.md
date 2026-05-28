@@ -43,7 +43,7 @@ A cross-platform, high-performance HTTP web server with a real-time, visual mana
 
 ### Minimum Requirements
 - **CPU:** 1 vCPU minimum (2.2 GHz clock speed or higher recommended).
-- **RAM:** 128 MB minimum (runtime) or 1 GB+ recommended (build from source).
+- **RAM:** 128 MB+ minimum (runtime) or 1 GB+ recommended (build from source).
 - **Storage:** ~100 MB for binary + websites + configuration files.
 - **Network:** Standard HTTP/HTTPS ports (80, 443) require elevated privileges on Linux/macOS.
 
