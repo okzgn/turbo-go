@@ -93,7 +93,7 @@ GOOS=darwin GOARCH=arm64 go build -o turbo-darwin-arm64 .
 
 ## Getting Started
 
-Once Turbo is running, access the admin interface at:
+Once Turbo is running, access the admin interface (GUI) at:
 
 - `http://localhost/admin:`
 - `http://<your-server-ip>/admin:`
