@@ -6,6 +6,8 @@
 ![Go Version](https://img.shields.io/github/go-mod/go-version/okzgn/turbo-go)
 ![Status](https://img.shields.io/badge/Status-Release%20Candidate-orange)
 
+![Turbo GUI](turbo.gui.png)
+
 A cross-platform, high-performance HTTP web server with a real-time, visual management interface. Manage unlimited domains and multi-level wildcard subdomains, SSL certificates, URI rewrites, request preprocessing, fine-grained request rate and size limiting, as well as custom aliases, headers, MIMEs, and indexes.
 
 ---
