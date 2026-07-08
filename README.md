@@ -137,7 +137,7 @@ The commercial license includes the following features:
 - **HTTP/2 Rapid Reset Mitigation:** Full patch and protection against the [HTTP/2 Rapid Reset vulnerability](https://blog.cloudflare.com/technical-breakdown-http2-rapid-reset-ddos-attack) (CVE-2023-44487).
 - **Rust Plugins:** Extend and customize Turbo's behavior with high-performance native plugins written in Rust (e.g., dynamic content serving as a [CGI alternative](https://turbo-server.github.io/#so-3), and more).
 - **Multilingual GUI and API:** Full support for multiple languages in both the admin interface and API responses.
-- **More powerful features:** Integrated SSL certificate issuance, smarter rate-limiting and routing engine, cleaner code (unobfuscated variables), **updated `customNetHttp`**, and more.
+- **More powerful features:** Integrated SSL certificate issuance, smarter rate-limiting and routing engine, cleaner code (unminified variables), **updated `customNetHttp`**, and more.
 
 Interested in the commercial version? Contact:
 - https://okzgn.com/#contact
@@ -151,9 +151,9 @@ Turbo is engineered as a high-performance, single-binary solution with a focus o
 
 *   **Real-Time Admin Interface:** Turbo provides a fully embedded, zero-dependency Web GUI, enabling real-time management of domains, SSL certificates, and traffic policies without requiring external tooling or complex deployments. See [Dependencies](#dependencies).
 
-*   **Source Code Integrity:** Turbo is open-source, and its source code is available for review and modification. However, **some of the logic is intentionally obfuscated** to raise the barrier against casual code copying. This design choice safeguards our core routing engine and management logic from trivial reproduction, while still allowing dedicated users to analyze, audit, or modify the codebase through the necessary effort of reverse-engineering and analysis.
+*   **Source Code Integrity:** Turbo is open-source, and its source code is available for review and modification. However, **some of the logic is intentionally minified**. This started as a personal mental exercise to ensure a deep understanding of the core logic and now serves to raise the barrier against casual code copying. This design choice safeguards our core routing engine and management logic from trivial reproduction, while still allowing dedicated users to analyze, audit, or modify the codebase through the necessary effort of reverse-engineering and analysis.
 
-*   **Logic Transparency & Auditability:** Turbo maintains a distinct separation between internal state abstraction and operational logic. While internal variable naming is obfuscated, function signatures and system workflows remain descriptive and transparent. This architectural balance ensures that the server’s operational flow remains fully auditable for security review and compliance, providing the necessary transparency for professional evaluation while effectively deterring the trivial reproduction of proprietary implementation details. **The consistent structure of the function flow facilitates mapping via standard static analysis or automated refactoring tools, allowing qualified auditors to de-obfuscate the codebase for deep inspection whenever necessary.**
+*   **Logic Transparency & Auditability:** Turbo maintains a distinct separation between internal state abstraction and operational logic. While internal variable naming is minified, function signatures and system workflows remain descriptive and transparent. This architectural balance ensures that the server’s operational flow remains fully auditable for security review and compliance, providing the necessary transparency for professional evaluation while effectively deterring the trivial reproduction of proprietary implementation details. **The consistent structure of the function flow facilitates mapping via standard static analysis or automated refactoring tools, allowing qualified auditors to de-minify the codebase for deep inspection whenever necessary.**
 
 ---
 
