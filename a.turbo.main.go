@@ -144,7 +144,7 @@ func main() {
 	Y[0] = S_["T"] + `\n{TURBO_RESPONSE_CODE}`
 	YF = map[int]bool{0: true}
 
-	B_[";"] = "-.-" // This group of replacements can't be part of C_ because it need to be transfered to frontend
+	B_[";"] = "-.-" // This group of replacements can't be part of C_ because it need to be transferred to frontend
 	B_["#"] = "-,-"
 	B_["&"] = "-_-"
 	BF = map[string]bool{";": true, "#": true, "&": true}
