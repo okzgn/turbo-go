@@ -26,6 +26,7 @@ A cross-platform, high-performance HTTP web server with a real-time, visual mana
 ## Documentation
 
 **Visual documentation (website aliases):** [turbo.okzgn.com](https://turbo.okzgn.com), [turbo-server.github.io](https://turbo-server.github.io)
+**API documentation:** [API_SPECIFICATION.md](./API_SPECIFICATION.md)
 
 ---
 
@@ -113,6 +114,7 @@ Once Turbo is running, access the admin interface (GUI) at:
 - If you run `./turbo` directly or without a `turbo.config` file, the folder to be served must be registered through the GUI using the exact site name routed to your server, the exact IP address, or `localhost` if running locally.
 - The **GUI can be customized or fully replaced** by modifying the files inside the `turbo.dev` folder.
 - On Windows, use [`rsrc`](https://github.com/akavel/rsrc) (installed beforehand) to generate a `.syso` file from `turbo.windows.manifest` and `turbo.icon.png`, then link it with the executable to produce an `.exe` with a custom icon.
+- **Environment Variables:** You can override the default credentials and directory on startup by passing `TURBO_USER`, `TURBO_PASSWORD`, and `TURBO_DIR`. Alternatively, change them via the GUI and save the configuration.
 
 **Logs:**
 - To log rate-limiter denials, create an accessible file named `turbo.denials`; to log every access to every file or route on the server, create one named `turbo.visits`. Do not create these files if logging is not needed, as they can grow very large.
