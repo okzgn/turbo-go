@@ -262,12 +262,6 @@ El backend maneja las creaciones de carpetas en disco y modificaciones en los ma
 
 ---
 
-Aquí tienes la actualización exacta y exhaustiva del **Punto 8** del `API_SPECIFICATION.md`. 
-
-Se ha desglosado con máxima precisión el manejo en caliente (*hot-swapping*) de certificados en memoria, la lógica asíncrona no bloqueante de Certbot, y el comportamiento de las respuestas al cliente.
-
----
-
 ## 8. API de Certificados SSL y Redirecciones (`cfg<KEY>`)
 
 Gestiona la habilitación de HTTPS, redirecciones en la capa de aplicación y la configuración/emisión de certificados mediante Certbot.

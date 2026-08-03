@@ -262,12 +262,6 @@ The backend handles folder creation on disk and modifications to the in-RAM maps
 
 ---
 
-Here is the exact and exhaustive update to Point 8 of `API_SPECIFICATION.md`.
-
-The hot-swapping of certificates in memory, Certbot's non-blocking asynchronous logic, and client response behavior have been broken down with maximum precision.
-
----
-
 ## 8. SSL Certificate and Redirect API (`cfg<KEY>`)
 
 Manages HTTPS enablement, application-layer redirects, and certificate configuration/issuance via Certbot.
