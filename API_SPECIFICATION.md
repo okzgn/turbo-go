@@ -1,80 +1,80 @@
-# Turbo - API, Especificación Técnica
+# Turbo - API, Technical Specification
 
-## 1. Arquitectura General y Protocolo de Comunicación
+## 1. General Architecture and Communication Protocol
 
-El backend de Turbo proporciona una API de estilo **RPC/REST sobre HTTP POST**. Toda la interacción entre la interfaz visual (GUI) o cualquier cliente externo y el servidor se realiza exclusivamente mediante peticiones `POST`.
+The Turbo backend provides an **RPC/REST-style API over HTTP POST**. All interaction between the graphical interface (GUI) or any external client and the server takes place exclusively through `POST` requests.
 
-### 1.1. Rutas de Acceso Principales (Base URLs)
-* **Autenticación Pública / Login:** `/admin:`
-* **Módulo Administrativo Autenticado:** `/admin:inside:`
-* **Cierre de Sesión:** `/admin:signout:`
+### 1.1. Main Access Routes (Base URLs)
+* **Public Authentication / Login:** `/admin:`
+* **Authenticated Administrative Module:** `/admin:inside:`
+* **Sign Out:** `/admin:signout:`
 
-### 1.2. Cabeceras y Seguridad
-* **Método HTTP:** Obligatoriamente `POST` para todas las acciones de la API.
-* **Manejo de Sesión:** El token de autenticación debe enviarse en la cabecera `ok: <token_hash>` o, alternativamente, como parámetro en la URL `?ok=<token_hash>`.
-* **CORS (Intercambio de Origen Cruzado):**
+### 1.2. Headers and Security
+* **HTTP Method:** `POST` is mandatory for all API actions.
+* **Session Handling:** The authentication token must be sent in the `ok: <token_hash>` header or, alternatively, as a URL parameter `?ok=<token_hash>`.
+* **CORS (Cross-Origin Resource Sharing):**
   * `Access-Control-Allow-Origin: default://home`
   * `Access-Control-Allow-Headers: ok`
-* **Ciclo de Vida de la Sesión:** Los tokens son asignados a la IP del cliente y expiran tras **60 segundos (1 minuto)** de inactividad. Cada petición exitosa renueva el temporizador.
+* **Session Lifecycle:** Tokens are assigned to the client's IP address and expire after **60 seconds (1 minute)** of inactivity. Each successful request resets the timer.
 
 ---
 
-## 2. Convenciones de Codificación de Datos y Reemplazo de Caracteres
+## 2. Data Encoding and Character Replacement Conventions
 
-Para evitar que caracteres especiales y delimitadores de URL interfieran o corrompan las peticiones HTTP (especialmente en reglas de reescritura o cabeceras), el backend exige que ciertos caracteres se codifiquen mediante una sustitución predefinida:
+To prevent special characters and URL delimiters from interfering with or corrupting HTTP requests (especially in rewrite rules or headers), the backend requires certain characters to be encoded using a predefined substitution:
 
-### 2.1. Sustituciones Inmutables (Fijas)
-Cualquier parámetro de formulario (como `a`, `b`, `s`, `d`) es procesado en el servidor por la función de reemplazo de caracteres URI. Las siguientes sustituciones deben aplicarse en el lado del cliente antes de enviar la petición:
+### 2.1. Immutable (Fixed) Substitutions
+Any form parameter (such as `a`, `b`, `s`, `d`) is processed on the server by the URI character-replacement function. The following substitutions must be applied client-side before sending the request:
 
-| Carácter Original | Token de Transmisión Esperado |
+| Original Character | Expected Transmission Token |
 |---|---|
-| `;` (Punto y coma) | `-.-` |
-| `#` (Almohadilla) | `-,-` |
+| `;` (Semicolon) | `-.-` |
+| `#` (Hash / pound sign) | `-,-` |
 | `&` (Ampersand) | `-_-` |
 
-*Nota: Los administradores pueden añadir reemplazos de caracteres adicionales dinámicamente mediante el endpoint `addCharsReplace`.*
+*Note: Administrators can dynamically add additional character replacements via the `addCharsReplace` endpoint.*
 
 ---
 
-## 3. API de Autenticación y Control de Sesión
+## 3. Authentication and Session Control API
 
-### 3.1. Iniciar Sesión (Login)
-Valida las credenciales del usuario y genera un token único enlazado a la dirección IP del cliente.
+### 3.1. Log In
+Validates the user's credentials and generates a unique token bound to the client's IP address.
 
 * **Endpoint:** `POST /admin:`
-* **Formato del Cuerpo:** `multipart/form-data`
-* **Parámetros Requeridos:**
-  * `u`: Nombre de usuario.
-  * `p`: Contraseña.
-* **Respuesta Exitosa (HTTP 200 OK):**
-  El servidor genera un token opaco criptográficamente seguro asociado a la IP del cliente. El cuerpo contendrá el token prefijado por la variable de éxito (por defecto `"ok"`).
+* **Body Format:** `multipart/form-data`
+* **Required Parameters:**
+  * `u`: Username.
+  * `p`: Password.
+* **Successful Response (HTTP 200 OK):**
+  The server generates a cryptographically secure opaque token associated with the client's IP. The body will contain the token prefixed by the success variable (`"ok"` by default).
   ```text
   ok<sha256_token_hash>
   ```
 
-### 3.2. Cerrar Sesión (Logout)
-Invalida el token actual en la memoria RAM y desconecta la sesión de la IP activa.
+### 3.2. Log Out
+Invalidates the current token in RAM memory and disconnects the session from the active IP.
 
 * **Endpoint:** `POST /admin:signout:`
-* **Autenticación:** Cabecera `ok` requerida.
-* **Respuesta Exitosa (HTTP 200 OK):** 
-  Devuelve un string HTML forzando la redirección del navegador.
+* **Authentication:** `ok` header required.
+* **Successful Response (HTTP 200 OK):**
+  Returns an HTML string forcing browser redirection.
   ```html
   <meta http-equiv='refresh' content='0; URL=/admin:'/>
   ```
 
 ---
 
-## 4. API de Consulta y Obtención de Estado (Data Retrieval)
+## 4. Query and State Retrieval API (Data Retrieval)
 
-Endpoints destinados a volcar el estado en memoria de la configuración hacia el cliente. Requieren la cabecera `ok: <token>`.
+Endpoints intended to dump the in-memory configuration state to the client. They require the `ok: <token>` header.
 
-### 4.1. Obtener Estado Global del Servidor
-Devuelve la configuración general, mapas de sitios raíz, IPs denegadas, respuestas HTTP personalizadas y caracteres de reemplazo.
+### 4.1. Get Global Server State
+Returns the general configuration, root site maps, denied IPs, custom HTTP responses, and character replacements.
 
 * **Endpoint:** `POST /admin:inside:sites`
-* **Parámetros:** Ninguno.
-* **Respuesta (JSON):**
+* **Parameters:** None.
+* **Response (JSON):**
   ```json
   {
     "sitio1.com": {
@@ -96,7 +96,7 @@ Devuelve la configuración general, mapas de sitios raíz, IPs denegadas, respue
       "192.168.1.50": "1735689600"
     },
     "#": {
-      "404": "Página no encontrada: {TURBO_RESPONSE_CODE}"
+      "404": "Page not found: {TURBO_RESPONSE_CODE}"
     },
     ".": {
       "M": "/home/server/",
@@ -114,18 +114,18 @@ Devuelve la configuración general, mapas de sitios raíz, IPs denegadas, respue
   }
   ```
 
-Aquí tienes la actualización precisa del **Punto 4.2**, incluyendo un ejemplo exacto de cómo la API estructura la respuesta JSON al devolver la lista de subdominios y sus configuraciones simplificadas.
+Here is the precise update to Point 4.2, including an exact example of how the API structures the JSON response when returning the list of subdomains and their simplified configurations.
 
 ---
 
-### 4.2. Obtener Lista de Subdominios de un Sitio
-Devuelve un objeto JSON con todos los subdominios que pertenecen a un dominio raíz específico, incluyendo el alias (si aplica) y la configuración SSL/Redirecciones de cada uno.
+### 4.2. Get List of Subdomains for a Site
+Returns a JSON object with all subdomains belonging to a specific root domain, including the alias (if applicable) and the SSL/Redirect configuration for each.
 
 * **Endpoint:** `POST /admin:inside:subdomains`
-* **Parámetros de Formulario:**
-  * `s`: Dominio principal (ej: `ejemplo.com`).
-* **Respuesta Exitosa (JSON):**
-  La respuesta incluye siempre el subdominio raíz (bajo el nombre del dominio) y los demás subdominios anidados. El bloque `!` contiene el estado de la configuración (1 = Activado, 0 = Desactivado).
+* **Form Parameters:**
+  * `s`: Primary domain (e.g.: `ejemplo.com`).
+* **Successful Response (JSON):**
+  The response always includes the root subdomain (under the domain name) and the other nested subdomains. The `!` block contains the configuration status (1 = Enabled, 0 = Disabled).
   ```json
   {
     "ejemplo.com": {
@@ -161,16 +161,16 @@ Devuelve un objeto JSON con todos los subdominios que pertenecen a un dominio ra
     }
   }
   ```
-  *(Nota: En este ejemplo, `*.dev` representa un subdominio wildcard que abarca cualquier petición dinámica de segundo nivel bajo `dev`, como `test.dev.ejemplo.com`).*
+  *(Note: In this example, `*.dev` represents a wildcard subdomain that covers any dynamic second-level request under `dev`, such as `test.dev.ejemplo.com`).*
 
-### 4.3. Obtener Datos Detallados de un Subdominio
-Devuelve todas las reglas operativas (Reescrituras, Cabeceras, MIMEs, Índices, Preprocesadores y Alias) para un subdominio específico.
+### 4.3. Get Detailed Data for a Subdomain
+Returns all operational rules (Rewrites, Headers, MIME types, Indexes, Preprocessors, and Aliases) for a specific subdomain.
 
 * **Endpoint:** `POST /admin:inside:subdomainData`
-* **Parámetros de Formulario:**
-  * `s`: Dominio principal.
-  * `d`: Subdominio (enviar valor vacío `""` si se solicita el subdominio raíz).
-* **Estructura de Respuesta (JSON):**
+* **Form Parameters:**
+  * `s`: Primary domain.
+  * `d`: Subdomain (send an empty value `""` when requesting the root subdomain).
+* **Response Structure (JSON):**
   ```json
   {
     "=": { "/old-path": "N/new-path" },
@@ -185,160 +185,160 @@ Devuelve todas las reglas operativas (Reescrituras, Cabeceras, MIMEs, Índices, 
 
 ---
 
-## 5. API de Configuración General (`set<KEY>`)
+## 5. General Configuration API (`set<KEY>`)
 
-Modifica los parámetros globales del servidor y sus límites operativos. Varias de estas acciones forzan la reescritura del archivo `turbo.config` y el reinicio interno en caliente de la configuración.
+Modifies the server's global parameters and operational limits. Several of these actions force a rewrite of the `turbo.config` file and an internal hot-reload of the configuration.
 
-* **Ruta Base:** `POST /admin:inside:set<CLAVE>`
+* **Base Route:** `POST /admin:inside:set<KEY>`
 
-| Endpoint | Parámetro `a` | Parámetro `b` | Descripción / Validación |
+| Endpoint | Parameter `a` | Parameter `b` | Description / Validation |
 |---|---|---|---|
-| `setU` | Nuevo Usuario | Contraseña Actual | Cambia el nombre de usuario (1-24 chars). Exige `b` correcto. |
-| `setP` | Nueva Contraseña | Contraseña Actual | Cambia la contraseña (1-24 chars). Exige `b` correcto. |
-| `setM` | Ruta Directorio | Contraseña Actual | Cambia el directorio base de sitios. |
-| `setC` | (Ignorado) | Contraseña Actual | Vuelca la configuración RAM actual al disco (`turbo.config`). |
-| `setMUB` | Valor entero | Contraseña Actual | Ajusta la longitud máxima de URI (40 - 10,240 bytes). |
-| `setMHB` | Valor entero | Contraseña Actual | Ajusta la longitud máx. de cabeceras (600 - 20,480 bytes). |
-| `setMBB` | Valor entero | Contraseña Actual | Ajusta tamaño máx. de cuerpo (1B - 100MB). |
-| `setCIL` | Valor ms | Contraseña Actual | Reinicio de contador (100 - 80,000 ms). |
-| `setCIS` | Valor ms | Contraseña Actual | Ventana de conteo (1 - 5,000 ms). |
-| `setCII` | Valor entero | Contraseña Actual | Límite de peticiones por intervalo. |
-| `setRT` | Tiempo (`5s`, `0s`) | Contraseña Actual | Read Timeout total de petición. |
-| `setRHT` | Tiempo (`1s`, `0s`) | Contraseña Actual | Read Header Timeout. |
-| `setWT` | Tiempo (`10s`, `0s`) | Contraseña Actual | Write Timeout para respuestas. |
-| `setIT` | Tiempo (`2s`, `0s`) | Contraseña Actual | Idle Timeout para *Keep-Alive*. |
+| `setU` | New Username | Current Password | Changes the username (1-24 chars). Requires correct `b`. |
+| `setP` | New Password | Current Password | Changes the password (1-24 chars). Requires correct `b`. |
+| `setM` | Directory Path | Current Password | Changes the base site directory. |
+| `setC` | (Ignored) | Current Password | Dumps the current in-RAM configuration to disk (`turbo.config`). |
+| `setMUB` | Integer value | Current Password | Adjusts the maximum URI length (40 - 10,240 bytes). |
+| `setMHB` | Integer value | Current Password | Adjusts the max. header length (600 - 20,480 bytes). |
+| `setMBB` | Integer value | Current Password | Adjusts the max. body size (1B - 100MB). |
+| `setCIL` | Value in ms | Current Password | Counter reset interval (100 - 80,000 ms). |
+| `setCIS` | Value in ms | Current Password | Counting window (1 - 5,000 ms). |
+| `setCII` | Integer value | Current Password | Request limit per interval. |
+| `setRT` | Time (`5s`, `0s`) | Current Password | Total request Read Timeout. |
+| `setRHT` | Time (`1s`, `0s`) | Current Password | Read Header Timeout. |
+| `setWT` | Time (`10s`, `0s`) | Current Password | Write Timeout for responses. |
+| `setIT` | Time (`2s`, `0s`) | Current Password | Idle Timeout for *Keep-Alive*. |
 
 ---
 
-## 6. API de Gestión de Recursos del Sitio (Añadir y Eliminar)
+## 6. Site Resource Management API (Add and Delete)
 
-El backend maneja las creaciones de carpetas en disco y modificaciones en los mapas RAM. *Nota sobre comodines: Enviar los dominios con asteriscos (ej. `*.ejemplo.com`). El servidor los traducirá a `#` físicamente en el disco de manera transparente.*
+The backend handles folder creation on disk and modifications to the in-RAM maps. *Note on wildcards: Send domains with asterisks (e.g., `*.ejemplo.com`). The server will transparently translate them to `#` on disk.*
 
-### 6.1. Añadir/Actualizar Recursos (`add<Tipo>`)
-* **Ruta Base:** `POST /admin:inside:add<TIPO>`
+### 6.1. Add/Update Resources (`add<Type>`)
+* **Base Route:** `POST /admin:inside:add<TYPE>`
 
-| Endpoint | `s` (Dominio) | `d` (Subdominio) | `a` (Clave/Identificador) | `b` (Valor/Ruta) |
+| Endpoint | `s` (Domain) | `d` (Subdomain) | `a` (Key/Identifier) | `b` (Value/Path) |
 |---|---|---|---|---|
-| `addSite` | Dominio Web | - | - | - |
-| `addSubdomain` | Dominio Web | Subdominio | - | - |
-| `addRewrite` | Dominio Web | Subdominio | URI de origen (ej: `/old`) | Reescritura (`N/new`, `Hhttp://...`, `Shttps://...`), [palabras clave dinámicas disponibles](https://turbo-server.github.io/#so-2)|
-| `addMIME` | Dominio Web | Subdominio | Extensión (ej: `png`) | Tipo MIME (ej: `image/png`) |
-| `addHeader` | Dominio Web | Subdominio | Nombre Cabecera | Valor Cabecera |
-| `addPreprocessor`| Dominio Web | Subdominio | Extensión (ej: `php`) | Ejecutable CGI (ej: `/usr/bin/php-cgi`) |
-| `addIndex` | Dominio Web | Subdominio | Archivo Índice (`index.html`)| - |
-| `addAlias` | Dominio Web | Subdominio | Dominio Alias | - |
+| `addSite` | Web Domain | - | - | - |
+| `addSubdomain` | Web Domain | Subdomain | - | - |
+| `addRewrite` | Web Domain | Subdomain | Source URI (e.g.: `/old`) | Rewrite (`N/new`, `Hhttp://...`, `Shttps://...`), [dynamic keywords available](https://turbo-server.github.io/#so-2)|
+| `addMIME` | Web Domain | Subdomain | Extension (e.g.: `png`) | MIME Type (e.g.: `image/png`) |
+| `addHeader` | Web Domain | Subdomain | Header Name | Header Value |
+| `addPreprocessor`| Web Domain | Subdomain | Extension (e.g.: `php`) | CGI Executable (e.g.: `/usr/bin/php-cgi`) |
+| `addIndex` | Web Domain | Subdomain | Index File (`index.html`)| - |
+| `addAlias` | Web Domain | Subdomain | Alias Domain | - |
 
-### 6.2. Eliminar Recursos (`del<Tipo>`)
-* **Ruta Base:** `POST /admin:inside:del<TIPO>`
+### 6.2. Delete Resources (`del<Type>`)
+* **Base Route:** `POST /admin:inside:del<TYPE>`
 
-| Endpoint | `s` (Dominio) | `d` (Subdominio) | `a` (Clave/Identificador a borrar) |
+| Endpoint | `s` (Domain) | `d` (Subdomain) | `a` (Key/Identifier to delete) |
 |---|---|---|---|
-| `delSite` | Dominio Web | Subdominio (Vacío = Borrar Sitio) | - |
-| `delRewrite` | Dominio Web | Subdominio | URI origen |
-| `delMIME` | Dominio Web | Subdominio | Extensión |
-| `delHeader` | Dominio Web | Subdominio | Nombre de Cabecera |
-| `delPreprocessor`| Dominio Web | Subdominio | Extensión |
-| `delIndex` | Dominio Web | Subdominio | Archivo Índice |
-| `delAlias` | Dominio Web | Subdominio | Dominio Alias |
+| `delSite` | Web Domain | Subdomain (Empty = Delete Site) | - |
+| `delRewrite` | Web Domain | Subdomain | Source URI |
+| `delMIME` | Web Domain | Subdomain | Extension |
+| `delHeader` | Web Domain | Subdomain | Header Name |
+| `delPreprocessor`| Web Domain | Subdomain | Extension |
+| `delIndex` | Web Domain | Subdomain | Index File |
+| `delAlias` | Web Domain | Subdomain | Alias Domain |
 
 ---
 
-## 7. API de Seguridad Global e Interfaz
+## 7. Global Security and Interface API
 
-### 7.1. Control de IPs Denegadas
+### 7.1. Denied IP Control
 * **`POST /admin:inside:addDenied`**
-  * `s`: Dirección IP (IPv4 o IPv6).
-  * `d`: Timestamp UNIX de expiración de bloqueo.
+  * `s`: IP address (IPv4 or IPv6).
+  * `d`: UNIX timestamp for block expiration.
 * **`POST /admin:inside:delDenied`**
-  * `s`: Dirección IP a desbloquear de la memoria `persistentIPs`.
+  * `s`: IP address to unblock from the `persistentIPs` memory map.
 
-### 7.2. Respuestas a Códigos HTTP
+### 7.2. HTTP Status Code Responses
 * **`POST /admin:inside:addHttpCodeResponse`**
-  * `s`: Código de estado HTTP (entre `400` y `599`, o `0` para fallback universal).
-  * `d`: Plantilla de respuesta. Se admiten saltos de línea y la macro `{TURBO_RESPONSE_CODE}`.
+  * `s`: HTTP status code (between `400` and `599`, or `0` for a universal fallback).
+  * `d`: Response template. Line breaks and the `{TURBO_RESPONSE_CODE}` macro are supported.
 * **`POST /admin:inside:delHttpCodeResponse`**
-  * `s`: Código de estado HTTP a devolver a comportamiento por defecto del sistema.
+  * `s`: HTTP status code to revert to the system's default behavior.
 
-### 7.3. Reemplazo Global de Caracteres en URIs
+### 7.3. Global Character Replacement in URIs
 * **`POST /admin:inside:addCharsReplace`**
-  * `s`: Secuencia de caracteres a reemplazar (ej: `;`).
-  * `d`: Cifra codificada objetivo (ej: `-.-`).
+  * `s`: Character sequence to replace (e.g.: `;`).
+  * `d`: Target encoded token (e.g.: `-.-`).
 
 ---
 
-Aquí tienes la actualización exacta y exhaustiva del **Punto 8** del `API_SPECIFICATION.md`. 
+Here is the exact and exhaustive update to Point 8 of `API_SPECIFICATION.md`.
 
-Se ha desglosado con máxima precisión el manejo en caliente (*hot-swapping*) de certificados en memoria, la lógica asíncrona no bloqueante de Certbot, y el comportamiento de las respuestas al cliente.
+The hot-swapping of certificates in memory, Certbot's non-blocking asynchronous logic, and client response behavior have been broken down with maximum precision.
 
 ---
 
-## 8. API de Certificados SSL y Redirecciones (`cfg<KEY>`)
+## 8. SSL Certificate and Redirect API (`cfg<KEY>`)
 
-Gestiona la habilitación de HTTPS, redirecciones en la capa de aplicación y la configuración/emisión de certificados mediante Certbot.
+Manages HTTPS enablement, application-layer redirects, and certificate configuration/issuance via Certbot.
 
-* **Ruta Base:** `POST /admin:inside:cfg<CLAVE>`
+* **Base Route:** `POST /admin:inside:cfg<KEY>`
 
-| Endpoint | Parámetro `a` (Acción) | Parámetro `s` (Dominio) | Parámetro `d` (Subdominio) | Parámetros Opcionales |
+| Endpoint | Parameter `a` (Action) | Parameter `s` (Domain) | Parameter `d` (Subdomain) | Optional Parameters |
 |---|---|---|---|---|
-| **`cfgC`** | `"1"` = Ejecutar Certbot<br>`"0"` = Eliminar del disco | Dominio Web | Subdominio o Vacío (`""`) | `z`: E-mail de registro.<br>`y`: Adaptador Certbot (ej: `dns-route53`). |
-| **`cfgS`** | `"1"` = Activar HTTPS<br>`"0"` = Desactivar HTTPS | Dominio Web | Subdominio o Vacío (`""`) | - |
-| **`cfgR`** | `"1"` = Activar<br>`"0"` = Desactivar | Dominio Web | Subdominio o Vacío (`""`) | *Solo aplica al subdominio `www`.* Activa redirección a la Raíz. |
-| **`cfgW`** | `"1"` = Activar<br>`"0"` = Desactivar | Dominio Web | Subdominio o Vacío (`""`) | *Solo aplica al subdominio Raíz.* Activa redirección a `www`. |
-| **`cfgE`** | E-mail a registrar | Dominio Web | Subdominio o Vacío (`""`) | Modifica silenciosamente el E-mail para futuras renovaciones de Certbot. |
-| **`cfgA`** | Nombre del Adaptador | Dominio Web | Subdominio o Vacío (`""`) | Modifica silenciosamente el flag del Adaptador para Certbot. |
+| **`cfgC`** | `"1"` = Run Certbot<br>`"0"` = Remove from disk | Web Domain | Subdomain or Empty (`""`) | `z`: Registration e-mail.<br>`y`: Certbot adapter (e.g.: `dns-route53`). |
+| **`cfgS`** | `"1"` = Enable HTTPS<br>`"0"` = Disable HTTPS | Web Domain | Subdomain or Empty (`""`) | - |
+| **`cfgR`** | `"1"` = Enable<br>`"0"` = Disable | Web Domain | Subdomain or Empty (`""`) | *Only applies to the `www` subdomain.* Enables redirection to the Root. |
+| **`cfgW`** | `"1"` = Enable<br>`"0"` = Disable | Web Domain | Subdomain or Empty (`""`) | *Only applies to the Root subdomain.* Enables redirection to `www`. |
+| **`cfgE`** | E-mail to register | Web Domain | Subdomain or Empty (`""`) | Silently updates the E-mail for future Certbot renewals. |
+| **`cfgA`** | Adapter Name | Web Domain | Subdomain or Empty (`""`) | Silently updates the Adapter flag for Certbot. |
 
-### 8.1. Detalle Operativo: Emisión de Certificados (`cfgC`)
-La emisión o renovación de certificados no bloquea el servidor. Al enviar `a="1"`, la API delega el trabajo a una Goroutine separada que se encarga de:
-1. Ejecutar el binario de Certbot en modo webroot o mediante el adaptador especificado.
-2. Leer la carpeta temporal de *archive*, localizar los archivos más recientes (`fullchain*.pem` y `privkey*.pem`) que tengan menos de 3 días de creados.
-3. Mover y renombrar físicamente estos archivos a la ruta raíz del sitio en Turbo.
+### 8.1. Operational Detail: Certificate Issuance (`cfgC`)
+Certificate issuance or renewal does not block the server. When `a="1"` is sent, the API delegates the work to a separate Goroutine, which handles:
+1. Running the Certbot binary in webroot mode or via the specified adapter.
+2. Reading the temporary `archive` folder and locating the most recent files (`fullchain*.pem` and `privkey*.pem`) that are less than 3 days old.
+3. Physically moving and renaming these files to the site's root path in Turbo.
 
-**Flujo de Polling HTTP para el Frontend:**
-Como la operación es asíncrona, el frontend debe realizar peticiones continuas (Polling) al endpoint `cfgC` evaluando la respuesta JSON:
-* `{"message":"Espere, certificado en proceso","status":"WAIT"}`: La Goroutine acaba de iniciarse.
-* `{"message":"Espere, certificado procesándose","status":"WAIT"}`: Certbot está trabajando.
-* `{"message":"Espere, certificado ocupado en <dominio>","status":"WAIT"}`: Certbot está ocupado emitiendo un certificado para otro sitio.
-* **Respuesta Exitosa (200 OK):** `"Certificado SSL activo"` (El cliente debe detener el polling).
-* **Respuesta de Error (400 Bad Request):** Devuelve la salida cruda de error de Certbot o del sistema de archivos.
+**HTTP Polling Flow for the Frontend:**
+Since the operation is asynchronous, the frontend must make continuous requests (polling) to the `cfgC` endpoint, evaluating the JSON response:
+* `{"message":"Espere, certificado en proceso","status":"WAIT"}` *(lit. "Please wait, certificate in process")*: The Goroutine has just started.
+* `{"message":"Espere, certificado procesándose","status":"WAIT"}` *(lit. "Please wait, certificate being processed")*: Certbot is working.
+* `{"message":"Espere, certificado ocupado en <dominio>","status":"WAIT"}` *(lit. "Please wait, certificate busy on <domain>")*: Certbot is busy issuing a certificate for another site.
+* **Successful Response (200 OK):** `"Certificado SSL activo"` *(lit. "SSL certificate active")* (the client should stop polling).
+* **Error Response (400 Bad Request):** Returns the raw error output from Certbot or the filesystem.
 
-### 8.2. Detalle Operativo: Activación SSL en Caliente (`cfgS`)
-Turbo no requiere reinicios para aplicar certificados. Cuando se recibe la orden de activación (`a="1"`):
-1. Go lee los archivos `fullchain.pem` y `privkey.pem` directamente del disco y los inyecta inmediatamente en la memoria RAM compartida del servidor.
-2. Si el puerto `443` estaba cerrado (porque el servidor arrancó sin certificados), **se inicia un nuevo socket Listener automáticamente**.
-3. A partir de este momento, Turbo fuerza una redirección `301 Moved Permanently` a `https://` para todo el tráfico HTTP que ingrese a ese dominio/subdominio.
+### 8.2. Operational Detail: Hot SSL Activation (`cfgS`)
+Turbo does not require restarts to apply certificates. When the activation command (`a="1"`) is received:
+1. Go reads the `fullchain.pem` and `privkey.pem` files directly from disk and immediately injects them into the server's shared RAM memory.
+2. If port `443` was closed (because the server started without certificates), **a new socket Listener is automatically started**.
+3. From this point on, Turbo forces a `301 Moved Permanently` redirect to `https://` for all HTTP traffic entering that domain/subdomain.
 
-*Nota: Desactivar HTTPS (`a="0"`) purga el certificado de la memoria RAM (impidiendo futuras conexiones TLS para ese host), pero **no elimina** los archivos `.pem` del disco ni cierra el puerto 443 a nivel de red.*
+*Note: Disabling HTTPS (`a="0"`) purges the certificate from RAM memory (preventing future TLS connections for that host), but it **does not delete** the `.pem` files from disk, nor does it close port 443 at the network level.*
 
 ---
 
-## 9. API de Gestión Física de Archivos (`hardUpload`)
+## 9. Physical File Management API (`hardUpload`)
 
-Utilizado para sustituir masivamente todos los archivos públicos asociados a un subdominio/dominio. El servidor eliminará de manera destructiva el contenido existente en la carpeta de contenido (`@`) y volcará los nuevos datos.
+Used to bulk-replace all public files associated with a subdomain/domain. The server will destructively delete the existing content in the content folder (`@`) and dump the new data.
 
 * **Endpoint:** `POST /admin:inside:hardUpload`
-* **Formato del Cuerpo:** `multipart/form-data`
-* **Parámetros de Formulario:**
-  * `s`: Dominio principal (ej: `ejemplo.com`).
-  * `d`: Subdominio (vacío `""` si se trata del dominio raíz).
-  * `f`: Array de archivos adjuntos (`File[]`).
-* **Manejo de Directorios Anidados:** 
-  El backend analiza el parámetro `filename` dentro del encabezado HTTP `Content-Disposition` de cada bloque *multipart*. Si el nombre del archivo contiene rutas relativas (ej: `assets/img/logo.png`), Turbo extraerá la ruta y creará la estructura de carpetas de forma segura, denegando cualquier intento de Directory Traversal (`..`).
-* **Respuesta Exitosa (HTTP 200 OK):**
-  Devuelve la cadena `"Datos volcados"`.
-* **Manejo de Errores Específicos:**
-  * Si el peso de la subida supera el límite global `MBB` (Max Body Bytes), la API corta la lectura y retorna HTTP 400 con el mensaje `"Longitud máxima de contenidos excedida"`.
+* **Body Format:** `multipart/form-data`
+* **Form Parameters:**
+  * `s`: Primary domain (e.g.: `ejemplo.com`).
+  * `d`: Subdomain (empty `""` for the root domain).
+  * `f`: Array of attached files (`File[]`).
+* **Nested Directory Handling:**
+  The backend parses the `filename` parameter within the `Content-Disposition` HTTP header of each multipart block. If the file name contains relative paths (e.g.: `assets/img/logo.png`), Turbo will extract the path and safely create the folder structure, denying any Directory Traversal (`..`) attempts.
+* **Successful Response (HTTP 200 OK):**
+  Returns the string `"Datos volcados"` *(lit. "Data dumped")*.
+* **Specific Error Handling:**
+  * If the upload size exceeds the global `MBB` (Max Body Bytes) limit, the API cuts off the read and returns HTTP 400 with the message `"Longitud máxima de contenidos excedida"` *(lit. "Maximum content length exceeded")*.
 
 ---
 
-## 10. Estándar de Códigos de Respuesta HTTP de la API
+## 10. API HTTP Response Code Standard
 
-| Código HTTP | Significado Funcional | Causa y Cuerpo de la Petición |
+| HTTP Code | Functional Meaning | Cause and Request Body |
 |---|---|---|
-| **`200 OK`** | Operación Procesada | La orden se ejecutó en memoria y/o disco. Devuelve un texto plano de confirmación (ej: `"Subdominio agregado"`). |
-| **`400 Bad Request`** | Fallo de Validación / Lógica | Parámetros nulos, formato inválido, recurso inexistente, contraseñas erróneas o restricciones de límites sobrepasadas. El Body contiene el string del error literal que debe mostrarse al usuario. |
-| **`403 Forbidden`** | Bloqueo de Acceso | Falla la primera autenticación o credenciales por defecto incorrectas. Body vacío. |
-| **`404 Not Found`** | URL Incorrecta | Se ha consultado una URI (`RequestURI`) dentro del prefijo `/admin:` que no corresponde a ningún endpoint listado. |
-| **`429 Too Many Requests`** | *Rate Limiter* Activado | La conexión se originó superando los límites de intervalos estipulados por el control del servidor (CIL/CIS/CII). El Request se interrumpe y la IP se archiva en la RAM. |
+| **`200 OK`** | Operation Processed | The command was executed in memory and/or on disk. Returns a plain-text confirmation (e.g.: `"Subdominio agregado"` *(lit. "Subdomain added")*). |
+| **`400 Bad Request`** | Validation / Logic Failure | Null parameters, invalid format, nonexistent resource, incorrect passwords, or exceeded limit restrictions. The Body contains the literal error string that should be shown to the user. |
+| **`403 Forbidden`** | Access Blocked | Initial authentication fails, or default credentials are incorrect. Empty Body. |
+| **`404 Not Found`** | Incorrect URL | A URI (`RequestURI`) was requested within the `/admin:` prefix that does not correspond to any listed endpoint. |
+| **`429 Too Many Requests`** | *Rate Limiter* Triggered | The connection originated while exceeding the interval limits stipulated by the server's control settings (CIL/CIS/CII). The Request is interrupted, and the IP is logged in RAM. |
 
 ---
 
