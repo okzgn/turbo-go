@@ -45,11 +45,11 @@ A cross-platform, high-performance HTTP web server with a real-time, visual mana
 - **Go 1.18+** (for building from source).
 - No external runtime dependencies — Turbo is distributed as a single, self-contained binary, except for **[Certbot](https://certbot.eff.org/)** for SSL certificate issuance. See [Commercial Version](#commercial-version).
 
-### Minimum Requirements
-- **CPU:** 1 vCPU minimum (2.2 GHz clock speed or higher recommended).
-- **RAM:** 128 MB+ minimum (runtime) or 1 GB+ recommended (build from source).
+### Minimum Recommended Requirements
+- **CPU:** 1 vCPU (1.5 GHz clock speed or higher).
+- **RAM:** ~128 MB for runtime or 1 GB+ to build from source.
 - **Storage:** ~100 MB for binary + websites + configuration files.
-- **Network:** Standard HTTP/HTTPS ports (80, 443) require elevated privileges on Linux/macOS.
+- **Network:** Standard HTTP/HTTPS ports (80, 443); requires elevated privileges on Linux/macOS.
 
 ---
 
