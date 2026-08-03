@@ -157,7 +157,7 @@ Returns a JSON object with all subdomains belonging to a specific root domain, i
     }
   }
   ```
-  *(Note: In this example, `*.dev` represents a wildcard subdomain that covers any dynamic second-level request under `dev`, such as `test.dev.ejemplo.com`).*
+  *(Note: In this example, `*.dev` represents a wildcard subdomain that covers any dynamic second-level request under `dev`, such as `test.dev` or `admin.test.dev`).*
 
 ### 4.3. Get Detailed Data for a Subdomain
 Returns all operational rules (Rewrites, Headers, MIME types, Indexes, Preprocessors, and Aliases) for a specific subdomain.

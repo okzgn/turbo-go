@@ -157,7 +157,7 @@ Devuelve un objeto JSON con todos los subdominios que pertenecen a un dominio ra
     }
   }
   ```
-  *(Nota: En este ejemplo, `*.dev` representa un subdominio wildcard que abarca cualquier petición dinámica de segundo nivel bajo `dev`, como `test.dev.ejemplo.com`).*
+  *(Nota: En este ejemplo, `*.dev` representa un subdominio wildcard que abarca cualquier petición dinámica de segundo nivel bajo `dev`, como `test.dev` o `admin.test.dev`).*
 
 ### 4.3. Obtener Datos Detallados de un Subdominio
 Devuelve todas las reglas operativas (Reescrituras, Cabeceras, MIMEs, Índices, Preprocesadores y Alias) para un subdominio específico.
