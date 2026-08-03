@@ -26,6 +26,7 @@ A cross-platform, high-performance HTTP web server with a real-time, visual mana
 ## Documentation
 
 **Visual documentation (website aliases):** [turbo.okzgn.com](https://turbo.okzgn.com), [turbo-server.github.io](https://turbo-server.github.io)
+
 **API documentation:** [API_SPECIFICATION.md](./API_SPECIFICATION.md)
 
 ---
