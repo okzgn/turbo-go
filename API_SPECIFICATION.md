@@ -39,7 +39,7 @@ Any form parameter (such as `a`, `b`, `s`, `d`) is processed on the server by th
 ## 3. Authentication and Session Control API
 
 ### 3.1. Log In
-Validates the user's credentials and generates a unique token bound to the client's IP address.
+Validates the user's credentials and generates a unique token bound to the client's IP address. *Note: It could be fragile behind shared NAT/proxies, where multiple users share a public IP.*
 
 * **Endpoint:** `POST /admin:`
 * **Body Format:** `multipart/form-data`

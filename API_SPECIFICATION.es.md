@@ -39,7 +39,7 @@ Cualquier parámetro de formulario (como `a`, `b`, `s`, `d`) es procesado en el 
 ## 3. API de Autenticación y Control de Sesión
 
 ### 3.1. Iniciar Sesión (Login)
-Valida las credenciales del usuario y genera un token único enlazado a la dirección IP del cliente.
+Valida las credenciales del usuario y genera un token único enlazado a la dirección IP del cliente. *Nota: Puede ser frágil detrás de NAT/proxies compartidos, donde varios usuarios comparten una IP pública.*
 
 * **Endpoint:** `POST /admin:`
 * **Formato del Cuerpo:** `multipart/form-data`
