@@ -13,90 +13,90 @@
 
 <link rel="stylesheet" href="/admin:m.css">
 <style>
-body, #R { overflow-x: hidden; }
-#R { overflow-y: hidden; }
-.L { overflow-y: auto; }
-#R > div { float: left; }
+body, #panel-subdomain { overflow-x: hidden; }
+#panel-subdomain { overflow-y: hidden; }
+.entry-list { overflow-y: auto; }
+#panel-subdomain > div { float: left; }
 header { max-height: 3.25rem; }
-.L { max-height: 50vh; }
-#R > div { width: calc(50% - 1rem); }
-.L [data-x] + a { width: calc(100% - 2rem); }
-aside > section, header, .F, .O, .L { width: 100%; }
-[data-error]::after, [data-ok]::after, [data-x], #Z .L a::after { width: 1.5rem; }
-[data-error]::after, [data-ok]::after, [data-x], #Z .L a::after { height: 1.5rem; }
+.entry-list { max-height: 50vh; }
+#panel-subdomain > div { width: calc(50% - 1rem); }
+.entry-list [data-action-delete] + a { width: calc(100% - 2rem); }
+aside > section, header, .breadcrumb-frame, .btn-add-entry, .entry-list { width: 100%; }
+[data-error]::after, [data-ok]::after, [data-action-delete], #sec-aliases .entry-list a::after { width: 1.5rem; }
+[data-error]::after, [data-ok]::after, [data-action-delete], #sec-aliases .entry-list a::after { height: 1.5rem; }
 h1 img { height: 2rem; }
 legend { text-transform: uppercase; }
-header p, .F, .O, [data-error]::after, [data-ok]::after, [data-x], #Z .L a::after { text-align: center; }
-header a, .F, .F + ul, .O, legend, fieldset a::before, [href$="setC"] { font-weight: bold; }
-.D a i { font-style: normal; }
-[data-error]::after, [data-ok]::after, [data-x], #Z .L a::after { line-height: 1.5; }
+header p, .breadcrumb-frame, .btn-add-entry, [data-error]::after, [data-ok]::after, [data-action-delete], #sec-aliases .entry-list a::after { text-align: center; }
+header a, .breadcrumb-frame, .breadcrumb-frame + ul, .btn-add-entry, legend, fieldset a::before, [href$="setC"] { font-weight: bold; }
+.data-block a i { font-style: normal; }
+[data-error]::after, [data-ok]::after, [data-action-delete], #sec-aliases .entry-list a::after { line-height: 1.5; }
 h1, h1 a, header a { line-height: 0; }
 h2, aside > section a, section > a:first-child { font-size: 1.2rem; }
-#T { font-size: 1.5rem; }
+#link-site-breadcrumb { font-size: 1.5rem; }
 ul { list-style: none; }
-aside, section, #T + ul, #R > ul, #Z .L { justify-content: center; }
-header h1, header h2, header p, .D a, header a > *, header a::after, aside > fieldset { align-self: center; }
+aside, section, #link-site-breadcrumb + ul, #panel-subdomain > ul, #sec-aliases .entry-list { justify-content: center; }
+header h1, header h2, header p, .data-block a, header a > *, header a::after, aside > fieldset { align-self: center; }
 header p { flex-grow: 1; }
 header a { flex-shrink: 0; }
-aside, .F + ul, section, .D, .L { flex-wrap: wrap; }
-header, aside, .F + ul, section, .D, .L, header a { display: flex; }
-main, #R, [data-hidden], #O, #I .L a::after { display: none; }
-#B [data-hidden] { display: none !important; }
-header a:last-child::after, fieldset a::before, .F::before, .O::before, [data-error]::after, [data-ok]::after, .D a *, #Z .L a::after, .F + ul a, #B li::before, [data-x], legend::before { display: inline-block; }
-main[data-std-site], section[data-std-subdomain], .F { display: block !important; }
-[data-error]::after, .L [data-x] + a:hover, .L [data-x] + a:active, .L [data-x] + a:focus { background: #fff; }
-[data-error]::after, [data-x]:hover, [data-x]:active, [data-x]:focus, #Z .L a:hover::after, #Z .L a:active::after, #Z .L a:focus::after { background: #c00; }
+aside, .breadcrumb-frame + ul, section, .data-block, .entry-list { flex-wrap: wrap; }
+header, aside, .breadcrumb-frame + ul, section, .data-block, .entry-list, header a { display: flex; }
+main, #panel-subdomain, [data-is-hidden], #form-file-upload, #box-indexes .entry-list a::after { display: none; }
+#list-site-actions [data-is-hidden] { display: none !important; }
+header a:last-child::after, fieldset a::before, .breadcrumb-frame::before, .btn-add-entry::before, [data-error]::after, [data-ok]::after, .data-block a *, #sec-aliases .entry-list a::after, .breadcrumb-frame + ul a, #list-site-actions li::before, [data-action-delete], legend::before { display: inline-block; }
+main[data-active-site], section[data-active-subdomain], .breadcrumb-frame { display: block !important; }
+[data-error]::after, .entry-list [data-action-delete] + a:hover, .entry-list [data-action-delete] + a:active, .entry-list [data-action-delete] + a:focus { background: #fff; }
+[data-error]::after, [data-action-delete]:hover, [data-action-delete]:active, [data-action-delete]:focus, #sec-aliases .entry-list a:hover::after, #sec-aliases .entry-list a:active::after, #sec-aliases .entry-list a:focus::after { background: #c00; }
 [data-ok]::after { background: #090; }
-[data-x], .D a span, #Z .L a::after { background: rgba(0, 0, 0, 0.125); }
+[data-action-delete], .data-block a span, #sec-aliases .entry-list a::after { background: rgba(0, 0, 0, 0.125); }
 legend { background: linear-gradient(to top, transparent, #fff 50%); }
-header, section, fieldset, .D { background: linear-gradient(to top, transparent calc(100% - 1rem), #fff); }
-[data-error], [data-x], #D, #Z .L a::after { color: #c00; }
-.O { color: #004e9b !important; }
-[data-ok], .D a span::after { color: #090 !important; }
-[data-https] { color: #360 !important }
-header a, .F { color: #000; }
-section > a, .D a span, #Z .L a { color: #333; }
-ul a, .L a i { color: #666; }
-#B li::before { color: rgba(0, 0, 0, 0.25); }
-[data-error]::after, [data-ok]::after, [data-x]:hover, [data-x]:active, [data-x]:focus, #Z .L a:hover::after, #Z .L a:active::after, #Z .L a:focus::after { color: #fff; }
-[data-error]::after, [data-ok]::after, [data-x], #Z .L a::after { border-radius: 50%; }
+header, section, fieldset, .data-block { background: linear-gradient(to top, transparent calc(100% - 1rem), #fff); }
+[data-error], [data-action-delete], #btn-delete-entity, #sec-aliases .entry-list a::after { color: #c00; }
+.btn-add-entry { color: #004e9b !important; }
+[data-ok], .data-block a span::after { color: #090 !important; }
+[data-has-https] { color: #360 !important }
+header a, .breadcrumb-frame { color: #000; }
+section > a, .data-block a span, #sec-aliases .entry-list a { color: #333; }
+ul a, .entry-list a i { color: #666; }
+#list-site-actions li::before { color: rgba(0, 0, 0, 0.25); }
+[data-error]::after, [data-ok]::after, [data-action-delete]:hover, [data-action-delete]:active, [data-action-delete]:focus, #sec-aliases .entry-list a:hover::after, #sec-aliases .entry-list a:active::after, #sec-aliases .entry-list a:focus::after { color: #fff; }
+[data-error]::after, [data-ok]::after, [data-action-delete], #sec-aliases .entry-list a::after { border-radius: 50%; }
 header { border-bottom: 1px solid rgba(0, 0, 0, 0.125); }
-section, fieldset, .D { border: 1px solid rgba(0, 0, 0, 0.125); }
-.D .L a:not([data-x]){ border-top: 1px solid rgba(0, 0, 0, 0.125); }
+section, fieldset, .data-block { border: 1px solid rgba(0, 0, 0, 0.125); }
+.data-block .entry-list a:not([data-action-delete]){ border-top: 1px solid rgba(0, 0, 0, 0.125); }
 [data-error], [data-ok], legend { cursor: pointer; }
 body { cursor: default; }
 a:hover, a:active, a:focus { transform: scale(1.05); }
-#B li::before { transform: scale(1.5); }
-.D .L a:hover, .D .L a:active, .D .L a:focus, header a:hover, header a:active, header a:focus, #Z .L a { transform: none; }
+#list-site-actions li::before { transform: scale(1.5); }
+.data-block .entry-list a:hover, .data-block .entry-list a:active, .data-block .entry-list a:focus, header a:hover, header a:active, header a:focus, #sec-aliases .entry-list a { transform: none; }
 header a:hover, header a:active, header a:focus { opacity: 1; }
 header a { opacity: 0.5; }
-#R > div { margin: 0 0.5rem 1rem 0.5rem; }
-section, .L a:first-child, .L a:first-child + a { margin-top: 1rem; }
+#panel-subdomain > div { margin: 0 0.5rem 1rem 0.5rem; }
+section, .entry-list a:first-child, .entry-list a:first-child + a { margin-top: 1rem; }
 fieldset li { margin-top: 0.25rem; }
-fieldset + section, #Z .L a, fieldset li:first-child { margin-top: 0; }
+fieldset + section, #sec-aliases .entry-list a, fieldset li:first-child { margin-top: 0; }
 h1, h2 { margin-right: 1rem; }
-.F::before, .O::before, [data-x], fieldset a::before, #B li::before, fieldset, legend::before { margin-right: 0.5rem; }
-header a:last-child::after, #Z .L a::after, fieldset { margin-left: 0.5rem; }
-.O, .O + a, .F, .F + a, .F + ul li:first-child, fieldset a, #Z .L a:first-child { margin-left: 0 !important; }
-header a, aside a, section > a, .F + ul li, [data-error]::after, [data-ok]::after, .D span::after, #Z .L a, section > a [data-x] { margin-left: 1rem; }
-.F, .F + ul, .D, section > a, fieldset, #Z .L a { margin-bottom: 1rem; }
+.breadcrumb-frame::before, .btn-add-entry::before, [data-action-delete], fieldset a::before, #list-site-actions li::before, fieldset, legend::before { margin-right: 0.5rem; }
+header a:last-child::after, #sec-aliases .entry-list a::after, fieldset { margin-left: 0.5rem; }
+.btn-add-entry, .btn-add-entry + a, .breadcrumb-frame, .breadcrumb-frame + a, .breadcrumb-frame + ul li:first-child, fieldset a, #sec-aliases .entry-list a:first-child { margin-left: 0 !important; }
+header a, aside a, section > a, .breadcrumb-frame + ul li, [data-error]::after, [data-ok]::after, .data-block span::after, #sec-aliases .entry-list a, section > a [data-action-delete] { margin-left: 1rem; }
+.breadcrumb-frame, .breadcrumb-frame + ul, .data-block, section > a, fieldset, #sec-aliases .entry-list a { margin-bottom: 1rem; }
 legend { padding: 0.5rem 1rem; }
-main[data-std-site], aside, fieldset ul, .D, [data-error], [data-ok] { padding: 1rem; }
+main[data-active-site], aside, fieldset ul, .data-block, [data-error], [data-ok] { padding: 1rem; }
 header { padding: 0 1rem; }
-.D a *, #I .L a:not([data-x]) { padding: 0.5rem; }
+.data-block a *, #box-indexes .entry-list a:not([data-action-delete]) { padding: 0.5rem; }
 section { padding: 1rem 0.5rem 0 0.5rem; }
-#R > .F, #R > .F + ul, section > a { padding: 0 0.5rem; }
+#panel-subdomain > .breadcrumb-frame, #panel-subdomain > .breadcrumb-frame + ul, section > a { padding: 0 0.5rem; }
 header h1 { padding: 1rem 0; }
-#B li::before { content: '·'; }
-#T::before { content: '<'; }
-#R > .F::before { content: '< Subdominio: '; }
-.O::before { content: '+'; }
-header a:last-child::after, .D a span::after, fieldset a::before, legend::before { content: '>'; }
-[data-error]::after, [data-ok]::after, #Z .L a::after { content: 'X'; }
-[data-load] { animation: l 0.5s infinite alternate; }
-legend[data-std]::before { transform: rotate(90deg); }
+#list-site-actions li::before { content: '·'; }
+#link-site-breadcrumb::before { content: '<'; }
+#panel-subdomain > .breadcrumb-frame::before { content: '< Subdominio: '; }
+.btn-add-entry::before { content: '+'; }
+header a:last-child::after, .data-block a span::after, fieldset a::before, legend::before { content: '>'; }
+[data-error]::after, [data-ok]::after, #sec-aliases .entry-list a::after { content: 'X'; }
+[data-is-loading] { animation: l 0.5s infinite alternate; }
+legend[data-is-expanded]::before { transform: rotate(90deg); }
 @keyframes l { from { background: transparent; } to { background: #fff; } }
-[data-load-link] { animation: m 0.5s infinite alternate; }
+[data-is-loading-link] { animation: m 0.5s infinite alternate; }
 @keyframes m { to { color: #090; } }
 [data-large-ok], [data-large-error], article {
 	position: fixed;
@@ -143,7 +143,7 @@ article {
 	height: 100%;
 	animation: n 0.125s 1 forwards;
 }
-article div, article button:not([data-first]) { animation: o 0.125s 1 forwards; }
+article div, article button:not([data-primary-btn]) { animation: o 0.125s 1 forwards; }
 article, article div {
 	display: flex;
 	justify-content: center;
@@ -155,7 +155,7 @@ article div {
 	width: 25rem;
 	max-width: 25rem;
 }
-article.B div {
+article.modal-wide div {
 	max-width: 30rem;
 	width: 30rem;
 }
@@ -167,15 +167,15 @@ article button:hover, article button:active, article button:focus {
 	background: #000 !important;
 	color: rgba(255, 255, 255, 0.875);
 }
-article [data-first] {
+article [data-primary-btn] {
 	animation: p 0.15s 1 forwards;
 	font-weight: bold;
 	margin-left: 1rem;
 }
-article [data-first]:hover, article [data-first]:active, article [data-first]:focus { background: #c53 !important; }
+article [data-primary-btn]:hover, article [data-primary-btn]:active, article [data-primary-btn]:focus { background: #c53 !important; }
 article span { text-align: right; }
 article input { width: 100%; }
-article p { 
+article p {
   word-wrap: break-word;
   overflow-wrap: break-word;
 }
@@ -214,17 +214,17 @@ article p {
 		color: #090;
 		background: #fff;
 	}
-	article.B div { max-width: 100%; }
-	#Z .L { flex-flow: column; }
-	#Z .L a {
+	article.modal-wide div { max-width: 100%; }
+	#sec-aliases .entry-list { flex-flow: column; }
+	#sec-aliases .entry-list a {
 		align-self: center;
 		margin-left: 0;
 	}
-	.F + ul li { margin: 0.5rem; }
-	.F + ul li:first-child { margin-left: 0.5rem !important; }
-	.D { width: calc(100% - 1rem) !important; }
-	.F, .F + ul { margin-bottom: 0.5rem; }
-	.F + ul + section { margin-top: 0.5rem; }
+	.breadcrumb-frame + ul li { margin: 0.5rem; }
+	.breadcrumb-frame + ul li:first-child { margin-left: 0.5rem !important; }
+	.data-block { width: calc(100% - 1rem) !important; }
+	.breadcrumb-frame, .breadcrumb-frame + ul { margin-bottom: 0.5rem; }
+	.breadcrumb-frame + ul + section { margin-top: 0.5rem; }
 	aside { padding: 1rem 0.5rem; }
 	aside > section {
 		margin-left: 0.5rem;
@@ -243,448 +243,499 @@ article p {
 }
 </style>
 <script>
-document.addEventListener('DOMContentLoaded', function($$, $Z, $Y, $X, $W, A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z, Z_, Y_, X_, W_, V_, U_, T_){
-	$Z = { a: '/admin:inside:set', b: 'ok' };
-	function _(x, y, z){ return (z || document)[!y ? 'querySelectorAll' : 'querySelector'](x); }
-	function $(a, b, c, d, e, f, g, h, i, j, k, l){
-		f = typeof b == 'function',
-		h = function(g){
-			d = (!f ? d : c), d = (typeof d != 'function' ? function(a, b){ console.error(b + ': ' + a); } : d),
-			(delete N.parentNode.dataset.load), d.call(this, g, this.status);
+document.addEventListener('DOMContentLoaded', function(){
+	const appConfig = Object.freeze({ a: '/admin:inside:set', b: 'ok' });
+	const CONFIG_KEYS = Object.freeze({
+		GENERAL_CONFIG: '.',
+		CHARS_REPLACE: '_',
+		DENIED_IPS: '@',
+		HTTP_CODES: '#',
+		SITE_CONFIG: '!',
+		MIME_TYPES: '$',
+		ALIASES: '&',
+		PREPROCESSORS: '?',
+		INDEXES: '-',
+		REWRITES: '=',
+		HEADERS: '.'
+	});
+	let tempEditValues = [], charReplacementMap = {}, ampersandIndex,
+		charsReplaceSection, deniedIpsSection, httpCodeResponsesSection,
+		requestLimitsFieldset, siteActionButtonsList, generalSettingsFieldset,
+		addIndexLink, addPreprocessorLink, siteActionButtonsListMoveRef,
+		subdomainBreadcrumbLink, subdomainPanel, sitesListSection, sidebarAside,
+		statusMessageEl, mainPanel, siteBreadcrumbLink, deleteSiteOrSubdomainLink,
+		uploadFilesLink, uploadFileInput, addSubdomainLink, addRewriteLink,
+		addMimeLink, addHeaderLink, requestTimingFieldset, requestRateFieldset,
+		addAliasLink, reservedKeysMap, newEntryHandlersByContainer,
+		generalSettingsDefs, siteSettingsDefs, fieldsetLegendsList, signOutLink;
+	function $q(selector, single, root){ return (root || document)[!single ? 'querySelectorAll' : 'querySelector'](selector); }
+	function apiRequest(url, bodyOrOnSuccess, onSuccess, onError, xhr, isSuccessInSecondArg, responseTextOrHandler, handleError, queryStartIndex, queryString, searchParams, context){
+	    context = typeof this === 'function' ? this : parseResponse,
+	    isSuccessInSecondArg = typeof bodyOrOnSuccess == 'function',
+		handleError = function(responseTextOrHandler, status){
+			onError = (!isSuccessInSecondArg ? onError : onSuccess), onError = (typeof onError != 'function' ? function(bodyOrOnSuccess, status){ console.error(status + ': ' + bodyOrOnSuccess); } : onError),
+			(delete statusMessageEl.parentNode.dataset.isLoading);
+			responseTextOrHandler = context(responseTextOrHandler, status);
+			onError.call(this, responseTextOrHandler.message, responseTextOrHandler.status);
 		}
-		e = new XMLHttpRequest(),
-		e.onerror = function(){ h.call(this, 'Intente nuevamente'); },
-		e.onabort = function(){ h.call(this, 'Petición cancelada'); },
-		e.onload = function(){
-			g = this.responseText;
+		xhr = new XMLHttpRequest(),
+		xhr.onerror = function(){ handleError.call(this, 'Intente nuevamente', 0); },
+		xhr.onabort = function(){ handleError.call(this, 'Petición cancelada', 0); },
+		xhr.onload = function(){
+			responseTextOrHandler = this.responseText;
 			switch(this.status){
 				case 200:
 				case 201:
 				case 304:
-					if(g = _U(g)){ return h.call(this, g); }
-					(delete N.parentNode.dataset.load), (!f ? c : b).call(this, this.responseText, this.status);
+					if(responseTextOrHandler = detectAuthError(responseTextOrHandler)){
+					  responseTextOrHandler = context(responseTextOrHandler, this.status);
+					  return handleError.call(this, responseTextOrHandler.message, responseTextOrHandler.status);
+					}
+					(delete statusMessageEl.parentNode.dataset.isLoading),
+			        responseTextOrHandler = context(this.responseText, this.status),
+					(!isSuccessInSecondArg ? onSuccess : bodyOrOnSuccess).call(this, responseTextOrHandler.message, responseTextOrHandler.status);
 				break;
-				default: h.call(this, g);
+				default:
+		          responseTextOrHandler = context(responseTextOrHandler, this.status);
+				  handleError.call(this, responseTextOrHandler.message, responseTextOrHandler.status);
 			}
 		};
-		
+
 		if(self['URLSearchParams']){
-			(k = a.indexOf('?')),
-			(i = (k != -1 ? a.slice(k + 1) : '')),
-			(j = new URLSearchParams(i)),
-			(a = !i ? a : a.substring(0, k) + '?' + (j.toString() || i));
+			(searchParams = url.indexOf('?')),
+			(queryStartIndex = (searchParams != -1 ? url.slice(searchParams + 1) : '')),
+			(queryString = new URLSearchParams(queryStartIndex)),
+			(url = !queryStartIndex ? url : url.substring(0, searchParams) + '?' + (queryString.toString() || queryStartIndex));
 		}
 
-		e.open('POST', /* With no slash at the end: 'http://localhost' + a.replace('default://home', '')*/a),
-		e.setRequestHeader($Z.b, sessionStorage.getItem($Z.b) || ''),
-		e.send(!f ? b : null), N.parentNode.dataset.load = '';
+		xhr.open('POST', /* With no slash at the end: 'http://localhost' + a.replace('default://home', '')*/url),
+		xhr.setRequestHeader(appConfig.b, sessionStorage.getItem(appConfig.b) || ''),
+		xhr.send(!isSuccessInSecondArg ? bodyOrOnSuccess : null), statusMessageEl.parentNode.dataset.isLoading = '';
 	}
-	function _A(a, b, c, d, e){
-		for(c in b){
-			if(c in Z_){ continue; }
-			_P(a, c, b[c], (!b[c]['!'] ? 0 : b[c]['!']['S'] != '0'));
+	function renderSitesList(container, sitesMap, siteKey){
+		for(siteKey in sitesMap){
+			if(siteKey in reservedKeysMap){ continue; }
+			createSiteEntry(container, siteKey, sitesMap[siteKey], (!sitesMap[siteKey][CONFIG_KEYS.SITE_CONFIG] ? 0 : sitesMap[siteKey][CONFIG_KEYS.SITE_CONFIG]['S'] != '0'));
 		}
 	}
-	function _B(a, b, c, d, e, f){
-		for(e in b){
-			if(e in Z_){ continue; }
-			_O(a, e, c, b[e], d);
+	function renderKeyValueList(container, dataMap, propertyName, extraArgs, entryKey){
+		for(entryKey in dataMap){
+			if(entryKey in reservedKeysMap){ continue; }
+			createKeyValueEntry(container, entryKey, propertyName, dataMap[entryKey], extraArgs);
 		}
 	}
-	function _C(a, b, c, d, e){
-		e = ((d && typeof d == 'object') ? d : { subtree: (!d ? true : false) }), e[b] = true,
-		d = new MutationObserver(function(x, y, z){ for(y in x){ if(x[y].type == b){ c.call(x[y], x[y].target); } } }), d.observe(a, e);
+	function observeMutations(targetEl, mutationType, callback, observeOptionsOrSubtreeFlag, observerOptions){
+		observerOptions = ((observeOptionsOrSubtreeFlag && typeof observeOptionsOrSubtreeFlag == 'object') ? observeOptionsOrSubtreeFlag : { subtree: (!observeOptionsOrSubtreeFlag ? true : false) }), observerOptions[mutationType] = true,
+		observeOptionsOrSubtreeFlag = new MutationObserver(function(x, y, z){ for(y in x){ if(x[y].type == mutationType){ callback.call(x[y], x[y].target); } } }), observeOptionsOrSubtreeFlag.observe(targetEl, observerOptions);
 	}
-	function _D(a, b, c, d, e){
-		_(b, 0, a).forEach(function(f){ if(_I(f, c) == d){ e = f; } });
-		return e;
+	function findEntryByProperty(container, childSelector, propertyPath, matchValue, foundEl){
+		$q(childSelector, 0, container).forEach(function(f){ if(getDeepProperty(f, propertyPath) == matchValue){ foundEl = f; } });
+		return foundEl;
 	}
-	function _E(a, b, c, d){
-		d = document.createElement(typeof c == 'string' ? c : 'a'), d.href = b, d.dataset.x = '', d.innerText = 'X', (!c ? a.insertAdjacentElement('beforebegin', d) : a.appendChild(d));
-		return d;
+	function createDeleteButton(referenceEl, href, tagNameOrFlag, newEl){
+		newEl = document.createElement(typeof tagNameOrFlag == 'string' ? tagNameOrFlag : 'a'), newEl.href = href, newEl.dataset.actionDelete = '', newEl.innerText = 'X', (!tagNameOrFlag ? referenceEl.insertAdjacentElement('beforebegin', newEl) : referenceEl.appendChild(newEl));
+		return newEl;
 	}
-	function _F(a, b, c){
-		c = (c || $Z.a);
+	function createSettingsClickHandler(settingsDefs, statusMessageEl, basePath){
+		basePath = (basePath || appConfig.a);
 		if(this.box){
-			_('[href^="' + c + '"]', 0, this.box).forEach(function(d, e){
-				if((e = d.getAttribute('href').slice(c.length)) && e in a && typeof a[e] == 'object'){ a[e].element = d; }
+			$q('[href^="' + basePath + '"]', 0, this.box).forEach(function(clickEvent, hrefValue){
+				if((hrefValue = clickEvent.getAttribute('href').slice(basePath.length)) && hrefValue in settingsDefs && typeof settingsDefs[hrefValue] == 'object'){ settingsDefs[hrefValue].element = clickEvent; }
 			});
 		}
-		return function(d, e, f, g, h, i, j, k, l, m, n){
-			d.preventDefault();
-			if(d.target.nodeName != 'A' || !(e = d.target.href) || (f = e.indexOf(c)) == -1){ return; }
-			if((h = e.slice(f + c.length)) && a[h] && typeof a[h] == 'object'){
-				a[h].element = d.target, n = [];
+		return function(clickEvent, hrefValue, basePathIndex, dialogSteps, settingKey, isConfirmType, extraQueryString, extraFieldKey, extraFieldDef, promptValue, dialogQueue){
+			clickEvent.preventDefault();
+			if(clickEvent.target.nodeName != 'A' || !(hrefValue = clickEvent.target.href) || (basePathIndex = hrefValue.indexOf(basePath)) == -1){ return; }
+			if((settingKey = hrefValue.slice(basePathIndex + basePath.length)) && settingsDefs[settingKey] && typeof settingsDefs[settingKey] == 'object'){
+				settingsDefs[settingKey].element = clickEvent.target, dialogQueue = [];
 
-				if(a[h].extra){
-					a[h].extra = (a[h].extra && typeof a[h].extra == 'object' ? a[h].extra : {});
-					if(a[h].extra[0]){
-						j = '';
-						for(k in a[h].extra){
-							l = a[h].extra[k];
-							if(!(a[h].extra && typeof a[h].extra == 'object') || !l.param || (typeof l.stateFn == 'function' && l.stateFn.call(a, a[h], a[h].value, l.value))){ continue; }
-							(function(l){
-								n.push({
+				if(settingsDefs[settingKey].extra){
+					settingsDefs[settingKey].extra = (settingsDefs[settingKey].extra && typeof settingsDefs[settingKey].extra == 'object' ? settingsDefs[settingKey].extra : {});
+					if(settingsDefs[settingKey].extra[0]){
+						extraQueryString = '';
+						for(extraFieldKey in settingsDefs[settingKey].extra){
+							extraFieldDef = settingsDefs[settingKey].extra[extraFieldKey];
+							if(!(settingsDefs[settingKey].extra && typeof settingsDefs[settingKey].extra == 'object') || !extraFieldDef.param || (typeof extraFieldDef.stateFn == 'function' && extraFieldDef.stateFn.call(settingsDefs, settingsDefs[settingKey], settingsDefs[settingKey].value, extraFieldDef.value))){ continue; }
+							(function(extraFieldDef){
+								dialogQueue.push({
 									type: 'prompt',
-									text: ((typeof l.text == 'function' ? l.text.call(a, a[h], a[h].value, l.value) : l.text) || 'Valor:'),
-									value: (l.value || ''),
-									required: l.required,
-									okFn: function(o, m){ if(m){ l.tmpValue = m, j += '&' + l.param + '=' + _J(m); } },
-									cancelFn: function(){ j = ''; }
+									text: ((typeof extraFieldDef.text == 'function' ? extraFieldDef.text.call(settingsDefs, settingsDefs[settingKey], settingsDefs[settingKey].value, extraFieldDef.value) : extraFieldDef.text) || 'Valor:'),
+									value: (extraFieldDef.value || ''),
+									required: extraFieldDef.required,
+									okFn: function(o, promptValue){ if(promptValue){ extraFieldDef.tmpValue = promptValue, extraQueryString += '&' + extraFieldDef.param + '=' + applyCharReplacements(promptValue); } },
+									cancelFn: function(){ extraQueryString = ''; }
 								});
-							})(l);
+							})(extraFieldDef);
 						}
 					} else {
-						n.push({
+						dialogQueue.push({
 							type: 'prompt',
-							text: ((typeof a[h].extra.text == 'function' ? a[h].extra.text.call(a[h], a[h].value, a[h].extra.value) : a[h].extra.text) || 'Contraseña:'),
-							value: (a[h].extra.value || ''),
-							required: a[h].extra.required,
-							okFn: function(o, g){ if(g){ j = '&' + (a[h].extra.param || 'b') + '=' + _J(g); } }
+							text: ((typeof settingsDefs[settingKey].extra.text == 'function' ? settingsDefs[settingKey].extra.text.call(settingsDefs[settingKey], settingsDefs[settingKey].value, settingsDefs[settingKey].extra.value) : settingsDefs[settingKey].extra.text) || 'Contraseña:'),
+							value: (settingsDefs[settingKey].extra.value || ''),
+							required: settingsDefs[settingKey].extra.required,
+							okFn: function(o, dialogSteps){ if(dialogSteps){ extraQueryString = '&' + (settingsDefs[settingKey].extra.param || 'b') + '=' + applyCharReplacements(dialogSteps); } }
 						});
 					}
 				}
-				n.push({
-					type: (i = a[h].cfm) ? 'confirm' : 'prompt',
-					text: ((typeof a[h].text == 'function' ? a[h].text.call(a[h], a[h].value) : a[h].text) || a[h].element.dataset.text || (d.target.innerText + ((!a[h].element.dataset.postfix && !a[h].postfix) ? '' : (' ' + (a[h].element.dataset.postfix || a[h].postfix))) + ':')),
-					value: (a[h].value || ''),
-					okFn: function(o, g){
-						if(g = (typeof a[h].valueFn != 'function' ? (!i ? _J(g) : '1') : a[h].valueFn.call(a[h], a[h].value, g))){
-							$((e + (!a[h].siteInfo ? '?' : (_M().request + '&')) + 'a=' + g + (!j ? '' : j)),
+				dialogQueue.push({
+					type: (isConfirmType = settingsDefs[settingKey].cfm) ? 'confirm' : 'prompt',
+					text: ((typeof settingsDefs[settingKey].text == 'function' ? settingsDefs[settingKey].text.call(settingsDefs[settingKey], settingsDefs[settingKey].value) : settingsDefs[settingKey].text) || settingsDefs[settingKey].element.dataset.text || (clickEvent.target.innerText + ((!settingsDefs[settingKey].element.dataset.postfix && !settingsDefs[settingKey].postfix) ? '' : (' ' + (settingsDefs[settingKey].element.dataset.postfix || settingsDefs[settingKey].postfix))) + ':')),
+					value: (settingsDefs[settingKey].value || ''),
+					okFn: function(o, dialogSteps){
+						if(dialogSteps = (typeof settingsDefs[settingKey].valueFn != 'function' ? (!isConfirmType ? applyCharReplacements(dialogSteps) : '1') : settingsDefs[settingKey].valueFn.call(settingsDefs[settingKey], settingsDefs[settingKey].value, dialogSteps))){
+							apiRequest((hrefValue + (!settingsDefs[settingKey].siteInfo ? '?' : (getCurrentContext().request + '&')) + 'a=' + dialogSteps + (!extraQueryString ? '' : extraQueryString)),
 							function(r){
-								b.dataset.ok = r,
-								a[h].value = (!a[h].emptyValue ? g : ''),
-								(typeof a[h].ok != 'function' ? void(0) : a[h].ok.call(a[h], d.target, e));
+								statusMessageEl.dataset.ok = r,
+								settingsDefs[settingKey].value = (!settingsDefs[settingKey].emptyValue ? dialogSteps : ''),
+								(typeof settingsDefs[settingKey].ok != 'function' ? void(0) : settingsDefs[settingKey].ok.call(settingsDefs[settingKey], clickEvent.target, hrefValue));
 							},
-							function(e){ b.dataset.error = e, (typeof a[h].bad != 'function' ? void(0) : a[h].bad.call(a[h], d.target, e)); });
+							function(hrefValue, httpStatus){ statusMessageEl.dataset.error = hrefValue, (typeof settingsDefs[settingKey].bad != 'function' ? void(0) : settingsDefs[settingKey].bad.call(settingsDefs[settingKey], clickEvent.target, hrefValue, httpStatus)); });
 						}
 					}
 				});
-				_Z5.apply(0, n);
+				showDialogSequence.apply(0, dialogQueue);
 			}
 		}
 	}
-	function _G(a, b, c, d, e, f){
-		f = document.createElement('a'),
-		f.innerText = b,
-		f[c || 'alias'] = (typeof e != 'function' ? b : e.call(f, b, d, a)),
-		f.href = (!d ? ('/admin:inside:delAlias?a=' + b) : (d + b)),
-		a.append(f);
-		return f;
+	function createSimpleEntryLink(container, label, propertyName, hrefPrefix, valueFn, newLinkEl){
+		newLinkEl = document.createElement('a'),
+		newLinkEl.innerText = label,
+		newLinkEl[propertyName || 'alias'] = (typeof valueFn != 'function' ? label : valueFn.call(newLinkEl, label, hrefPrefix, container)),
+		newLinkEl.href = (!hrefPrefix ? ('/admin:inside:delAlias?a=' + label) : (hrefPrefix + label)),
+		container.append(newLinkEl);
+		return newLinkEl;
 	}
-	function _H(a, b){
+	function renderSimpleEntries(container, entriesMap){
 		var c = Object.assign([], arguments), d;
-		c[0] = a;
-		for(d in b){ c[1] = d, _G.apply(0, c); }
+		c[0] = container;
+		for(d in entriesMap){ c[1] = d, createSimpleEntryLink.apply(0, c); }
 	}
-	function _I(a, b, c, d){
-		c = 0;
-		while(c < b.length){ if(!(d = (d || a)[b[c++]])){ return; } }
-		return d;
+	function getDeepProperty(rootObj, pathKeys, index, currentValue){
+		index = 0;
+		while(index < pathKeys.length){ if(!(currentValue = (currentValue || rootObj)[pathKeys[index++]])){ return; } }
+		return currentValue;
 	}
-	function _J(a, b, c){
-		if(typeof a != 'string'){ a = ''; }
-		if(!a){ return a; }
-		for(c in $Y){ a = a.replace(new RegExp(c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'), (!b ? $Y[c] : '')); }
-		return a;
+	function applyCharReplacements(inputValue, reverseFlag, charKey){
+		if(typeof inputValue != 'string'){ inputValue = ''; }
+		if(!inputValue){ return inputValue; }
+		for(charKey in charReplacementMap){ inputValue = inputValue.replace(new RegExp(charKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'), (!reverseFlag ? charReplacementMap[charKey] : '')); }
+		return inputValue;
 	}
-	function _K(){ $$ = []; }
-	function _L(a, b, c, d, e){ e = _((!e ? 'a:first-child ~ a' : 'a'), 0, a), e.forEach(function(f){ a.removeChild(f); }), (typeof c != 'function' ? 0 : c.apply(0, (!d ? [a, b] : [a, b].concat(d)))); };
-	function _M(a){
-		a = { site: '' };
-		if(O.dataset.stdSite){ a.site = O.dataset.stdSite, a.domain = O.dataset.stdSite, a.subdomain = '', a.request = ('?s=' + a.domain + '&d='); }
-		if(K.dataset.stdSubdomain){ a.site = (K.dataset.stdSubdomain + '.' + a.site), a.subdomain = K.dataset.stdSubdomain, a.request += a.subdomain; }
-		return a;
+	function resetTempEditValues(){ tempEditValues = []; }
+	function clearAndRender(container, data, renderFn, extraArgs, childrenToRemove){ childrenToRemove = $q((!childrenToRemove ? 'a:first-child ~ a' : 'a'), 0, container), childrenToRemove.forEach(function(f){ container.removeChild(f); }), (typeof renderFn != 'function' ? 0 : renderFn.apply(0, (!extraArgs ? [container, data] : [container, data].concat(extraArgs)))); };
+	function getCurrentContext(context){
+		context = { site: '' };
+		if(mainPanel.dataset.activeSite){ context.site = mainPanel.dataset.activeSite, context.domain = mainPanel.dataset.activeSite, context.subdomain = '', context.request = ('?s=' + context.domain + '&d='); }
+		if(subdomainPanel.dataset.activeSubdomain){ context.site = (subdomainPanel.dataset.activeSubdomain + '.' + context.site), context.subdomain = subdomainPanel.dataset.activeSubdomain, context.request += context.subdomain; }
+		return context;
 	}
-	function _N(a, b){
-		if(!b){
-			a.prepend(I), a.prepend(J);
-			if(a.dataset.stdSubdomain){ Q.innerText = Q.dataset.subdomainText; }
+	function toggleSiteSubdomainView(subdomainEl, isSiteMode){
+		if(!isSiteMode){
+			subdomainEl.prepend(siteActionButtonsListMoveRef), subdomainEl.prepend(subdomainBreadcrumbLink);
+			if(subdomainEl.dataset.activeSubdomain){ deleteSiteOrSubdomainLink.innerText = deleteSiteOrSubdomainLink.dataset.subdomainText; }
 		}
-		else { O.prepend(I), O.prepend(P), Q.innerText = Q.dataset.siteText; }
+		else { mainPanel.prepend(siteActionButtonsListMoveRef), mainPanel.prepend(siteBreadcrumbLink), deleteSiteOrSubdomainLink.innerText = deleteSiteOrSubdomainLink.dataset.siteText; }
 	}
-	function _O(a, b, c, d, e, f, g, h){
-		f = document.createElement('a'), f.href = ('#' + b), f[c] = (typeof e != 'function' ? function(j, k){ return { from: k, to: j } } : e).call(f, d, b),
-		g = document.createElement('span'), g.innerText = b,
-		h = document.createElement('i'), h.innerText = d,
-		a.appendChild(f), f.append(g), f.append(h);
+	function createKeyValueEntry(container, keyValue, propertyName, contentValue, valueFn, linkEl, labelSpan, contentItalic){
+		linkEl = document.createElement('a'), linkEl.href = ('#' + keyValue), linkEl[propertyName] = (typeof valueFn != 'function' ? function(j, k){ return { from: k, to: j } } : valueFn).call(linkEl, contentValue, keyValue),
+		labelSpan = document.createElement('span'), labelSpan.innerText = keyValue,
+		contentItalic = document.createElement('i'), contentItalic.innerText = contentValue,
+		container.appendChild(linkEl), linkEl.append(labelSpan), linkEl.append(contentItalic);
 	}
-	function _P(a, b, c, d, e){
-		e = document.createElement('a');
-		if(d){ e.dataset.https = ''; }
-		e.site = _Q(c), e.site._ = { name: b, element: e }, e.innerText = (b || 'Raíz'), e.href = ('#' + b), a.appendChild(e);
+	function createSiteEntry(container, name, siteData, isHttps, linkEl){
+		linkEl = document.createElement('a');
+		if(isHttps){ linkEl.dataset.hasHttps = ''; }
+		linkEl.site = cloneSiteData(siteData), linkEl.site._ = { name: name, element: linkEl }, linkEl.innerText = (name || 'Raíz'), linkEl.href = ('#' + name), container.appendChild(linkEl);
 	}
-	function _Q(a, b){
-		a = Object.assign({}, a);
-		for(b in a){ if(a[b] && typeof a[b] == 'object'){ a[b] = Object.assign({}, a[b]); } }
-		return a
+	function cloneSiteData(sourceObj, key){
+		sourceObj = Object.assign({}, sourceObj);
+		for(key in sourceObj){ if(sourceObj[key] && typeof sourceObj[key] == 'object'){ sourceObj[key] = Object.assign({}, sourceObj[key]); } }
+		return sourceObj
 	}
-	function _R(c){
-		(delete O.loaded), $('/admin:inside:sites', function(a, b, c, d){
-			if(typeof (a = _V(a)) == 'string'){ return (N.dataset.error = a); }
-			_A(L, a), $Y = {};
-			for(b in a['.']){ if(b in X_ && typeof X_[b].value == 'undefined'){ X_[b].value = a['.'][b]; } }
-			for(b in a['_']){
-				c = a['_'][b], d = 0;
-				switch(typeof c){
-					case 'string': $Y[b] = c; break;
-					case 'object': if(c && c['f']){ c = c['f'], $Y[b] = c, d = 1; }
+	function loadInitialData(isRetry){
+		(delete mainPanel.loaded), apiRequest.call(parseProxyResponse, '/admin:inside:sites', function(a, b, isRetry, d){
+			if(typeof (a = parseJsonResponse(a)) == 'string'){ return (statusMessageEl.dataset.error = a); }
+			renderSitesList(sitesListSection, a), charReplacementMap = {};
+			for(b in a[CONFIG_KEYS.GENERAL_CONFIG]){ if(b in generalSettingsDefs && typeof generalSettingsDefs[b].value == 'undefined'){ generalSettingsDefs[b].value = a[CONFIG_KEYS.GENERAL_CONFIG][b]; } }
+			for(b in a[CONFIG_KEYS.CHARS_REPLACE]){
+				isRetry = a[CONFIG_KEYS.CHARS_REPLACE][b], d = 0;
+				switch(typeof isRetry){
+					case 'string': charReplacementMap[b] = isRetry; break;
+					case 'object': if(isRetry && isRetry['f']){ isRetry = isRetry['f'], charReplacementMap[b] = isRetry, d = 1; }
 				}
-				_ZZ(A, b, c, d);
+				createCharsReplaceEntry(charsReplaceSection, b, isRetry, d);
 			}
-			for(b in a['@']){ _ZY(B, b, a['@'][b]); }
-			for(b in a['#']){
-				c = a['#'][b], d = (c && typeof c == 'object' && c['f']),
-				_ZX(C, b, (!d ? c : c['f']), d);
+			for(b in a[CONFIG_KEYS.DENIED_IPS]){ createDeniedIpEntry(deniedIpsSection, b, a[CONFIG_KEYS.DENIED_IPS][b]); }
+			for(b in a[CONFIG_KEYS.HTTP_CODES]){
+				isRetry = a[CONFIG_KEYS.HTTP_CODES][b], d = (isRetry && typeof isRetry == 'object' && isRetry['f']),
+				createHttpCodeResponseEntry(httpCodeResponsesSection, b, (!d ? isRetry : isRetry['f']), d);
 			}
-		}, function(){ (c ? N.dataset.error = 'Actualice la página' : _R(1)); });
+		}, function(){ (isRetry ? statusMessageEl.dataset.error = 'Actualice la página' : loadInitialData(1)); });
 	}
-	function _S(e, f){
-		$(('/admin:inside:subdomains?s=' + e.site._.name), function(a, b){
-			if(typeof (a = _V(a)) == 'string'){ return (N.dataset.error = a); }
-			e.site = Object.assign(e.site, a), O.loaded[e.site._.name] = 1,
-			O.dataset.stdSite = e.site._.name, O.site = e.site;
-		}, function(a){ (f ? N.dataset.error = a : _S(e, 1)); });
+	function loadSiteSubdomains(siteEntry, isRetry){
+		apiRequest.call(parseProxyResponse, ('/admin:inside:subdomains?s=' + siteEntry.site._.name), function(a, b){
+			if(typeof (a = parseJsonResponse(a)) == 'string'){ return (statusMessageEl.dataset.error = a); }
+			siteEntry.site = Object.assign(siteEntry.site, a), mainPanel.loaded[siteEntry.site._.name] = 1,
+			mainPanel.dataset.activeSite = siteEntry.site._.name, mainPanel.site = siteEntry.site;
+		}, function(a){ (isRetry ? statusMessageEl.dataset.error = a : loadSiteSubdomains(siteEntry, 1)); });
 	}
-	function _T(e, f){
-		$(('/admin:inside:subdomainData?s=' + O.dataset.stdSite + '&d=' + e.site._.name), function(a, b){
-			if(typeof (a = _V(a)) == 'string'){ return (N.dataset.error = a); }
-			e.site = Object.assign(e.site, a), O.loaded[e.site._.name + '.' + O.dataset.stdSite] = 1,
-			K.subdomain = e.site, K.dataset.stdSubdomain = e.site._.name;
-		}, function(a){ (f ? N.dataset.error = a : _T(e, 1)); });
+	function loadSubdomainData(subdomainEntry, isRetry){
+		apiRequest.call(parseProxyResponse, ('/admin:inside:subdomainData?s=' + mainPanel.dataset.activeSite + '&d=' + subdomainEntry.site._.name), function(a, b){
+			if(typeof (a = parseJsonResponse(a)) == 'string'){ return (statusMessageEl.dataset.error = a); }
+			subdomainEntry.site = Object.assign(subdomainEntry.site, a), mainPanel.loaded[subdomainEntry.site._.name + '.' + mainPanel.dataset.activeSite] = 1,
+			subdomainPanel.subdomain = subdomainEntry.site, subdomainPanel.dataset.activeSubdomain = subdomainEntry.site._.name;
+		}, function(a){ (isRetry ? statusMessageEl.dataset.error = a : loadSubdomainData(subdomainEntry, 1)); });
 	}
-	function _U(a){ return (a.indexOf('data-err') != -1 ? 'Vuelva a entrar' : (!a ? 'Vuelva a intentarlo' : (a.indexOf('<meta') != -1 ? 'Inautorizado' : null))); }
-	function _V(a){
-		try { a = JSON.parse(a); }
-		catch(a){ return 'Contenido incorrecto'; }
-		if(!Object.keys(a).length){ return 'Contenido vacío'; }
-		return a;
+	function detectAuthError(responseText){ return (responseText.indexOf('data-err') != -1 ? 'Vuelva a entrar' : (!responseText ? 'Vuelva a intentarlo' : (responseText.indexOf('<meta') != -1 ? 'Inautorizado' : null))); }
+	function parseResponse(text, status){
+        try { return JSON.parse(text); }
+        catch (e) { return { status: status, message: text }; }
+    }
+    function parseProxyResponse(text, status){
+        return { status: status, message: text };
+    }
+	function parseJsonResponse(rawJson){
+		try { rawJson = JSON.parse(rawJson); }
+		catch(rawJson){ return 'Contenido incorrecto'; }
+		if(!Object.keys(rawJson).length){ return 'Contenido vacío'; }
+		return rawJson;
 	}
-	function _W(a, b, c, d, e){
-		e = {};
-		for(d in b){
-			if(!c[d] || typeof c[d] != 'object' || !c[d].element){ continue; }
-			if(typeof c[d].setting == 'function'){ e[d] = 1; }
-			try { c[d].value = decodeURIComponent(b[d]); }
-			catch(__e){ c[d].value = self['unescape'] ? unescape(b[d]) : b[d]; }
+	function applySettingsFromQuery(unusedContainer, queryParams, settingsDefs, settingKey, pendingSettingCalls){
+		pendingSettingCalls = {};
+		for(settingKey in queryParams){
+			if(!settingsDefs[settingKey] || typeof settingsDefs[settingKey] != 'object' || !settingsDefs[settingKey].element){ continue; }
+			if(typeof settingsDefs[settingKey].setting == 'function'){ pendingSettingCalls[settingKey] = 1; }
+			try { settingsDefs[settingKey].value = decodeURIComponent(queryParams[settingKey]); }
+			catch(__e){ settingsDefs[settingKey].value = self['unescape'] ? unescape(queryParams[settingKey]) : queryParams[settingKey]; }
 		}
-		for(d in e){ c[d].setting(b[d]); }
+		for(settingKey in pendingSettingCalls){ settingsDefs[settingKey].setting(queryParams[settingKey]); }
 	}
-	function _X(d, e){
+	function createToggleSettingDef(settingKey, pairedSettingKey){
 		return {
 			cfm: true,
 			siteInfo: true,
-			text: _Y,
-			valueFn: _Z,
-			ok: function(a, b){ a = _M(), b = O.site[a.subdomain], b['!'][d] = this.value, this.setting(this.value); },
+			text: getToggleLabel,
+			valueFn: toggleValue,
+			ok: function(a, b){ a = getCurrentContext(), b = mainPanel.site[a.subdomain], b[CONFIG_KEYS.SITE_CONFIG][settingKey] = this.value, this.setting(this.value); },
 			setting: function(a, b, c){
-				b = _M(), c = b.subdomain && b.subdomain != 'www', _Z0.call(this, a);
-				if(a != '0' || c){ W_[e].element.parentNode.dataset.hidden = '' }
-				else { (delete W_[e].element.parentNode.dataset.hidden); }
-				if(W_[e].value != '0' || c){ this.element.parentNode.dataset.hidden = ''; }
-				else { (delete this.element.parentNode.dataset.hidden); }
+				b = getCurrentContext(), c = b.subdomain && b.subdomain != 'www', updateToggleButtonText.call(this, a);
+				if(a != '0' || c){ siteSettingsDefs[pairedSettingKey].element.parentNode.dataset.isHidden = '' }
+				else { (delete siteSettingsDefs[pairedSettingKey].element.parentNode.dataset.isHidden); }
+				if(siteSettingsDefs[pairedSettingKey].value != '0' || c){ this.element.parentNode.dataset.isHidden = ''; }
+				else { (delete this.element.parentNode.dataset.isHidden); }
 			}
 		}
 	}
-	function _Y(a){ return (this.element.dataset[(a != '0' ? 'false' : 'true') + 'Text']); }
-	function _Z(a){ return (a != '0' ? '0' : '1'); }
-	function _Z0(a){ this.element.innerText = this.element.dataset[a != '0' ? 'false' : 'true']; }
-	function _Z1(a, b){
-		_C(a, 'childList', function(){
+	function getToggleLabel(currentValue){ return (this.element.dataset[(currentValue != '0' ? 'false' : 'true') + 'Text']); }
+	function toggleValue(currentValue){ return (currentValue != '0' ? '0' : '1'); }
+	function updateToggleButtonText(currentValue){ this.element.innerText = this.element.dataset[currentValue != '0' ? 'false' : 'true']; }
+	function attachDeleteConfirmation(container, deleteConfig){
+		observeMutations(container, 'childList', function(){
 			if(this.addedNodes.length){
 				this.addedNodes.forEach(function(i){
 					if(i.nodeName != 'A'){ return; }
 					i.onclick = function(c){
-						if(typeof c.target.dataset.x != 'undefined'){ return; }
-						a.firstElementChild.onclick.call(i, c, i[b.key], i[b.value]);
+						if(typeof c.target.dataset.actionDelete != 'undefined'){ return; }
+						container.firstElementChild.onclick.call(i, c, i[deleteConfig.key], i[deleteConfig.value]);
 					};
 					if(!i.firstElementChild){ return; }
 					i.firstElementChild.onclick = function(c, d, e, f){
 						c.preventDefault(), f = this;
-						_Z4('confirm', {
-							text: b.text.replace('{REFERENCE}', i[b.key]),
-							okFn: function(){ d = f.href.indexOf('#'), $(((d != -1 ? f.href.substring(0, d) : f.href) + '?s=' + _J(i[b.key])), function(r){ N.dataset.ok = r, (typeof b.okFn == 'function' ? b.okFn.call(i, i[b.key], i[b.value]) : a.removeChild(i)); }, function(e){ N.dataset.error = e; }); }
+						showDialog('confirm', {
+							text: deleteConfig.text.replace('{REFERENCE}', i[deleteConfig.key]),
+							okFn: function(){ d = f.href.indexOf('#'), apiRequest(((d != -1 ? f.href.substring(0, d) : f.href) + '?s=' + applyCharReplacements(i[deleteConfig.key])), function(r){ statusMessageEl.dataset.ok = r, (typeof deleteConfig.okFn == 'function' ? deleteConfig.okFn.call(i, i[deleteConfig.key], i[deleteConfig.value]) : container.removeChild(i)); }, function(e){ statusMessageEl.dataset.error = e; }); }
 						});
 					};
 				});
 			}
 		});
 	}
-	function _Z2(a, b){
-		clearTimeout(a._t), b = _Z3(b);
-		if(b > 7200){ return; } // Like 2 hours
-		a._t = setTimeout(function(){
-			a.parentNode.removeChild(a);
-		}, b);
+	function scheduleAutoRemoval(entryEl, unblockTimestamp){
+		clearTimeout(entryEl._t), unblockTimestamp = msUntilTimestamp(unblockTimestamp);
+		if(unblockTimestamp > 7200){ return; } // Like 2 hours
+		entryEl._t = setTimeout(function(){
+			entryEl.parentNode.removeChild(entryEl);
+		}, unblockTimestamp);
 	}
-	function _Z3(a, b){
-		a = new Date(a * 1000).getTime(), b = (new Date).getTime();
-		return (a <= b ? 0 : a - b);
+	function msUntilTimestamp(unixTimestamp, nowMs){
+		unixTimestamp = new Date(unixTimestamp * 1000).getTime(), nowMs = (new Date).getTime();
+		return (unixTimestamp <= nowMs ? 0 : unixTimestamp - nowMs);
 	}
-	function _Z4(a, b, c, d, e, f, g, h, i, j, k){
-		k = a == 'prompt',
-		h = document.createElement('article'), document.body.appendChild(h),
-		i = document.createElement('div'), h.appendChild(i),
-		c = document.createElement('span'), i.appendChild(c),
-		d = document.createElement('button'), d.innerText = b.cancelText || (!k ? 'No' : 'Cancelar'), c.appendChild(d),
-		e = document.createElement('button'), e.innerText = b.okText || (!k ? 'Sí' : 'Aceptar'), e.dataset.first = '', c.appendChild(e);
-		if(b.assign && typeof b.assign == 'object'){ for(j in b.assign){ h[j] = b.assign[j]; } }
-		if(b.text){ f = document.createElement('p'), f.innerText = b.text, i.prepend(f); }
-		if(k){
-			g = document.createElement('input'),
-			g.type = 'text',
-			g.placeholder = b.placeholder || '',
-			g.value = b.value || '',
-			(!f ? i.prepend(g) : f.insertAdjacentElement('afterend', g)), g.focus();
+	function showDialog(dialogType, dialogConfig, buttonsWrapperSpan, cancelButton, okButton, messageParagraph, textInput, articleEl, contentDiv, assignKey, isPromptType){
+		isPromptType = dialogType == 'prompt',
+		articleEl = document.createElement('article'), document.body.appendChild(articleEl),
+		contentDiv = document.createElement('div'), articleEl.appendChild(contentDiv),
+		buttonsWrapperSpan = document.createElement('span'), contentDiv.appendChild(buttonsWrapperSpan),
+		cancelButton = document.createElement('button'), cancelButton.innerText = dialogConfig.cancelText || (!isPromptType ? 'No' : 'Cancelar'), buttonsWrapperSpan.appendChild(cancelButton),
+		okButton = document.createElement('button'), okButton.innerText = dialogConfig.okText || (!isPromptType ? 'Sí' : 'Aceptar'), okButton.dataset.primaryBtn = '', buttonsWrapperSpan.appendChild(okButton);
+		if(dialogConfig.assign && typeof dialogConfig.assign == 'object'){ for(assignKey in dialogConfig.assign){ articleEl[assignKey] = dialogConfig.assign[assignKey]; } }
+		if(dialogConfig.text){ messageParagraph = document.createElement('p'), messageParagraph.innerText = dialogConfig.text, contentDiv.prepend(messageParagraph); }
+		if(isPromptType){
+			textInput = document.createElement('input'),
+			textInput.type = 'text',
+			textInput.placeholder = dialogConfig.placeholder || '',
+			textInput.value = dialogConfig.value || '',
+			(!messageParagraph ? contentDiv.prepend(textInput) : messageParagraph.insertAdjacentElement('afterend', textInput)), textInput.focus();
 		}
-		h.onclick = function(j){ if(j.target.nodeName == 'ARTICLE'){ d.click(); } }
-		d.onclick = function(){
-			g = (!g ? null : g.value), (typeof b.cancelFn == 'function' ? b.cancelFn.call(h, b, g) : 0), document.body.removeChild(h);
-			(!b.required && b.next && typeof b.next == 'object' ? (b.next.previous = b, b.next.previous.finalValue = g, _Z4(b.next.type, b.next)) : 0);
+		articleEl.onclick = function(assignKey){ if(assignKey.target.nodeName == 'ARTICLE'){ cancelButton.click(); } }
+		cancelButton.onclick = function(){
+			textInput = (!textInput ? null : textInput.value), (typeof dialogConfig.cancelFn == 'function' ? dialogConfig.cancelFn.call(articleEl, dialogConfig, textInput) : 0), document.body.removeChild(articleEl);
+			(!dialogConfig.required && dialogConfig.next && typeof dialogConfig.next == 'object' ? (dialogConfig.next.previous = dialogConfig, dialogConfig.next.previous.finalValue = textInput, showDialog(dialogConfig.next.type, dialogConfig.next)) : 0);
 		}
-		e.onclick = function(){
-			if(g && b.required && !g.value && b.strict !== false){ return g.focus(); }
-			g = (!g ? null : g.value), (typeof b.okFn == 'function' ? b.okFn.call(h, b, g) : 0), document.body.removeChild(h);
-			(b.next && typeof b.next == 'object' ? (b.next.previous = b, b.next.previous.finalValue = g, _Z4(b.next.type, b.next)) : 0);
+		okButton.onclick = function(){
+			if(textInput && dialogConfig.required && !textInput.value && dialogConfig.strict !== false){ return textInput.focus(); }
+			textInput = (!textInput ? null : textInput.value), (typeof dialogConfig.okFn == 'function' ? dialogConfig.okFn.call(articleEl, dialogConfig, textInput) : 0), document.body.removeChild(articleEl);
+			(dialogConfig.next && typeof dialogConfig.next == 'object' ? (dialogConfig.next.previous = dialogConfig, dialogConfig.next.previous.finalValue = textInput, showDialog(dialogConfig.next.type, dialogConfig.next)) : 0);
 		}
 	}
-	function _Z5(){
+	function showDialogSequence(){
 		var a = 0;
 		for(; a < arguments.length; a++){ arguments[a].type = arguments[a].type || 'prompt', arguments[a].next = arguments[a + 1]; }
 		if(arguments.length && !arguments[a - 1].next){ delete arguments[a - 1].next; }
-		_Z4(arguments[0].type, arguments[0]);
+		showDialog(arguments[0].type, arguments[0]);
 	}
-	function _ZZ(a, b, c, d, e){
-		e = document.createElement('a');
-		e.chars = b, e.replacement = c, e.innerText = b, e.href = ('/admin:inside:addCharsReplace#' + b),
-		a.appendChild(e), (!d ? _E(e, '/admin:inside:delCharsReplace', 'span') : 0);
+	function createCharsReplaceEntry(container, charsValue, replacementValue, skipDeleteButton, linkEl){
+		linkEl = document.createElement('a');
+		linkEl.chars = charsValue, linkEl.replacement = replacementValue, linkEl.innerText = charsValue, linkEl.href = ('/admin:inside:addCharsReplace#' + charsValue),
+		container.appendChild(linkEl), (!skipDeleteButton ? createDeleteButton(linkEl, '/admin:inside:delCharsReplace', 'span') : 0);
 	}
-	function _ZY(a, b, c, d){
-		d = document.createElement('a');
-		d.ip = b, d.unblockingDate = c, d.innerText = b, d.href = ('/admin:inside:addDenied#' + b),
-		a.appendChild(d), _E(d, '/admin:inside:delDenied', 'span'),	_Z2(d, c);
+	function createDeniedIpEntry(container, ipValue, unblockingDate, linkEl){
+		linkEl = document.createElement('a');
+		linkEl.ip = ipValue, linkEl.unblockingDate = unblockingDate, linkEl.innerText = ipValue, linkEl.href = ('/admin:inside:addDenied#' + ipValue),
+		container.appendChild(linkEl), createDeleteButton(linkEl, '/admin:inside:delDenied', 'span'),	scheduleAutoRemoval(linkEl, unblockingDate);
 	}
-	function _ZX(a, b, c, d, e){
-		e = document.createElement('a'),
-		e.httpCode = b, e.response = c, e.innerText = (b == '0' ? 'Por defecto' : b), e.href = ('/admin:inside:addHttpCodeResponse#' + b),
-		a.appendChild(e), (!d ? _E(e, '/admin:inside:delHttpCodeResponse', 'span') : 0);
+	function createHttpCodeResponseEntry(container, httpCode, responseValue, skipDeleteButton, linkEl){
+		linkEl = document.createElement('a'),
+		linkEl.httpCode = httpCode, linkEl.response = responseValue, linkEl.innerText = (httpCode == '0' ? 'Por defecto' : httpCode), linkEl.href = ('/admin:inside:addHttpCodeResponse#' + httpCode),
+		container.appendChild(linkEl), (!skipDeleteButton ? createDeleteButton(linkEl, '/admin:inside:delHttpCodeResponse', 'span') : 0);
 	}
 
-	D = _('#Q', 1),
-	E = _('#B', 1),
-	F = _('#N', 1),
-	G = _('#I > a:first-child', 1),
-	H = _('#J > a:first-child', 1),
-	I = _('#T + ul', 1),
-	J = _('#R > a:first-child', 1),
-	K = _('#R', 1),
-	L = _('#A', 1),
-	A = _('#P', 1),
-	B = _('#K', 1),
-	C = _('#X', 1),
-	M = _('aside', 1),
-	N = _('header > p', 1),
-	O = _('main', 1),
-	P = _('#T', 1),
-	Q = _('#D', 1),
-	R = _('#U', 1),
-	S = _('#O input', 1),
-	T = _('#S > a:first-child', 1),
-	U = _('#W > a:first-child', 1),
-	V = _('#M > a:first-child', 1),
-	W = _('#H > a:first-child', 1),
-	X = _('#G', 1),
-	Y = _('#L', 1),
-	Z = _('#Z > a:first-child', 1),
-	U_ = _('fieldset legend'),
-	T_ = _('[href="/admin:signout:"]', 1);
+	requestLimitsFieldset = $q('#sec-request-limits', 1),
+	siteActionButtonsList = $q('#list-site-actions', 1),
+	generalSettingsFieldset = $q('#sec-general-settings', 1),
+	addIndexLink = $q('#box-indexes > a:first-child', 1),
+	addPreprocessorLink = $q('#box-preprocessors > a:first-child', 1),
+	siteActionButtonsListMoveRef = $q('#link-site-breadcrumb + ul', 1),
+	subdomainBreadcrumbLink = $q('#panel-subdomain > a:first-child', 1),
+	subdomainPanel = $q('#panel-subdomain', 1),
+	sitesListSection = $q('#sec-sites-list', 1),
+	charsReplaceSection = $q('#sec-chars-replace', 1),
+	deniedIpsSection = $q('#sec-denied-ips', 1),
+	httpCodeResponsesSection = $q('#sec-http-codes', 1),
+	sidebarAside = $q('aside', 1),
+	statusMessageEl = $q('header > p', 1),
+	mainPanel = $q('main', 1),
+	siteBreadcrumbLink = $q('#link-site-breadcrumb', 1),
+	deleteSiteOrSubdomainLink = $q('#btn-delete-entity', 1),
+	uploadFilesLink = $q('#btn-upload-files', 1),
+	uploadFileInput = $q('#form-file-upload input', 1),
+	addSubdomainLink = $q('#sec-subdomains > a:first-child', 1),
+	addRewriteLink = $q('#box-rewrites > a:first-child', 1),
+	addMimeLink = $q('#box-mime > a:first-child', 1),
+	addHeaderLink = $q('#box-headers > a:first-child', 1),
+	requestTimingFieldset = $q('#sec-request-timing', 1),
+	requestRateFieldset = $q('#sec-request-rate', 1),
+	addAliasLink = $q('#sec-aliases > a:first-child', 1),
+	fieldsetLegendsList = $q('fieldset legend'),
+	signOutLink = $q('[href="/admin:signout:"]', 1);
 
-	Z_ = { '#': {}, '@': {}, '_': {}, '.': {}, '!': {}, '$': {}, '&': {}, '?': {}, '-': {}, '=': {} },
-	Y_ = {
-		'S': function(a, i){
-			O.site[i.site._.name] = i.site, i.onclick = function(a){
-				a.preventDefault();
-				if(!O.loaded[this.site._.name + '.' + O.dataset.stdSite]){ return _T(this); }
-				K.subdomain = this.site, K.dataset.stdSubdomain = this.site._.name;
+	reservedKeysMap = {
+		[CONFIG_KEYS.HTTP_CODES]: {},
+		[CONFIG_KEYS.DENIED_IPS]: {},
+		[CONFIG_KEYS.CHARS_REPLACE]: {},
+		[CONFIG_KEYS.GENERAL_CONFIG]: {},
+		[CONFIG_KEYS.SITE_CONFIG]: {},
+		[CONFIG_KEYS.MIME_TYPES]: {},
+		[CONFIG_KEYS.ALIASES]: {},
+		[CONFIG_KEYS.PREPROCESSORS]: {},
+		[CONFIG_KEYS.INDEXES]: {},
+		[CONFIG_KEYS.REWRITES]: {}
+	},
+	newEntryHandlersByContainer = {
+		'sec-subdomains': function handleNewSubdomainEntry(container, newLinkEl){
+			mainPanel.site[newLinkEl.site._.name] = newLinkEl.site, newLinkEl.onclick = function(event){
+				event.preventDefault();
+				if(!mainPanel.loaded[this.site._.name + '.' + mainPanel.dataset.activeSite]){ return loadSubdomainData(this); }
+				subdomainPanel.subdomain = this.site, subdomainPanel.dataset.activeSubdomain = this.site._.name;
 			};
 		},
-		'Z': function(a, i){
-			i.onclick = function(b, c, d, e){
-				b.preventDefault(), c = _M(), e = this, d = e.alias;
-				_Z4('confirm', {
-					text: '¿Borrar el alias "' + d + '" de "' + c.site + '"?',
-					okFn: function(){ $((e.href + '&s=' + c.domain + '&d=' + c.subdomain), function(r){ N.dataset.ok = r, a.removeChild(i), (delete O.site[c.subdomain]['&'][d]); }, function(e){ N.dataset.error = e; }); }
+		'sec-aliases': function handleNewAliasEntry(container, newLinkEl){
+			newLinkEl.onclick = function(event, context, aliasValue, triggerEl){
+				event.preventDefault(), context = getCurrentContext(), triggerEl = this, aliasValue = triggerEl.alias;
+				showDialog('confirm', {
+					text: '¿Borrar el alias "' + aliasValue + '" de "' + context.site + '"?',
+					okFn: function(){ apiRequest((triggerEl.href + '&s=' + context.domain + '&d=' + context.subdomain), function(r){ statusMessageEl.dataset.ok = r, container.removeChild(newLinkEl), (delete mainPanel.site[context.subdomain][CONFIG_KEYS.ALIASES][aliasValue]); }, function(e){ statusMessageEl.dataset.error = e; }); }
 				});
 			};
 		},
-		'W': function(a, i, j, k, l){
-			j = _E(i, '/admin:inside:delRewrite'), k = i.rewrite.from, l = i.rewrite.to,
-			j.onclick = function(b){
-				b.preventDefault();
-				_Z4('confirm', { text: '¿Borrar la reescritura "' + k + '" a "' + l + '"?', okFn: function(){ $((j.href + _M().request + '&a=' + _J(k)), function(r){ N.dataset.ok = r, (delete K.subdomain['='][k]), a.removeChild(i), a.removeChild(j), _K(); }, function(e){ N.dataset.error = e, _K(); }); }});
-			}, i.onclick = function(b){ b.preventDefault(), $$[0] = k, $$[1] = l, U.onclick.call(this); };
+		'box-rewrites': function handleNewRewriteEntry(container, newLinkEl, deleteBtn, fromOrName, toOrContent){
+			deleteBtn = createDeleteButton(newLinkEl, '/admin:inside:delRewrite'), fromOrName = newLinkEl.rewrite.from, toOrContent = newLinkEl.rewrite.to,
+			deleteBtn.onclick = function(event){
+				event.preventDefault();
+			showDialog('confirm', { text: '¿Borrar la reescritura "' + fromOrName + '" a "' + toOrContent + '"?', okFn: function(){ apiRequest((deleteBtn.href + getCurrentContext().request + '&a=' + applyCharReplacements(fromOrName)), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.REWRITES][fromOrName]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
+			}, newLinkEl.onclick = function(event){ event.preventDefault(), tempEditValues[0] = fromOrName, tempEditValues[1] = toOrContent, addRewriteLink.onclick.call(this); };
 		},
-		'M': function(a, i, j, k, l){
-			j = _E(i, '/admin:inside:delMIME'), k = i.mime.from, l = i.mime.to,
-			j.onclick = function(b){
-				b.preventDefault();
-				_Z4('confirm', { text: '¿Borrar el MIME "' + k + '" con "' + l + '"?', okFn: function(){ $((j.href + _M().request + '&a=' + k), function(r){ N.dataset.ok = r, (delete K.subdomain['$'][k]), a.removeChild(i), a.removeChild(j), _K(); }, function(e){ N.dataset.error = e, _K(); }); }});
-			}, i.onclick = function(b){ b.preventDefault(), $$[0] = k, $$[1] = l, V.onclick.call(this); };
+		'box-mime': function handleNewMimeEntry(container, newLinkEl, deleteBtn, fromOrName, toOrContent){
+			deleteBtn = createDeleteButton(newLinkEl, '/admin:inside:delMIME'), fromOrName = newLinkEl.mime.from, toOrContent = newLinkEl.mime.to,
+			deleteBtn.onclick = function(event){
+				event.preventDefault();
+				showDialog('confirm', { text: '¿Borrar el MIME "' + fromOrName + '" con "' + toOrContent + '"?', okFn: function(){ apiRequest((deleteBtn.href + getCurrentContext().request + '&a=' + fromOrName), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.MIME_TYPES][fromOrName]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
+			}, newLinkEl.onclick = function(event){ event.preventDefault(), tempEditValues[0] = fromOrName, tempEditValues[1] = toOrContent, addMimeLink.onclick.call(this); };
 		},
-		'H': function(a, i, j, k, l){
-			j = _E(i, '/admin:inside:delHeader'), k = i.header.name, l = i.header.content,
-			j.onclick = function(b){
-				b.preventDefault();
-				_Z4('confirm', { text: '¿Borrar la cabecera "' + k + '" con "' + l + '"?', okFn: function(){ $((j.href + _M().request + '&a=' + k), function(r){ N.dataset.ok = r, (delete K.subdomain['.'][k]), a.removeChild(i), a.removeChild(j), _K(); }, function(e){ N.dataset.error = e, _K(); }); }});
-			}, i.onclick = function(b){ b.preventDefault(), $$[0] = k, $$[1] = l, W.onclick.call(this); };
+		'box-headers': function handleNewHeaderEntry(container, newLinkEl, deleteBtn, fromOrName, toOrContent){
+			deleteBtn = createDeleteButton(newLinkEl, '/admin:inside:delHeader'), fromOrName = newLinkEl.header.name, toOrContent = newLinkEl.header.content,
+			deleteBtn.onclick = function(event){
+				event.preventDefault();
+				showDialog('confirm', { text: '¿Borrar la cabecera "' + fromOrName + '" con "' + toOrContent + '"?', okFn: function(){ apiRequest((deleteBtn.href + getCurrentContext().request + '&a=' + fromOrName), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.HEADERS][fromOrName]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
+			}, newLinkEl.onclick = function(event){ event.preventDefault(), tempEditValues[0] = fromOrName, tempEditValues[1] = toOrContent, addHeaderLink.onclick.call(this); };
 		},
-		'J': function(a, i, j, k, l){
-			j = _E(i, '/admin:inside:delPreprocessor'), k = i.preprocessor.from, l = i.preprocessor.to,
-			j.onclick = function(b){
-				b.preventDefault();
-				_Z4('confirm', { text: '¿Borrar el preprocesador para "' + k + '" con "' + l + '"?', okFn: function(){ $((j.href + _M().request + '&a=' + k), function(r){ N.dataset.ok = r, (delete K.subdomain['?'][k]), a.removeChild(i), a.removeChild(j), _K(); }, function(e){ N.dataset.error = e, _K(); }); }});
-			}, i.onclick = function(b){ b.preventDefault(), $$[0] = k, $$[1] = l, H.onclick.call(this); };
+		'box-preprocessors': function handleNewPreprocessorEntry(container, newLinkEl, deleteBtn, fromOrName, toOrContent){
+			deleteBtn = createDeleteButton(newLinkEl, '/admin:inside:delPreprocessor'), fromOrName = newLinkEl.preprocessor.from, toOrContent = newLinkEl.preprocessor.to,
+			deleteBtn.onclick = function(event){
+				event.preventDefault();
+				showDialog('confirm', { text: '¿Borrar el preprocesador para "' + fromOrName + '" con "' + toOrContent + '"?', okFn: function(){ apiRequest((deleteBtn.href + getCurrentContext().request + '&a=' + fromOrName), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.PREPROCESSORS][fromOrName]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
+			}, newLinkEl.onclick = function(event){ event.preventDefault(), tempEditValues[0] = fromOrName, tempEditValues[1] = toOrContent, addPreprocessorLink.onclick.call(this); };
 		},
-		'I': function(a, i, j, k, l){
-			j = _E(i, '/admin:inside:delIndex'), k = i.index, l = _M(),
-			j.onclick = function(b){
-				b.preventDefault();
-				_Z4('confirm', { text: '¿Borrar el índice "' + k + '" de "' + l.site + '"?', okFn: function(){ $((j.href + l.request + '&a=' + _J(k)), function(r){ N.dataset.ok = r, (delete K.subdomain['-'][k]), a.removeChild(i), a.removeChild(j), _K(); }, function(e){ N.dataset.error = e, _K(); }); }});
-			}, i.onclick = function(b){ b.preventDefault(), $$[0] = k, G.onclick.call(this); };
+		'box-indexes': function handleNewIndexEntry(container, newLinkEl, deleteBtn, indexValue, context){
+			deleteBtn = createDeleteButton(newLinkEl, '/admin:inside:delIndex'), indexValue = newLinkEl.index, context = getCurrentContext(),
+			deleteBtn.onclick = function(event){
+				event.preventDefault();
+				showDialog('confirm', { text: '¿Borrar el índice "' + indexValue + '" de "' + context.site + '"?', okFn: function(){ apiRequest((deleteBtn.href + context.request + '&a=' + applyCharReplacements(indexValue)), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.INDEXES][indexValue]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
+			}, newLinkEl.onclick = function(event){ event.preventDefault(), tempEditValues[0] = indexValue, addIndexLink.onclick.call(this); };
 		}
 	},
-	X_ = { 'U': { extra: { value: '', required: 1 } }, 'P': { extra: { value: '', required: 1 } }, 'C': { cfm: true, emptyValue: true }, 'RHT': {}, 'RT': {}, 'WT': {}, 'IT': {}, 'CII': {}, 'MUB': {}, 'MHB': {}, 'MBB': {}, 'CIS': {}, 'CIL': {} },
-	X_['M'] = { ok: function(a){ _L(L), _L(A), _L(B), _L(C), _R(); } },
-	X_['U'].extra.text = X_['P'].extra.text = 'Contraseña actual:',
-	X_['RHT'].postfix = X_['RT'].postfix = X_['WT'].postfix = X_['IT'].postfix = '(milisegundos [ms], segundos [s], minutos [m], e ilimitado [0])',
-	X_['MUB'].postfix = X_['MHB'].postfix = X_['MBB'].postfix = '(bytes)',
-	D.onclick = _F(X_, N), F.onclick = _F(X_, N), X.onclick = _F(X_, N), Y.onclick = _F(X_, N);
-	W_ = {
+	generalSettingsDefs = { 'U': { extra: { value: '', required: 1 } }, 'P': { extra: { value: '', required: 1 } }, 'C': { cfm: true, emptyValue: true }, 'RHT': {}, 'RT': {}, 'WT': {}, 'IT': {}, 'CII': {}, 'MUB': {}, 'MHB': {}, 'MBB': {}, 'CIS': {}, 'CIL': {} },
+	generalSettingsDefs['M'] = { ok: function(a){ clearAndRender(sitesListSection), clearAndRender(charsReplaceSection), clearAndRender(deniedIpsSection), clearAndRender(httpCodeResponsesSection), loadInitialData(); } },
+	generalSettingsDefs['U'].extra.text = generalSettingsDefs['P'].extra.text = 'Contraseña actual:',
+	generalSettingsDefs['RHT'].postfix = generalSettingsDefs['RT'].postfix = generalSettingsDefs['WT'].postfix = generalSettingsDefs['IT'].postfix = '(milisegundos [ms], segundos [s], minutos [m], e ilimitado [0])',
+	generalSettingsDefs['MUB'].postfix = generalSettingsDefs['MHB'].postfix = generalSettingsDefs['MBB'].postfix = '(bytes)',
+	requestLimitsFieldset.onclick = createSettingsClickHandler(generalSettingsDefs, statusMessageEl), generalSettingsFieldset.onclick = createSettingsClickHandler(generalSettingsDefs, statusMessageEl), requestTimingFieldset.onclick = createSettingsClickHandler(generalSettingsDefs, statusMessageEl), requestRateFieldset.onclick = createSettingsClickHandler(generalSettingsDefs, statusMessageEl);
+	siteSettingsDefs = {
 		'S': {
 			cfm: true,
 			siteInfo: true,
-			text: _Y,
-			valueFn: _Z,
+			text: getToggleLabel,
+			valueFn: toggleValue,
 			ok: function(a, b){
-				a = _M(), b = O.site[a.subdomain], b['!']['S'] = this.value, this.setting(this.value);
+				a = getCurrentContext(), b = mainPanel.site[a.subdomain], b[CONFIG_KEYS.SITE_CONFIG]['S'] = this.value, this.setting(this.value);
 				if(this.value != '0'){
-					if(!a.subdomain){ O.site._.element.dataset.https = ''; }
-					b._.element.dataset.https = '';
+					if(!a.subdomain){ mainPanel.site._.element.dataset.hasHttps = ''; }
+					b._.element.dataset.hasHttps = '';
 				}
 				else {
-					if(!a.subdomain){ (delete O.site._.element.dataset.https); }
-					(delete b._.element.dataset.https);
+					if(!a.subdomain){ (delete mainPanel.site._.element.dataset.hasHttps); }
+					(delete b._.element.dataset.hasHttps);
 				}
 			},
-			setting: _Z0
+			setting: updateToggleButtonText
 		},
-		'W': _X('W', 'R'),
-		'R': _X('R', 'W'),
+		'W': createToggleSettingDef('W', 'R'),
+		'R': createToggleSettingDef('R', 'W'),
 		'E': {
 			element: true,
 			param: 'z',
 			text: 'E-mail:',
-			stateFn: function(a, b, c){ if(((c = a.wait.list[_M().site]) && c.status) || a.wait.filter(b) != '0'){ return true; } },
+			stateFn: function(a, b, c){ if(((c = a.wait.list[getCurrentContext().site]) && c.status) || a.wait.filter(b) != '0'){ return true; } },
 			tmpValue: '',
 			required: 1
 		},
@@ -693,73 +744,72 @@ document.addEventListener('DOMContentLoaded', function($$, $Z, $Y, $X, $W, A, B,
 			param: 'y',
 			text: 'Adaptador (opcional [dns-route53, etc.]):',
 			tmpValue: ''
-		}, 
+		},
 		'C': {
 			cfm: true,
 			siteInfo: true,
 			text: function(a, b){
-				if((b = this.wait.list[_M().site]) && b.status){ return this.element.dataset.waitText; }
-				return _Y.call(this, this.wait.filter(a));
+				if((b = this.wait.list[getCurrentContext().site]) && b.status){ return this.element.dataset.waitText; }
+				return getToggleLabel.call(this, this.wait.filter(a));
 			},
-			valueFn: function(a){ return _Z.call(this, this.wait.filter(a)); },
+			valueFn: function(a){ return toggleValue.call(this, this.wait.filter(a)); },
 			ok: function(a){
-				a = _M().subdomain,
-				O.site[a]['!']['C'] = this.value,
-				O.site[a]['!']['E'] = W_['E'].tmpValue,
-				O.site[a]['!']['A'] = W_['A'].tmpValue, this.wait.setFalse();
+				a = getCurrentContext().subdomain,
+				mainPanel.site[a][CONFIG_KEYS.SITE_CONFIG]['C'] = this.value,
+				mainPanel.site[a][CONFIG_KEYS.SITE_CONFIG]['E'] = siteSettingsDefs['E'].tmpValue,
+				mainPanel.site[a][CONFIG_KEYS.SITE_CONFIG]['A'] = siteSettingsDefs['A'].tmpValue, this.wait.setFalse();
 			},
-			bad: function(a, b){
-				a = _M().subdomain,
-				O.site[a]['!']['E'] = W_['E'].tmpValue,
-				O.site[a]['!']['A'] = W_['A'].tmpValue;
-				return this.wait['set' + (new RegExp('Espere').test(b) ? 'True' : 'False')]();
+			bad: function(a, b, c){
+				a = getCurrentContext().subdomain,
+				mainPanel.site[a][CONFIG_KEYS.SITE_CONFIG]['E'] = siteSettingsDefs['E'].tmpValue,
+				mainPanel.site[a][CONFIG_KEYS.SITE_CONFIG]['A'] = siteSettingsDefs['A'].tmpValue;
+				return this.wait['set' + (c === 'WAIT' ? 'True' : 'False')]();
 			},
 
 			setting: function(a, b){ // Maybe this.setting can be used as automatic after this.ok
-				b = _M().site, this.wait.list[b] = this.wait.list[b] || {};
+				b = getCurrentContext().site, this.wait.list[b] = this.wait.list[b] || {};
 				if(typeof this.wait.list[b].startValue == 'undefined'){ this.wait.list[b].startValue = a; }
 				if(this.wait.list[b].status || (typeof this.wait.list[b].startValue == 'string' && this.wait.condition(this.wait.list[b].startValue))){
-					this.wait.list[b].status = true, this.element.innerText = this.element.dataset.wait, this.element.dataset.loadLink = '';
+					this.wait.list[b].status = true, this.element.innerText = this.element.dataset.wait, this.element.dataset.isLoadingLink = '';
 					return;
 				}
-				(delete this.element.dataset.loadLink);
-				return _Z0.call(this, this.wait.filter(a));
+				(delete this.element.dataset.isLoadingLink);
+				return updateToggleButtonText.call(this, this.wait.filter(a));
 			},
 
 			wait: {
 				list: {},
-				setFalse: function(a){ a = _M().site, this.list[a].startValue = false, this.list[a].status = false, W_.C.setting(W_.C.value); },
+				setFalse: function(a){ a = getCurrentContext().site, this.list[a].startValue = false, this.list[a].status = false, siteSettingsDefs.C.setting(siteSettingsDefs.C.value); },
 				setTrue: function(){
-					var a = _M().site;
-					this.list[a].startValue = false, this.list[a].status = true, W_.C.setting(W_.C.value);
+					var a = getCurrentContext().site;
+					this.list[a].startValue = false, this.list[a].status = true, siteSettingsDefs.C.setting(siteSettingsDefs.C.value);
 				},
 				filter: function(a){ return (this.condition(a) ? '0' : a); },
 				condition: function(a){ return a != '0' && a != '1'; }
 			}
 		}
-	},
-	V_ = {};
-	W_['C'].extra = [W_['E'], W_['A']], W_['A'].stateFn = W_['E'].stateFn;
+	};
+	siteSettingsDefs['C'].extra = [siteSettingsDefs['E'], siteSettingsDefs['A']], siteSettingsDefs['A'].stateFn = siteSettingsDefs['E'].stateFn;
 	document.ondragstart = function(a){ return a.preventDefault(); },
 	document.onselectstart = function(a){ return a.preventDefault(); },
 	(function(a, b, c, d){
-		a = self.location.search.indexOf('?' + $Z.b),
+		a = self.location.search.indexOf('?' + appConfig.b),
 		c = (a != -1 ? self.location.search.slice(a) : ''),
-		(c ? sessionStorage.setItem($Z.b, (($W = c.indexOf('&')) != -1 ? c.substring($Z.b.length + 1, $W) : c.slice($Z.b.length + 1))) : 0);
+		(c ? sessionStorage.setItem(appConfig.b, ((ampersandIndex = c.indexOf('&')) != -1 ? c.substring(appConfig.b.length + 1, ampersandIndex) : c.slice(appConfig.b.length + 1))) : 0);
 	})(),
-	E.onclick = _F.call({ box: E }, W_, N, '/admin:inside:cfg');
-	J.onclick = function(a){
+	siteActionButtonsList.onclick = createSettingsClickHandler.call({ box: siteActionButtonsList }, siteSettingsDefs, statusMessageEl, '/admin:inside:cfg');
+	subdomainBreadcrumbLink.onclick = function(a){
 		if(a){ a.preventDefault(); } // For trigger with no context
-		_N(0, 1), (delete K.dataset.stdSubdomain);
+		toggleSiteSubdomainView(0, 1), (delete subdomainPanel.dataset.activeSubdomain);
 	};
-	L.firstElementChild.onclick = function(b, c, d){
+	sitesListSection.firstElementChild.onclick = function(b, c, d){
 		b.preventDefault(), d = this;
-		_Z4('prompt', { text: 'Dominio:', required: true, okFn: function(z, c){ $((d.href + '?s=' + c), function(r){ N.dataset.ok = r, _P(L, c, { '': Z_ }, 0); }, function(e){ N.dataset.error = e; }); }});
+		showDialog('prompt', { text: 'Dominio:', required: true, okFn: function(z, c){ apiRequest((d.href + '?s=' + c), function(r){ statusMessageEl.dataset.ok = r, createSiteEntry(sitesListSection, c, { '': reservedKeysMap }, 0); }, function(e){ statusMessageEl.dataset.error = e; }); }});
 	};
-	A.firstElementChild.onclick = function(b, c, d, e, f, g, h){
+	charsReplaceSection.firstElementChild.onclick = function(b, c, d, e, f, g, h){
 		b.preventDefault(), f = this, h = [];
 		if(!c){
-			h.push({ 
+			h.push({
 				type: 'prompt',
 				text: 'Caracter(es):',
 				required: true
@@ -772,14 +822,14 @@ document.addEventListener('DOMContentLoaded', function($$, $Z, $Y, $X, $W, A, B,
 			value: d || '',
 			okFn: function(z, d){
 				c = (!c ? z.previous.finalValue : c), e = f.href.indexOf('#'),
-				$(((e != -1 ? f.href.substring(0, e) : f.href) + '?s=' + _J(c) + '&d=' + _J(d)), function(r){
-					N.dataset.ok = r, (f.chars != c ? _ZZ(A, c, d) : f.replacement = d), $Y[c] = d;
-				}, function(e){ N.dataset.error = e; });
+				apiRequest(((e != -1 ? f.href.substring(0, e) : f.href) + '?s=' + applyCharReplacements(c) + '&d=' + applyCharReplacements(d)), function(r){
+					statusMessageEl.dataset.ok = r, (f.chars != c ? createCharsReplaceEntry(charsReplaceSection, c, d) : f.replacement = d), charReplacementMap[c] = d;
+				}, function(e){ statusMessageEl.dataset.error = e; });
 			}
 		});
-		_Z5.apply(0, h);
+		showDialogSequence.apply(0, h);
 	};
-	B.firstElementChild.onclick = function(b, c, d, e, f, g, h){
+	deniedIpsSection.firstElementChild.onclick = function(b, c, d, e, f, g, h){
 		b.preventDefault(), h = [], f = ' ' + (d && !isNaN(d) ? new Date(d * 1000).toLocaleString() : '(este instante: ' + Math.ceil((new Date).getTime() / 1000) + ')'), g = this;
 		if(!c){
 			h.push({
@@ -795,14 +845,14 @@ document.addEventListener('DOMContentLoaded', function($$, $Z, $Y, $X, $W, A, B,
 			value: d || '',
 			okFn: function(z, d){
 				c = (!c ? z.previous.finalValue : c), e = g.href.indexOf('#'),
-				$(((e != -1 ? g.href.substring(0, e) : g.href) + '?s=' + c + '&d=' + d), function(r){
-					N.dataset.ok = r, (g.ip != c ? _ZY(B, c, d) : (g.unblockingDate = d, _Z2(g, d)));
-				}, function(e){ N.dataset.error = e; });
+				apiRequest(((e != -1 ? g.href.substring(0, e) : g.href) + '?s=' + c + '&d=' + d), function(r){
+					statusMessageEl.dataset.ok = r, (g.ip != c ? createDeniedIpEntry(deniedIpsSection, c, d) : (g.unblockingDate = d, scheduleAutoRemoval(g, d)));
+				}, function(e){ statusMessageEl.dataset.error = e; });
 			}
 		});
-		_Z5.apply(0, h);
+		showDialogSequence.apply(0, h);
 	};
-	C.firstElementChild.onclick = function(b, c, d, e, f, g){
+	httpCodeResponsesSection.firstElementChild.onclick = function(b, c, d, e, f, g){
 		b.preventDefault(), f = this, g = [];
 		if(!c){
 			g.push({
@@ -818,290 +868,290 @@ document.addEventListener('DOMContentLoaded', function($$, $Z, $Y, $X, $W, A, B,
 			value: d || '',
 			okFn: function(z, d){
 				c = (!c ? z.previous.finalValue : c), e = f.href.indexOf('#'),
-				$(((e != -1 ? f.href.substring(0, e) : f.href) + '?s=' + c + '&d=' + _J(d)), function(r){
-					N.dataset.ok = r, (f.httpCode != c ? _ZX(C, c, d) : f.response = d);
-				}, function(e){ N.dataset.error = e; });
+				apiRequest(((e != -1 ? f.href.substring(0, e) : f.href) + '?s=' + c + '&d=' + applyCharReplacements(d)), function(r){
+					statusMessageEl.dataset.ok = r, (f.httpCode != c ? createHttpCodeResponseEntry(httpCodeResponsesSection, c, d) : f.response = d);
+				}, function(e){ statusMessageEl.dataset.error = e; });
 			},
-			assign: { className: 'B' }
+			assign: { className: 'modal-wide' }
 		});
-		_Z5.apply(0, g);
+		showDialogSequence.apply(0, g);
 	};
-	N.onclick = function(){ this.innerText = '', (delete this.dataset.ok), (delete this.dataset.error), (delete this.dataset.largeOk), (delete this.dataset.largeError); };
-	P.onclick = function(a){
+	statusMessageEl.onclick = function(){ this.innerText = '', (delete this.dataset.ok), (delete this.dataset.error), (delete this.dataset.largeOk), (delete this.dataset.largeError); };
+	siteBreadcrumbLink.onclick = function(a){
 		if(a){ a.preventDefault(); }
-		J.onclick(), (delete O.dataset.stdSite);
+		subdomainBreadcrumbLink.onclick(), (delete mainPanel.dataset.activeSite);
 	};
-	Q.onclick = function(a, b, c){
-		a.preventDefault(), b = _M(), c = this;
-		_Z4('confirm', {
+	deleteSiteOrSubdomainLink.onclick = function(a, b, c){
+		a.preventDefault(), b = getCurrentContext(), c = this;
+		showDialog('confirm', {
 			text: '¿Borrar definitivamente "' + b.site + '"?',
 			okFn: function(){
-				$((c.href + b.request), function(r, s){
-					N.dataset.ok = r;
-					if(typeof K.dataset.stdSubdomain != 'undefined' && (s = K.subdomain._.name)){ (delete O.site[s]), T.parentNode.removeChild(K.subdomain._.element); return J.onclick(); }
-					P.onclick(), L.removeChild(O.site._.element);
-				}, function(e){ N.dataset.error = e; });
+				apiRequest((c.href + b.request), function(r, s){
+					statusMessageEl.dataset.ok = r;
+				if(typeof subdomainPanel.dataset.activeSubdomain != 'undefined' && (s = subdomainPanel.subdomain._.name)){ (delete mainPanel.site[s]), addSubdomainLink.parentNode.removeChild(subdomainPanel.subdomain._.element); return subdomainBreadcrumbLink.onclick(); }
+					siteBreadcrumbLink.onclick(), sitesListSection.removeChild(mainPanel.site._.element);
+				}, function(e){ statusMessageEl.dataset.error = e; });
 			}
 		});
 	};
-	R.onclick = function(a){
+	uploadFilesLink.onclick = function(a){
 		a.preventDefault(),
-		S['webkitdirectory'] = true,
-		S['mozdirectory'] = true,
-		S.click();
+		uploadFileInput['webkitdirectory'] = true,
+		uploadFileInput['mozdirectory'] = true,
+		uploadFileInput.click();
 	};
-	S.addEventListener('change', function(a, b){
-		a = _M(), b = this;
-		_Z4('confirm', {
+	uploadFileInput.addEventListener('change', function(a, b){
+		a = getCurrentContext(), b = this;
+		showDialog('confirm', {
 			text: '¿Borrar y subir datos a "' + a.site + '"?',
 			okFn: function(){
-				$((R.href + a.request), new FormData(b.parentNode), function(r){ N.dataset.ok = r, S.parentNode.reset(); }, function(e){ N.dataset.error = e, S.parentNode.reset(); });
+				apiRequest((uploadFilesLink.href + a.request), new FormData(b.parentNode), function(r){ statusMessageEl.dataset.ok = r, uploadFileInput.parentNode.reset(); }, function(e){ statusMessageEl.dataset.error = e, uploadFileInput.parentNode.reset(); });
 			}
 		});
 	});
-	T.onclick = function(a, b, c){
+	addSubdomainLink.onclick = function(a, b, c){
 		a.preventDefault();
-		_Z4('prompt', {
+		showDialog('prompt', {
 			text: 'Subdominio:',
 			required: true,
 			okFn: function(z, c){
-				$((T.href + '?s=' + O.dataset.stdSite + '&d=' + c), function(r){ N.dataset.ok = r, _P(T.parentNode, c, Z_, 0); }, function(e){ N.dataset.error = e; });
+			apiRequest((addSubdomainLink.href + '?s=' + mainPanel.dataset.activeSite + '&d=' + c), function(r){ statusMessageEl.dataset.ok = r, createSiteEntry(addSubdomainLink.parentNode, c, reservedKeysMap, 0); }, function(e){ statusMessageEl.dataset.error = e; });
 			}
 		});
 	};
-	Z.onclick = function(b, c, d, e, f){
+	addAliasLink.onclick = function(b, c, d, e, f){
 		b.preventDefault(), f = this;
-		_Z4('prompt', {
+		showDialog('prompt', {
 			text: 'Alias:',
 			required: true,
 			okFn: function(z, c){
-				e = _M(), $((f.href + e.request + '&a=' + c), function(r){ N.dataset.ok = r, _G(Z.nextElementSibling, c), O.site[e.subdomain]['&'][c] = ''; }, function(e){ N.dataset.error = e; });
+				e = getCurrentContext(), apiRequest((f.href + e.request + '&a=' + c), function(r){ statusMessageEl.dataset.ok = r, createSimpleEntryLink(addAliasLink.nextElementSibling, c), mainPanel.site[e.subdomain][CONFIG_KEYS.ALIASES][c] = ''; }, function(e){ statusMessageEl.dataset.error = e; });
 			}
 		});
 	};
-	U.onclick = function(a, b, c, d, e){
+	addRewriteLink.onclick = function(a, b, c, d, e){
 		if(a){ a.preventDefault(); }
-		d = this, _Z5({
+		d = this, showDialogSequence({
 			text: 'Dirección relativa (/...):',
-			value: $$[0] || '',
+			value: tempEditValues[0] || '',
 			required: true,
-			cancelFn: _K
+			cancelFn: resetTempEditValues
 		}, {
 			text: 'Reescribir (/...) o redirigir (https://...) a:',
-			value: $$[1] || '',
+			value: tempEditValues[1] || '',
 			required: true,
 			okFn: function(z, c){
 				b = z.previous.finalValue,
 				b = ((b.charAt(0) != '/' ? '/' : '') + b),
 				c = ((c.charAt(0) != '/' ? (!/https?\:\/\//.test(c) ? '/' : '') : '') + c),
 				e = 'rewrite',
-				$((U.href + _M().request + '&a=' + _J(b) + '&b=' + _J(c)), function(r, s, t, u){
-					if(b in K.subdomain['=']){ t = _D(U.nextElementSibling, 'a', [e, 'from'], b); }
-					N.dataset.ok = r, K.subdomain['='][b] = c, _O(U.nextElementSibling, b, e, c);
-					if($$[0]){
-						if(b != d[e].from){ _K(); return d.previousSibling.click(); }
-						U.nextElementSibling.removeChild(d.previousSibling), U.nextElementSibling.removeChild(d), u = 1;
+				apiRequest((addRewriteLink.href + getCurrentContext().request + '&a=' + applyCharReplacements(b) + '&b=' + applyCharReplacements(c)), function(r, s, t, u){
+					if(b in subdomainPanel.subdomain[CONFIG_KEYS.REWRITES]){ t = findEntryByProperty(addRewriteLink.nextElementSibling, 'a', [e, 'from'], b); }
+					statusMessageEl.dataset.ok = r, subdomainPanel.subdomain[CONFIG_KEYS.REWRITES][b] = c, createKeyValueEntry(addRewriteLink.nextElementSibling, b, e, c);
+					if(tempEditValues[0]){
+						if(b != d[e].from){ resetTempEditValues(); return d.previousSibling.click(); }
+						addRewriteLink.nextElementSibling.removeChild(d.previousSibling), addRewriteLink.nextElementSibling.removeChild(d), u = 1;
 					}
-					if(!u && t){ U.nextElementSibling.removeChild(t.previousSibling), U.nextElementSibling.removeChild(t); }
-					_K();
-				}, function(g){ N.dataset.error = g, _K(); });
+					if(!u && t){ addRewriteLink.nextElementSibling.removeChild(t.previousSibling), addRewriteLink.nextElementSibling.removeChild(t); }
+					resetTempEditValues();
+				}, function(g){ statusMessageEl.dataset.error = g, resetTempEditValues(); });
 			},
-			cancelFn: _K
+			cancelFn: resetTempEditValues
 		});
 	};
-	V.onclick = function(a, b, c, d, e){
+	addMimeLink.onclick = function(a, b, c, d, e){
 		if(a){ a.preventDefault(); }
 
-		d = this, _Z5({
+		d = this, showDialogSequence({
 			text: 'Extensión:',
-			value: $$[0] || '',
+			value: tempEditValues[0] || '',
 			required: true,
 			strict: false,
-			cancelFn: _K
+			cancelFn: resetTempEditValues
 		},{
 			text: 'Asignar MIME:',
-			value: $$[1] || '',
+			value: tempEditValues[1] || '',
 			required: true,
 			okFn: function(z, c){
 				b = z.previous.finalValue,
-				b = _J((b.charAt(0) != '.' ? b : b.slice(1)), 1),
+				b = applyCharReplacements((b.charAt(0) != '.' ? b : b.slice(1)), 1),
 				e = 'mime',
-				$((V.href + _M().request + '&a=' + b + '&b=' + _J(c)), function(r, s, t, u){
-					if(b in K.subdomain['$']){ t = _D(V.nextElementSibling, 'a', [e, 'from'], b); }
-					N.dataset.ok = r, K.subdomain['$'][b] = c, _O(V.nextElementSibling, b, e, c);
-					if($$[0] != null){
-						if(b != d[e].from){ _K(); return d.previousSibling.click(); }
-						V.nextElementSibling.removeChild(d.previousSibling), V.nextElementSibling.removeChild(d), u = 1;
+				apiRequest((addMimeLink.href + getCurrentContext().request + '&a=' + b + '&b=' + applyCharReplacements(c)), function(r, s, t, u){
+					if(b in subdomainPanel.subdomain[CONFIG_KEYS.MIME_TYPES]){ t = findEntryByProperty(addMimeLink.nextElementSibling, 'a', [e, 'from'], b); }
+					statusMessageEl.dataset.ok = r, subdomainPanel.subdomain[CONFIG_KEYS.MIME_TYPES][b] = c, createKeyValueEntry(addMimeLink.nextElementSibling, b, e, c);
+					if(tempEditValues[0] != null){
+						if(b != d[e].from){ resetTempEditValues(); return d.previousSibling.click(); }
+						addMimeLink.nextElementSibling.removeChild(d.previousSibling), addMimeLink.nextElementSibling.removeChild(d), u = 1;
 					}
-					if(!u && t){ V.nextElementSibling.removeChild(t.previousSibling), V.nextElementSibling.removeChild(t); }
-					_K();
-				}, function(g){ N.dataset.error = g, _K(); });
+					if(!u && t){ addMimeLink.nextElementSibling.removeChild(t.previousSibling), addMimeLink.nextElementSibling.removeChild(t); }
+					resetTempEditValues();
+				}, function(g){ statusMessageEl.dataset.error = g, resetTempEditValues(); });
 			},
-			cancelFn: _K
+			cancelFn: resetTempEditValues
 		});
 	};
-	W.onclick = function(a, b, c, d, e){
+	addHeaderLink.onclick = function(a, b, c, d, e){
 		if(a){ a.preventDefault(); }
 
-		d = this, _Z5({
+		d = this, showDialogSequence({
 			text: 'Cabecera:',
-			value: $$[0] || '',
+			value: tempEditValues[0] || '',
 			required: true,
-			cancelFn: _K
+			cancelFn: resetTempEditValues
 		},{
 			text: 'Contenido:',
-			value: $$[1] || '',
+			value: tempEditValues[1] || '',
 			required: true,
 			okFn: function(z, c){
 				b = z.previous.finalValue,
-				b = _J(b, 1), e = 'header',
-				$((W.href + _M().request + '&a=' + b + '&b=' + _J(c)), function(r, s, t, u){
-					if(b in K.subdomain['.']){ t = _D(W.nextElementSibling, 'a', [e, 'name'], b); }
-					N.dataset.ok = r, K.subdomain['.'][b] = c, _O(W.nextElementSibling, b, e, c, function(a, b){ return { name: b, content: a } });
-					if($$[0] != null){
-						if(b != d[e].name){ _K(); return d.previousSibling.click(); }
-						W.nextElementSibling.removeChild(d.previousSibling), W.nextElementSibling.removeChild(d), u = 1;
+				b = applyCharReplacements(b, 1), e = 'header',
+				apiRequest((addHeaderLink.href + getCurrentContext().request + '&a=' + b + '&b=' + applyCharReplacements(c)), function(r, s, t, u){
+					if(b in subdomainPanel.subdomain[CONFIG_KEYS.HEADERS]){ t = findEntryByProperty(addHeaderLink.nextElementSibling, 'a', [e, 'name'], b); }
+					statusMessageEl.dataset.ok = r, subdomainPanel.subdomain[CONFIG_KEYS.HEADERS][b] = c, createKeyValueEntry(addHeaderLink.nextElementSibling, b, e, c, function(a, b){ return { name: b, content: a } });
+					if(tempEditValues[0] != null){
+						if(b != d[e].name){ resetTempEditValues(); return d.previousSibling.click(); }
+						addHeaderLink.nextElementSibling.removeChild(d.previousSibling), addHeaderLink.nextElementSibling.removeChild(d), u = 1;
 					}
-					if(!u && t){ W.nextElementSibling.removeChild(t.previousSibling), W.nextElementSibling.removeChild(t); }
-					_K();
-				}, function(g){ N.dataset.error = g, _K(); });
+					if(!u && t){ addHeaderLink.nextElementSibling.removeChild(t.previousSibling), addHeaderLink.nextElementSibling.removeChild(t); }
+					resetTempEditValues();
+				}, function(g){ statusMessageEl.dataset.error = g, resetTempEditValues(); });
 			},
-			cancelFn: _K
+			cancelFn: resetTempEditValues
 		});
 	};
-	H.onclick = function(a, b, c, d, e){
+	addPreprocessorLink.onclick = function(a, b, c, d, e){
 		if(a){ a.preventDefault(); }
-		d = this, _Z5({
+		d = this, showDialogSequence({
 			text: 'Extensión:',
-			value: $$[0] || '',
+			value: tempEditValues[0] || '',
 			required: true,
 			strict: false,
-			cancelFn: _K
+			cancelFn: resetTempEditValues
 		},{
 			text: 'Ruta del preprocesador:',
-			value: $$[1] || '',
+			value: tempEditValues[1] || '',
 			required: true,
 			okFn: function(z, c){
 				b = z.previous.finalValue,
-				b = _J((b.charAt(0) != '.' ? b : b.slice(1)), 1),
+				b = applyCharReplacements((b.charAt(0) != '.' ? b : b.slice(1)), 1),
 				e = 'preprocessor',
-				$((H.href + _M().request + '&a=' + b + '&b=' + _J(c)), function(r, s, t, u){
-					if(b in K.subdomain['?']){ t = _D(H.nextElementSibling, 'a', [e, 'from'], b); }
-					N.dataset.ok = r, K.subdomain['?'][b] = c, _O(H.nextElementSibling, b, e, c);
-					if($$[0] != null){
-						if(b != d[e].from){ _K(); return d.previousSibling.click(); }
-						H.nextElementSibling.removeChild(d.previousSibling), H.nextElementSibling.removeChild(d), u = 1;
+				apiRequest((addPreprocessorLink.href + getCurrentContext().request + '&a=' + b + '&b=' + applyCharReplacements(c)), function(r, s, t, u){
+					if(b in subdomainPanel.subdomain[CONFIG_KEYS.PREPROCESSORS]){ t = findEntryByProperty(addPreprocessorLink.nextElementSibling, 'a', [e, 'from'], b); }
+					statusMessageEl.dataset.ok = r, subdomainPanel.subdomain[CONFIG_KEYS.PREPROCESSORS][b] = c, createKeyValueEntry(addPreprocessorLink.nextElementSibling, b, e, c);
+					if(tempEditValues[0] != null){
+						if(b != d[e].from){ resetTempEditValues(); return d.previousSibling.click(); }
+						addPreprocessorLink.nextElementSibling.removeChild(d.previousSibling), addPreprocessorLink.nextElementSibling.removeChild(d), u = 1;
 					}
-					if(!u && t){ H.nextElementSibling.removeChild(t.previousSibling), H.nextElementSibling.removeChild(t); }
-					_K();
-				}, function(g){ N.dataset.error = g, _K(); });
+					if(!u && t){ addPreprocessorLink.nextElementSibling.removeChild(t.previousSibling), addPreprocessorLink.nextElementSibling.removeChild(t); }
+					resetTempEditValues();
+				}, function(g){ statusMessageEl.dataset.error = g, resetTempEditValues(); });
 			},
-			cancelFn: _K
+			cancelFn: resetTempEditValues
 		});
 	};
-	G.onclick = function(a, b, c, d, e){
+	addIndexLink.onclick = function(a, b, c, d, e){
 		if(a){ a.preventDefault(); }
-		d = this, _Z4('prompt', {
+		d = this, showDialog('prompt', {
 			text: 'Archivo de índice:',
-			value: $$[0] || '',
+			value: tempEditValues[0] || '',
 			okFn: function(z, b){
 				e = 'index',
-				$((G.href + _M().request + '&a=' + _J(b)), function(s, t, u){
-					t = (b in K.subdomain['-'] ? _D(G.nextElementSibling, 'a', [e], b) : 0),
-					N.dataset.ok = s, K.subdomain['-'][b] = '', _G(G.nextElementSibling, b, e, '#');
-					if($$[0] != null){
-						if(b != d[e]){ _K(); return d.previousSibling.click(); }
-						G.nextElementSibling.removeChild(d.previousSibling), G.nextElementSibling.removeChild(d), u = 1;
+				apiRequest((addIndexLink.href + getCurrentContext().request + '&a=' + applyCharReplacements(b)), function(s, t, u){
+					t = (b in subdomainPanel.subdomain[CONFIG_KEYS.INDEXES] ? findEntryByProperty(addIndexLink.nextElementSibling, 'a', [e], b) : 0),
+					statusMessageEl.dataset.ok = s, subdomainPanel.subdomain[CONFIG_KEYS.INDEXES][b] = '', createSimpleEntryLink(addIndexLink.nextElementSibling, b, e, '#');
+					if(tempEditValues[0] != null){
+						if(b != d[e]){ resetTempEditValues(); return d.previousSibling.click(); }
+						addIndexLink.nextElementSibling.removeChild(d.previousSibling), addIndexLink.nextElementSibling.removeChild(d), u = 1;
 					}
-					if(!u && t){ G.nextElementSibling.removeChild(t.previousSibling), G.nextElementSibling.removeChild(t); }
-					_K();
-				}, function(g){ N.dataset.error = g, _K(); });
+					if(!u && t){ addIndexLink.nextElementSibling.removeChild(t.previousSibling), addIndexLink.nextElementSibling.removeChild(t); }
+					resetTempEditValues();
+				}, function(g){ statusMessageEl.dataset.error = g, resetTempEditValues(); });
 			},
-			cancelFn: _K
+			cancelFn: resetTempEditValues
 		});
 	};
-	U_.forEach(function(a, b){
+	fieldsetLegendsList.forEach(function(a, b){
 		b = a.nextElementSibling,
 		a.onclick = function(){
-			if(typeof b.dataset.hidden == 'undefined'){ return b.dataset.hidden = '', (delete a.dataset.std); }
-			delete b.dataset.hidden, a.dataset.std = '';
+			if(typeof b.dataset.isHidden == 'undefined'){ return b.dataset.isHidden = '', (delete a.dataset.isExpanded); }
+			delete b.dataset.isHidden, a.dataset.isExpanded = '';
 		}
 	});
-	T_.onclick = function(a){
+	signOutLink.onclick = function(a){
 		if(a){ a.preventDefault(); }
-		$('/admin:signout:' /* + '?' + sessionStorage.getItem($Z.b) // Delete all per IP sessions */), N.dataset.ok = '. . .',
-		setTimeout(function(){ sessionStorage.removeItem($Z.b), self.location.reload(); }, 567);
+		apiRequest('/admin:signout:' /* + '?' + sessionStorage.getItem(appConfig.b) // Delete all per IP sessions */), statusMessageEl.dataset.ok = '. . .',
+		setTimeout(function(){ sessionStorage.removeItem(appConfig.b), self.location.reload(); }, 567);
 	};
 	self.onkeydown = function(a, b){
-		b = _('article [data-first]'), b = b[b.length - 1];
+		b = $q('article [data-primary-btn]'), b = b[b.length - 1];
 		if(!b){ return; }
 		switch(a.key){
 			case 'Escape': b.previousElementSibling.click(); break;
 			case 'Enter': b.focus(), b.click(); break;
 		}
 	};
-	_C(O, 'childList', function(a, b){
+	observeMutations(mainPanel, 'childList', function(a, b){
 		if(this.addedNodes.length){
 			if(!(b = (a.id || a.parentNode.id))){ return; }
-			if(b in Y_){ this.addedNodes.forEach(function(c){ if(c.nodeName == 'A' && typeof c.dataset.x == 'undefined'){ Y_[b](a, c); } }); }
+			if(b in newEntryHandlersByContainer){ this.addedNodes.forEach(function(c){ if(c.nodeName == 'A' && typeof c.dataset.actionDelete == 'undefined'){ newEntryHandlersByContainer[b](a, c); } }); }
 		}
 	});
-	_C(O, 'attributes', function(a){
-		if(a.nodeName == 'MAIN' && this.attributeName == 'data-std-site'){
-			if(a.site && a.dataset.stdSite == a.site._.name){
-				M.dataset.hidden = '', P.innerText = a.site._.name, 
-				_L(T.parentNode, a.site, _A),
-				_L(Z.nextElementSibling, a.site['']['&'], _H, 0, 1),
-				_W(E, a.site['']['!'], W_);
+	observeMutations(mainPanel, 'attributes', function(a){
+		if(a.nodeName == 'MAIN' && this.attributeName == 'data-active-site'){
+			if(a.site && a.dataset.activeSite == a.site._.name){
+				sidebarAside.dataset.isHidden = '', siteBreadcrumbLink.innerText = a.site._.name,
+				clearAndRender(addSubdomainLink.parentNode, a.site, renderSitesList),
+				clearAndRender(addAliasLink.nextElementSibling, a.site[''][CONFIG_KEYS.ALIASES], renderSimpleEntries, 0, 1),
+				applySettingsFromQuery(siteActionButtonsList, a.site[''][CONFIG_KEYS.SITE_CONFIG], siteSettingsDefs);
 			}
-			else { (delete M.dataset.hidden), (delete a.dataset.stdSite); }
+			else { (delete sidebarAside.dataset.isHidden), (delete a.dataset.activeSite); }
 		}
-		if(a.id == 'R' && this.attributeName == 'data-std-subdomain'){
-			if(a.subdomain && a.dataset.stdSubdomain == a.subdomain._.name){
-				_N(a), T.parentNode.dataset.hidden = '', J.innerText = (a.subdomain._.name || 'Raíz'),
-				_L(Z.nextElementSibling, a.subdomain['&'], _H, 0, 1);
-				_L(U.nextElementSibling, a.subdomain['='], _B, ['rewrite'], 1),
-				_L(V.nextElementSibling, a.subdomain['$'], _B, ['mime'], 1),
-				_L(W.nextElementSibling, a.subdomain['.'], _B, ['header', function(a, b){ return { name: b, content: a } }], 1),
-				_L(H.nextElementSibling, a.subdomain['?'], _B, ['preprocessor'], 1),
-				_L(G.nextElementSibling, a.subdomain['-'], _H, ['index', '#'], 1),
-				_W(E, a.subdomain['!'], W_);
+		if(a.id == 'panel-subdomain' && this.attributeName == 'data-active-subdomain'){
+			if(a.subdomain && a.dataset.activeSubdomain == a.subdomain._.name){
+				toggleSiteSubdomainView(a), addSubdomainLink.parentNode.dataset.isHidden = '', subdomainBreadcrumbLink.innerText = (a.subdomain._.name || 'Raíz'),
+				clearAndRender(addAliasLink.nextElementSibling, a.subdomain[CONFIG_KEYS.ALIASES], renderSimpleEntries, 0, 1);
+				clearAndRender(addRewriteLink.nextElementSibling, a.subdomain[CONFIG_KEYS.REWRITES], renderKeyValueList, ['rewrite'], 1),
+				clearAndRender(addMimeLink.nextElementSibling, a.subdomain[CONFIG_KEYS.MIME_TYPES], renderKeyValueList, ['mime'], 1),
+				clearAndRender(addHeaderLink.nextElementSibling, a.subdomain[CONFIG_KEYS.HEADERS], renderKeyValueList, ['header', function(a, b){ return { name: b, content: a } }], 1),
+				clearAndRender(addPreprocessorLink.nextElementSibling, a.subdomain[CONFIG_KEYS.PREPROCESSORS], renderKeyValueList, ['preprocessor'], 1),
+				clearAndRender(addIndexLink.nextElementSibling, a.subdomain[CONFIG_KEYS.INDEXES], renderSimpleEntries, ['index', '#'], 1),
+				applySettingsFromQuery(siteActionButtonsList, a.subdomain[CONFIG_KEYS.SITE_CONFIG], siteSettingsDefs);
 			}
 			else {
-				_N(a, 1), (delete T.parentNode.dataset.hidden), (delete a.dataset.stdSubdomain),
-				_L(Z.nextElementSibling, O.site['']['&'], _H, 0, 1),
-				_W(E, O.site['']['!'], W_);
+				toggleSiteSubdomainView(a, 1), (delete addSubdomainLink.parentNode.dataset.isHidden), (delete a.dataset.activeSubdomain),
+				clearAndRender(addAliasLink.nextElementSibling, mainPanel.site[''][CONFIG_KEYS.ALIASES], renderSimpleEntries, 0, 1),
+				applySettingsFromQuery(siteActionButtonsList, mainPanel.site[''][CONFIG_KEYS.SITE_CONFIG], siteSettingsDefs);
 			}
 		}
 	});
-	_C(N, 'attributes', function(a){
+	observeMutations(statusMessageEl, 'attributes', function(a){
 		if(this.attributeName == 'data-error' && a.dataset.error){
 			if(a.dataset.error.length > 50 || self.scrollY != 0){ a.dataset.largeError = ''; }
-			clearTimeout(N.T), (delete a.dataset.ok), console.error(a.dataset.error), a.innerText = a.dataset.error, N.T = setTimeout(function(){ a.onclick(), (delete a.dataset.largeError); }, 7890);
+			clearTimeout(statusMessageEl.T), (delete a.dataset.ok), console.error(a.dataset.error), a.innerText = a.dataset.error, statusMessageEl.T = setTimeout(function(){ a.onclick(), (delete a.dataset.largeError); }, 7890);
 		}
 		if(this.attributeName == 'data-ok' && a.dataset.ok){
 			if(a.dataset.ok.length > 50 || self.scrollY != 0){ a.dataset.largeOk = ''; }
-			clearTimeout(N.T), (delete a.dataset.error), a.innerText = a.dataset.ok, N.T = setTimeout(function(){ a.onclick(), (delete a.dataset.largeOk); }, 7890);
+			clearTimeout(statusMessageEl.T), (delete a.dataset.error), a.innerText = a.dataset.ok, statusMessageEl.T = setTimeout(function(){ a.onclick(), (delete a.dataset.largeOk); }, 7890);
 		}
 	}, 1);
-	_C(L, 'childList', function(){
+	observeMutations(sitesListSection, 'childList', function(){
 		if(this.addedNodes.length){
 			this.addedNodes.forEach(function(i){
 				if(i.nodeName == 'A'){
 					i.onclick = function(a){
 						a.preventDefault();
-						if(!O.loaded){ O.loaded = {}; }
-						if(!O.loaded[this.site._.name]){ return _S(this); }
-						O.dataset.stdSite = this.site._.name, O.site = this.site;
+						if(!mainPanel.loaded){ mainPanel.loaded = {}; }
+						if(!mainPanel.loaded[this.site._.name]){ return loadSiteSubdomains(this); }
+						mainPanel.dataset.activeSite = this.site._.name, mainPanel.site = this.site;
 					};
 				}
 			});
 		}
 	});
-	_Z1(A, { key: 'chars', value: 'replacement', text: '¿Borrar reemplazo de caracter "{REFERENCE}"?' });
-	_Z1(B, { key: 'ip', value: 'unblockingDate', text: '¿Borrar IP denegado "{REFERENCE}"?' });
-	_Z1(C, { key: 'httpCode', value: 'response', text: '¿Borrar respuesta a código HTTP "{REFERENCE}"?' });
-	_R(), _K();
+	attachDeleteConfirmation(charsReplaceSection, { key: 'chars', value: 'replacement', text: '¿Borrar reemplazo de caracter "{REFERENCE}"?' });
+	attachDeleteConfirmation(deniedIpsSection, { key: 'ip', value: 'unblockingDate', text: '¿Borrar IP denegado "{REFERENCE}"?' });
+	attachDeleteConfirmation(httpCodeResponsesSection, { key: 'httpCode', value: 'response', text: '¿Borrar respuesta a código HTTP "{REFERENCE}"?' });
+	loadInitialData(), resetTempEditValues();
 });
 </script>
 </head>
@@ -1114,90 +1164,90 @@ document.addEventListener('DOMContentLoaded', function($$, $Z, $Y, $X, $W, A, B,
 		<a href="/admin:signout:"><span>Salir</span></a>
 	</header>
 	<aside>
-		<fieldset id="N">
+		<fieldset id="sec-general-settings">
 			<legend>Configuración general</legend>
-			<ul data-hidden>
+			<ul data-is-hidden>
 				<li><a href="/admin:inside:setU">Cambiar usuario</a></li>
 				<li><a href="/admin:inside:setP">Cambiar contraseña</a></li>
 				<li><a href="/admin:inside:setM">Directorio de sitios</a></li>
 				<li><a data-text="¿Guardar rescribiendo configuración?" href="/admin:inside:setC">Guardar configuración</a></li>
 			</ul>
 		</fieldset>
-		<fieldset id="L">
+		<fieldset id="sec-request-rate">
 			<legend>Frecuencia de peticiones</legend>
-			<ul data-hidden>
+			<ul data-is-hidden>
 				<li><a data-postfix="(milisegundos [ms])" href="/admin:inside:setCIS">Contador de peticiones por intervalo</a></li>
 				<li><a href="/admin:inside:setCII">Peticiones máximas por intervalo</a></li>
 				<li><a data-postfix="(milisegundos [ms])" href="/admin:inside:setCIL">Tiempo de reinicio de contador</a></li>
 			</ul>
 		</fieldset>
-		<fieldset id="G">
+		<fieldset id="sec-request-timing">
 			<legend>Tiempo para cada petición</legend>
-			<ul data-hidden>
+			<ul data-is-hidden>
 				<li><a href="/admin:inside:setRHT">Lectura de cabeceras</a></li>
 				<li><a href="/admin:inside:setRT">Lectura total de petición</a></li>
 				<li><a href="/admin:inside:setWT">Escritura de respuesta</a></li>
 				<li><a href="/admin:inside:setIT">Cierre de conexión inactiva</a></li>
 			</ul>
 		</fieldset>
-		<fieldset id="Q">
+		<fieldset id="sec-request-limits">
 			<legend>Límites para cada petición</legend>
-			<ul data-hidden>
+			<ul data-is-hidden>
 				<li><a href="/admin:inside:setMUB">Tamaño máx. de <i>URIs</i></a></li>
 				<li><a href="/admin:inside:setMHB">Tamaño máx. de cabeceras</a></li>
 				<li><a href="/admin:inside:setMBB">Tamaño máx. de contenidos</a></li>
 			</ul>
 		</fieldset>
-		<section id="A">
-			<a class="O" href="/admin:inside:addSite">Agregar sitio</a>
+		<section id="sec-sites-list">
+			<a class="btn-add-entry" href="/admin:inside:addSite">Agregar sitio</a>
 		</section>
-		<section id="K">
-			<a class="O" href="/admin:inside:addDenied">Agregar IP denegado</a>
+		<section id="sec-denied-ips">
+			<a class="btn-add-entry" href="/admin:inside:addDenied">Agregar IP denegado</a>
 		</section>
-		<section id="X">
-			<a class="O" href="/admin:inside:addHttpCodeResponse">Agregar respuesta a código HTTP</a>
+		<section id="sec-http-codes">
+			<a class="btn-add-entry" href="/admin:inside:addHttpCodeResponse">Agregar respuesta a código HTTP</a>
 		</section>
-		<section id="P">
-			<a class="O" href="/admin:inside:addCharsReplace">Agregar reemplazo de caracter(es)</a>
+		<section id="sec-chars-replace">
+			<a class="btn-add-entry" href="/admin:inside:addCharsReplace">Agregar reemplazo de caracter(es)</a>
 		</section>
 	</aside>
 	<main>
-		<form id="O"><input type="file" name="f" multiple webkitdirectory mozdirectory></form>
-		<a id="T" class="F" href="/admin:inside:"></a>
-		<ul id="B">
+		<form id="form-file-upload"><input type="file" name="f" multiple webkitdirectory mozdirectory></form>
+		<a id="link-site-breadcrumb" class="breadcrumb-frame" href="/admin:inside:"></a>
+		<ul id="list-site-actions">
 			<li><a data-true-text="¿Generar certificado SSL?" data-false-text="¿Eliminar certificado SSL?" data-wait-text="¿Obtener respuesta del certificado?" data-true="Crear SSL" data-false="Borrar SSL" data-wait="Respuesta SSL" href="/admin:inside:cfgC">Crear SSL</a></li>
 			<li><a data-true-text="¿Activar redirección HTTPS?" data-false-text="¿Desactivar redirección HTTPS?" data-true="R. HTTPS" data-false="Sin r. HTTPS" href="/admin:inside:cfgS">R. HTTPS</a></li>
 			<li><a data-true-text="¿Activar redirección desde raíz a www?" data-false-text="¿Desactivar redirección desde raíz a www?" data-true="R. www" data-false="Sin r. www" href="/admin:inside:cfgW">R. www</a></li>
 			<li><a data-true-text="¿Activar redirección desde www a raíz?" data-false-text="¿Desactivar redirección desde www a raíz?" data-true="R. raíz" data-false="Sin r. raíz" href="/admin:inside:cfgR">R. raíz</a></li>
-			<li><a id="U" href="/admin:inside:hardUpload">Subir archivos</a></li>
-			<li><a id="D" data-site-text="Borrar sitio" data-subdomain-text="Borrar subdominio" href="/admin:inside:delSite">Borrar sitio</a></li>
+			<li><a id="btn-upload-files" href="/admin:inside:hardUpload">Subir archivos</a></li>
+			<li><a id="btn-delete-entity" data-site-text="Borrar sitio" data-subdomain-text="Borrar subdominio" href="/admin:inside:delSite">Borrar sitio</a></li>
 		</ul>
-		<section id="Z">
-			<a class="O" href="/admin:inside:addAlias">Agregar alias</a>
-			<div class="L"></div>
+		<section id="sec-aliases">
+			<a class="btn-add-entry" href="/admin:inside:addAlias">Agregar alias</a>
+			<div class="entry-list"></div>
 		</section>
-		<section id="S"><a class="O" href="/admin:inside:addSubdomain">Agregar subdominio</a></section>
-		<section id="R">
-			<a class="F" href="/admin:inside:"></a>
-			<div id="M" class="D">
-				<a class="O" href="/admin:inside:addMIME">Agregar MIME</a>
-				<div class="L"></div>
+		<section id="sec-subdomains"><a class="btn-add-entry" href="/admin:inside:addSubdomain">Agregar subdominio</a></section>
+		<section id="panel-subdomain">
+			<a class="breadcrumb-frame" href="/admin:inside:"></a>
+			<div id="box-mime" class="data-block">
+				<a class="btn-add-entry" href="/admin:inside:addMIME">Agregar MIME</a>
+				<div class="entry-list"></div>
 			</div>
-			<div id="H" class="D">
-				<a class="O" href="/admin:inside:addHeader">Agregar cabecera</a>
-				<div class="L"></div>
+			<div id="box-headers" class="data-block">
+				<a class="btn-add-entry" href="/admin:inside:addHeader">Agregar cabecera</a>
+				<div class="entry-list"></div>
 			</div>
-			<div id="W" class="D">
-				<a class="O" href="/admin:inside:addRewrite">Agregar reescritura</a>
-				<div class="L"></div>
+			<div id="box-rewrites" class="data-block">
+				<a class="btn-add-entry" href="/admin:inside:addRewrite">Agregar reescritura</a>
+				<div class="entry-list"></div>
 			</div>
-			<div id="J" class="D">
-				<a class="O" href="/admin:inside:addPreprocessor">Agregar preprocesador</a>
-				<div class="L"></div>
+			<div id="box-preprocessors" class="data-block">
+				<a class="btn-add-entry" href="/admin:inside:addPreprocessor">Agregar preprocesador</a>
+				<div class="entry-list"></div>
 			</div>
-			<div id="I" class="D">
-				<a class="O" href="/admin:inside:addIndex">Agregar índice</a>
-				<div class="L"></div>
+			<div id="box-indexes" class="data-block">
+				<a class="btn-add-entry" href="/admin:inside:addIndex">Agregar índice</a>
+				<div class="entry-list"></div>
 			</div>
 		</section>
 	</main>

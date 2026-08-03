@@ -28,64 +28,64 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path"
+	pathpkg "path"
 	"strings"
 	"time"
 	"turbo/customNetHttp"
 )
 
-func isConn(b customNetHttp.ConnState) bool {
-	if b == customNetHttp.StateNew || b == customNetHttp.StateActive || b == customNetHttp.StateIdle {
+func isConn(connState customNetHttp.ConnState) bool {
+	if connState == customNetHttp.StateNew || connState == customNetHttp.StateActive || connState == customNetHttp.StateIdle {
 		return true
 	}
 	return false
 }
 
-func ipAddr(a string) string {
-	if a[0] == '[' {
-		return cutAt(a[1:], ']')
+func ipAddr(address string) string {
+	if address[0] == '[' {
+		return cutAt(address[1:], ']')
 	}
-	if strings.IndexByte(a, '.') != -1 {
-		return cutAt(a, ':')
+	if strings.IndexByte(address, '.') != -1 {
+		return cutAt(address, ':')
 	}
-	return a
+	return address
 }
 
-func cutAt(a string, b byte) string {
-	c := strings.IndexByte(a, b)
+func cutAt(input string, delimiter byte) string {
+	c := strings.IndexByte(input, delimiter)
 	if c != -1 {
-		return a[:c]
+		return input[:c]
 	}
-	return a
+	return input
 }
 
-func cleanOldValues(i *map[string]int64) {
+func cleanOldValues(store *map[string]int64) {
 	c := time.Now().Unix()
-	for a, b := range *i {
+	for a, b := range *store {
 		if c > b {
-			delete(*i, a)
+			delete(*store, a)
 		}
 	}
 }
 
-func host(e string) (bool, string, string, string) {
+func host(hostHeader string) (bool, string, string, string) {
 	/*if e[0] == '[' {
 		//e = cutAt(e[1:], ']')
 		//e = strings.ReplaceAll(e, ":", "_")
 		return true, "", "", e
 	}*/
-	e = cutAt(e, ':')
-	if hostDisposition(e) {
+	hostHeader = cutAt(hostHeader, ':')
+	if hostDisposition(hostHeader) {
 		return false, "", "", ""
 	}
-	return hostExist(e)
+	return hostExist(hostHeader)
 }
 
-func hostExist(e string) (bool, string, string, string) {
-	a, b, c, d := detectWildcards(e, "")
+func hostExist(hostHeader string) (bool, string, string, string) {
+	a, b, c, d := detectWildcards(hostHeader, "")
 
 	if !a {
-		b, c, d, e = hostParts(e)
+		b, c, d, hostHeader = hostParts(hostHeader)
 		if b != "" {
 			b += "."
 		}
@@ -93,7 +93,7 @@ func hostExist(e string) (bool, string, string, string) {
 			d += "."
 		}
 		//fmt.Println("UNKNOWN DOMAIN", b + c, d + e)
-		return a, "", b + c, d + e
+		return a, "", b + c, d + hostHeader
 	}
 
 	if c != "" { // c is filled when wildcard is detected
@@ -104,80 +104,80 @@ func hostExist(e string) (bool, string, string, string) {
 	return a, c, b, d
 }
 
-func hostParts(a string) (string, string, string, string) {
-	if a == "" {
+func hostParts(hostHeader string) (string, string, string, string) {
+	if hostHeader == "" {
 		return "", "", "", ""
 	}
-	var b string
-	var c string
-	var d string
-	var e string
-	f := len(a) - 1
-	if a[f] == '.' { // Dot chars on the right side causes an empty string on domain name
+	var part1 string
+	var part2 string
+	var part3 string
+	var subdomainsCombined string
+	dotIdx := len(hostHeader) - 1
+	if hostHeader[dotIdx] == '.' { // Dot chars on the right side causes an empty string on domain name
 		for {
-			a = a[:f]
-			f -= 1
-			if f < 0 || a[f] != '.' {
+			hostHeader = hostHeader[:dotIdx]
+			dotIdx -= 1
+			if dotIdx < 0 || hostHeader[dotIdx] != '.' {
 				break
 			}
 		}
 	}
 	for {
-		f = strings.IndexByte(a, '.')
-		if f == -1 {
+		dotIdx = strings.IndexByte(hostHeader, '.')
+		if dotIdx == -1 {
 			break
 		}
-		d = c
-		c = b
-		b = a[:f]
-		a = a[f+1:]
-		if b == "" {
-			b = c
-			c = d
-			d = ""
+		part3 = part2
+		part2 = part1
+		part1 = hostHeader[:dotIdx]
+		hostHeader = hostHeader[dotIdx+1:]
+		if part1 == "" {
+			part1 = part2
+			part2 = part3
+			part3 = ""
 			continue
 		}
-		if d != "" {
-			if e != "" {
-				e += "."
+		if part3 != "" {
+			if subdomainsCombined != "" {
+				subdomainsCombined += "."
 			}
-			e += d
+			subdomainsCombined += part3
 		}
 	}
-	return e, c, b, a
+	return subdomainsCombined, part2, part1, hostHeader
 }
 
-func hostDisposition(e string) bool {
-	l := len(e)
-	m := strings.LastIndexByte(e, '*')
+func hostDisposition(hostHeader string) bool {
+	l := len(hostHeader)
+	m := strings.LastIndexByte(hostHeader, '*')
 	if l < 1 || l > 220 ||
-		e[0] == '.' || e[l-1] == '.' ||
-		e[0] == '-' || e[l-1] == '-' ||
-		strings.Contains(e, "--") ||
-		strings.Contains(e, "..") ||
-		strings.Contains(e, ".-") ||
-		strings.Contains(e, "-.") ||
-		((m != -1) && l > 1 && ((m != 0) || (e[m+1] != '.'))) {
+		hostHeader[0] == '.' || hostHeader[l-1] == '.' ||
+		hostHeader[0] == '-' || hostHeader[l-1] == '-' ||
+		strings.Contains(hostHeader, "--") ||
+		strings.Contains(hostHeader, "..") ||
+		strings.Contains(hostHeader, ".-") ||
+		strings.Contains(hostHeader, "-.") ||
+		((m != -1) && l > 1 && ((m != 0) || (hostHeader[m+1] != '.'))) {
 		return true
 	}
 	return false
 }
 
-func hostOk(e string, f bool) (bool, string) {
-	if hostDisposition(e) {
+func hostOk(hostHeader string, checkExists bool) (bool, string) {
+	if hostDisposition(hostHeader) {
 		return false, "Dirección incorrecta"
 	}
-	if !hostChars(e) {
+	if !hostChars(hostHeader) {
 		return false, "Caracteres incorrectos"
 	}
-	if f {
-		c, _, _, _ := hostExist(e)
+	if checkExists {
+		c, _, _, _ := hostExist(hostHeader)
 		if c {
 			return false, "Sitio existente"
 		}
 	}
-	a, b, d, e := hostParts(e)
-	k := len(e)
+	a, b, d, hostHeader := hostParts(hostHeader)
+	k := len(hostHeader)
 	if k > 31 {
 		return false, "TLD incorrecto"
 	}
@@ -196,143 +196,143 @@ func hostOk(e string, f bool) (bool, string) {
 	return true, ""
 }
 
-func hostChars(e string) bool {
-	for k, _ := range e {
-		if (e[k] < 97 || e[k] > 122) && (e[k] < 45 || e[k] > 46) && (e[k] < 48 || e[k] > 57) && e[k] != 42 {
+func hostChars(hostHeader string) bool {
+	for k, _ := range hostHeader {
+		if (hostHeader[k] < 97 || hostHeader[k] > 122) && (hostHeader[k] < 45 || hostHeader[k] > 46) && (hostHeader[k] < 48 || hostHeader[k] > 57) && hostHeader[k] != 42 {
 			return false
 		}
 	}
 	return true
 }
 
-func extChars(e string) bool {
-	if e[0] == '.' {
-		e = e[1:]
+func extChars(extension string) bool {
+	if extension[0] == '.' {
+		extension = extension[1:]
 	}
-	if e[0] == '-' || e[len(e)-1] == '.' || e[len(e)-1] == '-' || strings.Contains(e, "..") || strings.Contains(e, "--") {
+	if extension[0] == '-' || extension[len(extension)-1] == '.' || extension[len(extension)-1] == '-' || strings.Contains(extension, "..") || strings.Contains(extension, "--") {
 		return false
 	}
-	for k, _ := range e {
-		if (e[k] < 97 || e[k] > 122) && (e[k] < 45 || e[k] > 46) && (e[k] < 48 || e[k] > 57) && (e[k] < 65 || e[k] > 90) {
+	for k, _ := range extension {
+		if (extension[k] < 97 || extension[k] > 122) && (extension[k] < 45 || extension[k] > 46) && (extension[k] < 48 || extension[k] > 57) && (extension[k] < 65 || extension[k] > 90) {
 			return false
 		}
 	}
 	return true
 }
 
-func headerChars(e string) bool {
-	for k, _ := range e {
-		if (e[k] < 97 || e[k] > 122) && (e[k] < 45 || e[k] > 46) && (e[k] < 48 || e[k] > 57) && (e[k] < 65 || e[k] > 90) {
+func headerChars(headerName string) bool {
+	for k, _ := range headerName {
+		if (headerName[k] < 97 || headerName[k] > 122) && (headerName[k] < 45 || headerName[k] > 46) && (headerName[k] < 48 || headerName[k] > 57) && (headerName[k] < 65 || headerName[k] > 90) {
 			return false
 		}
 	}
 	return true
 }
 
-func replaceURIChars(s string) string {
-	for k, v := range B_ {
-		s = strings.ReplaceAll(s, v, k)
+func replaceURIChars(uri string) string {
+	for k, v := range charReplacements {
+		uri = strings.ReplaceAll(uri, v, k)
 	}
-	return s
+	return uri
 }
-func changeWildcards(s ...string) string {
+func changeWildcards(input ...string) string {
 	r := "#"
-	if len(s) == 2 {
-		r = s[1]
+	if len(input) == 2 {
+		r = input[1]
 	}
-	return strings.ReplaceAll(s[0], "*", r)
+	return strings.ReplaceAll(input[0], "*", r)
 }
-func putWildcards(s ...string) string {
+func putWildcards(input ...string) string {
 	r := "#"
-	if len(s) == 2 {
-		r = s[1]
+	if len(input) == 2 {
+		r = input[1]
 	}
-	return strings.ReplaceAll(s[0], r, "*")
+	return strings.ReplaceAll(input[0], r, "*")
 }
-func detectWildcards(a string, b string) (bool, string, string, string) {
-	if a == "" && b == "" {
+func detectWildcards(hostInput string, subdomain string) (bool, string, string, string) {
+	if hostInput == "" && subdomain == "" {
 		return false, "", "", ""
 	}
-	var d string
-	var e string
+	var currentSegment string
+	var prefixSegments string
 	for {
-		c := strings.IndexByte(a, '.')
-		if c == -1 {
-			d = a
+		dotIdx := strings.IndexByte(hostInput, '.')
+		if dotIdx == -1 {
+			currentSegment = hostInput
 			break
 		}
-		d = a[:c]
-		a = a[c+1:]
+		currentSegment = hostInput[:dotIdx]
+		hostInput = hostInput[dotIdx+1:]
 
-		if existWildcards(d+"."+a, b) {
-			return true, e, "", d + "." + a
+		if existWildcards(currentSegment+"."+hostInput, subdomain) {
+			return true, prefixSegments, "", currentSegment + "." + hostInput
 		}
-		if existWildcards("*."+a, b) {
-			return true, e, d + "." + a, "*." + a
+		if existWildcards("*."+hostInput, subdomain) {
+			return true, prefixSegments, currentSegment + "." + hostInput, "*." + hostInput
 		}
-		if e != "" {
-			e += "." + d
+		if prefixSegments != "" {
+			prefixSegments += "." + currentSegment
 		} else {
-			e += d
+			prefixSegments += currentSegment
 		}
 	}
 
-	if existWildcards(a, b) {
-		return true, e, "", a
+	if existWildcards(hostInput, subdomain) {
+		return true, prefixSegments, "", hostInput
 	}
-	if existWildcards("*", b) {
-		return true, e, d, "*"
+	if existWildcards("*", subdomain) {
+		return true, prefixSegments, currentSegment, "*"
 	}
 	return false, "", "", ""
 }
 
-func existWildcards(a string, b string) bool {
-	if b != "" {
-		if _, c := O[b][a]; c {
+func existWildcards(pattern string, domain string) bool {
+	if domain != "" {
+		if _, c := sitesMap[domain][pattern]; c {
 			return true
 		}
 		return false
 	}
-	if _, c := O[a]; c {
+	if _, c := sitesMap[pattern]; c {
 		return true
 	}
 	return false
 }
 
-func changeChars(j bool, s string, f []string) string {
-	g := len(f)
-	h := g / 2
+func changeChars(reverse bool, input string, pairs []string) string {
+	totalLen := len(pairs)
+	halfLen := totalLen / 2
 
-	m := 1
-	i := 0
-	l := h
-	n := h
-	if !j {
-		m = -1
-		i = g - 1
-		l = h - 1
-		n = h * m
+	step := 1
+	currIdx := 0
+	stopIdx := halfLen
+	offset := halfLen
+	if !reverse {
+		step = -1
+		currIdx = totalLen - 1
+		stopIdx = halfLen - 1
+		offset = halfLen * step
 	}
 	for {
-		if i == l {
+		if currIdx == stopIdx {
 			break
 		}
-		s = strings.ReplaceAll(s, f[i], f[i+n])
-		i += m
+		input = strings.ReplaceAll(input, pairs[currIdx], pairs[currIdx+offset])
+		currIdx += step
 	}
-	return s
+	return input
 }
 
-func putSlash(s string) string {
-	l := len(s)
-	if l > 0 && s[l-1] != '/' {
-		s += "/"
+func putSlash(path string) string {
+	l := len(path)
+	if l > 0 && path[l-1] != '/' {
+		path += "/"
 	}
-	return s
+	return path
 }
 
-func fileExists(p string) bool {
-	m, i := os.Stat(p)
+func fileExists(path string) bool {
+	m, i := os.Stat(path)
 	if !os.IsNotExist(i) && !m.IsDir() {
 		return true
 	}
@@ -347,110 +347,110 @@ func currentDir() string {
 	return putSlash(d)
 }
 
-func reqMsg(w customNetHttp.ResponseWriter, r *customNetHttp.Request, s int) {
-	customNetHttp.Error(w, "", s)
+func reqMsg(responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request, statusCode int) {
+	customNetHttp.Error(responseWriter, "", statusCode)
 }
 
-func badReq(w customNetHttp.ResponseWriter, r *customNetHttp.Request, m string) {
-	w.WriteHeader(400)
-	w.Write([]byte(m))
+func badReq(responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request, message string) {
+	responseWriter.WriteHeader(400)
+	responseWriter.Write([]byte(message))
 }
 
-func ext(s string) string {
-	s = path.Ext(s)
-	if s == "." {
-		s = ""
+func ext(path string) string {
+	path = pathpkg.Ext(path)
+	if path == "." {
+		path = ""
 	}
-	if s != "" {
-		s = s[1:]
+	if path != "" {
+		path = path[1:]
 	}
-	return s
+	return path
 }
 
-func serverFuncBase(s string) string {
-	s = path.Base(s)
-	if s == "." || s == "/" {
-		s = ""
+func serverFuncBase(path string) string {
+	path = pathpkg.Base(path)
+	if path == "." || path == "/" {
+		path = ""
 	}
-	return s
+	return path
 }
 
-func dir(s string) string {
-	s = path.Dir(s)
-	if s == "." {
-		s = "/"
+func dir(path string) string {
+	path = pathpkg.Dir(path)
+	if path == "." {
+		path = "/"
 	}
-	return s
+	return path
 }
 
-func siteExists(s string, d string) bool {
+func siteExists(domain string, subdomain string) bool {
 	var i bool
-	if _, i = O[s]; !i {
+	if _, i = sitesMap[domain]; !i {
 		return false
 	}
-	if _, i = O[s][d]; !i {
+	if _, i = sitesMap[domain][subdomain]; !i {
 		return false
 	}
 	return true
 }
 
-func deleteCertificate(l string) {
-	var x bool
-	if _, x = W[l]["S"]; !x {
+func deleteCertificate(siteKey string) {
+	var hasSSL bool
+	if _, hasSSL = siteSSLConfig[siteKey]["S"]; !hasSSL {
 		return
 	}
-	j := len(U.Certificates)
-	if j > 1 {
-		k := W[l]["S"].(int)
-		if j != k {
-			for a, _ := range W {
-				if W[a]["S"] == j { // Assign the map key and value to deletion to the last one that will be removed instead
-					U.Certificates[k-1] = U.Certificates[j-1]
-					U.NameToCertificate[a] = &U.Certificates[k-1]
-					W[a]["S"] = k
+	certCount := len(tlsConfig.Certificates)
+	if certCount > 1 {
+		targetIdx := siteSSLConfig[siteKey]["S"].(int)
+		if certCount != targetIdx {
+			for currentSiteKey, _ := range siteSSLConfig {
+				if siteSSLConfig[currentSiteKey]["S"] == certCount { // Assign the map key and value to deletion to the last one that will be removed instead
+					tlsConfig.Certificates[targetIdx-1] = tlsConfig.Certificates[certCount-1]
+					tlsConfig.NameToCertificate[currentSiteKey] = &tlsConfig.Certificates[targetIdx-1]
+					siteSSLConfig[currentSiteKey]["S"] = targetIdx
 					break
 				}
 			}
 		}
-		U.Certificates = U.Certificates[:j-1]
-		delete(U.NameToCertificate, l)
+		tlsConfig.Certificates = tlsConfig.Certificates[:certCount-1]
+		delete(tlsConfig.NameToCertificate, siteKey)
 	} else {
-		U.Certificates = []tls.Certificate{}
-		U.NameToCertificate = nil
-		// Don't close N[0] because need to restart createSafeServer(U)
+		tlsConfig.Certificates = []tls.Certificate{}
+		tlsConfig.NameToCertificate = nil
+		// Don't close servers[0] because need to restart createSafeServer(tlsConfig)
 	}
 }
 
-func obtainCertificate(s string, p string, z string) {
-	if CC == "" {
-		CC = s
+func obtainCertificate(domain string, certDir string, siteDir string) {
+	if currentCertDomain == "" {
+		currentCertDomain = domain
 
 		go func() {
-			x, c := context.WithTimeout(context.Background(), 3*time.Minute)
-			defer c()
+			timeoutCtx, cancelFn := context.WithTimeout(context.Background(), 3*time.Minute)
+			defer cancelFn()
 
 			//j := exec.CommandContext(x, "C://timeWaitExample.exe") // Windows tests
 
-			if _, b := W[s]; !b { // If site is deleted
-				CC = ""
-				fmt.Println("Certificate intent truncated from deleted site \"" + s + "\"")
+			if _, b := siteSSLConfig[domain]; !b { // If site is deleted
+				currentCertDomain = ""
+				fmt.Println("Certificate intent truncated from deleted site \"" + domain + "\"")
 				return
 			}
 
-			j := exec.CommandContext(x, "certbot", "--version")
-			_, g := j.CombinedOutput()
+			cmd := exec.CommandContext(timeoutCtx, "certbot", "--version")
+			_, execErr := cmd.CombinedOutput()
 
-			if g != nil {
-				CC = ""
-				W[s]["C"] = "Certbot no está instalado"
+			if execErr != nil {
+				currentCertDomain = ""
+				siteSSLConfig[domain]["C"] = "Certbot no está instalado"
 				return
 			}
 
-			_, g = os.ReadDir(p)
-			if g == nil {
-				if os.RemoveAll(p) != nil {
-					CC = ""
-					W[s]["C"] = "Error al vaciar directorio de certificado anterior"
+			_, execErr = os.ReadDir(certDir)
+			if execErr == nil {
+				if os.RemoveAll(certDir) != nil {
+					currentCertDomain = ""
+					siteSSLConfig[domain]["C"] = "Error al vaciar directorio de certificado anterior"
 					return
 				}
 			}
@@ -459,7 +459,7 @@ func obtainCertificate(s string, p string, z string) {
 			"sudo", // This causes issues on other types of Linux, like Alpine
 			"certbot",
 			"certonly",
-			"-d", s,
+			"-d", domain,
 			"--dns-route53",
 			"-n", // Not interactive
 			"--agree-tos",
@@ -467,108 +467,108 @@ func obtainCertificate(s string, p string, z string) {
 			//"--test-cert",
 			"--no-eff-email", // --eff-email to acept share email with EFF
 			//"--force-renewal", "--break-my-certs", // Both needed for --test-cert
-			"--config-dir", p)*/
+			"--config-dir", certDir)*/
 
-			if W[s]["A"] != "" {
-				j = exec.CommandContext(x, // For incompatibility with wildcards or --dns-route53
+			if siteSSLConfig[domain]["A"] != "" {
+				cmd = exec.CommandContext(timeoutCtx, // For incompatibility with wildcards or --dns-route53
 					"certbot",
 					"certonly",
-					"-d", s,
-					"--"+W[s]["A"].(string),
+					"-d", domain,
+					"--"+siteSSLConfig[domain]["A"].(string),
 					"-n", // Not interactive
 					"--agree-tos",
-					"-m", W[s]["E"].(string), // Email for expiring notifications
+					"-m", siteSSLConfig[domain]["E"].(string), // Email for expiring notifications
 					// "--test-cert",
 					"--no-eff-email", // --eff-email
 					// "--force-renewal", "--break-my-certs", // Both needed for --test-cert
-					"--config-dir", p)
+					"--config-dir", certDir)
 			} else {
-				j = exec.CommandContext(x, // For incompatibility with wildcards or --dns-route53
+				cmd = exec.CommandContext(timeoutCtx, // For incompatibility with wildcards or --dns-route53
 					"certbot",
 					"certonly",
-					"-d", s,
+					"-d", domain,
 					"--webroot",
-					"--webroot-path", z+S_["F"],
+					"--webroot-path", siteDir+stringStore["F"],
 					"-n", // Not interactive
 					"--agree-tos",
-					"-m", W[s]["E"].(string), // Email for expiring notifications
+					"-m", siteSSLConfig[domain]["E"].(string), // Email for expiring notifications
 					// "--test-cert",
 					"--no-eff-email", // --eff-email
 					// "--force-renewal", "--break-my-certs", // Both needed for --test-cert
-					"--config-dir", p)
+					"--config-dir", certDir)
 			}
 
-			r, g := j.CombinedOutput()
-			CC = ""
+			cmdOutput, execErr := cmd.CombinedOutput()
+			currentCertDomain = ""
 
-			if g != nil {
-				W[s]["C"] = string(r)
+			if execErr != nil {
+				siteSSLConfig[domain]["C"] = string(cmdOutput)
 				return
 			}
 
-			p += "/archive/"
+			certDir += "/archive/"
 
-			d, g := os.ReadDir(p)
-			if g != nil {
-				W[s]["C"] = "Directorio de certificado ilegible al obtenerlo"
+			archiveEntries, execErr := os.ReadDir(certDir)
+			if execErr != nil {
+				siteSSLConfig[domain]["C"] = "Directorio de certificado ilegible al obtenerlo"
 				return
 			}
 
-			var _C string
-			var _K string
-			t := time.Now().Unix()
-			for _, f := range d {
-				n := p + f.Name() + "/"
-				h, g := os.ReadDir(n)
-				if g != nil {
+			var fullchainPath string
+			var privkeyPath string
+			nowUnix := time.Now().Unix()
+			for _, f := range archiveEntries {
+				n := certDir + f.Name() + "/"
+				certSubEntries, execErr := os.ReadDir(n)
+				if execErr != nil {
 					continue
 				}
-				for _, f = range h {
+				for _, f = range certSubEntries {
 					m := f.Name()
-					w, g := os.Stat(n + m)
-					if g != nil {
+					fileInfo, execErr := os.Stat(n + m)
+					if execErr != nil {
 						continue
 					}
-					if len(m) > 10 && t-w.ModTime().Unix() < 216000 {
+					if len(m) > 10 && nowUnix-fileInfo.ModTime().Unix() < 216000 {
 						switch m[:4] {
 						case "full":
-							_C = n + m
+							fullchainPath = n + m
 						case "priv":
-							_K = n + m
+							privkeyPath = n + m
 						}
 					}
 				}
 				break // Because is only one dir
 			}
 
-			if _C == "" || _K == "" {
-				W[s]["C"] = "Archivos de certificado inexistentes al obtenerlo"
+			if fullchainPath == "" || privkeyPath == "" {
+				siteSSLConfig[domain]["C"] = "Archivos de certificado inexistentes al obtenerlo"
 				return
 			}
 
-			i := os.Rename(_C, z+S_["C"])
-			if i != nil {
-				W[s]["C"] = "'Fullchain' inmovible al obtenerlo"
+			renameErr := os.Rename(fullchainPath, siteDir+stringStore["C"])
+			if renameErr != nil {
+				siteSSLConfig[domain]["C"] = "'Fullchain' inmovible al obtenerlo"
 				return
 			}
 
-			i = os.Rename(_K, z+S_["K"])
-			if i != nil {
-				W[s]["C"] = "'Privkey' inmovible al obtenerlo"
+			renameErr = os.Rename(privkeyPath, siteDir+stringStore["K"])
+			if renameErr != nil {
+				siteSSLConfig[domain]["C"] = "'Privkey' inmovible al obtenerlo"
 				return
 			}
 
-			W[s]["C"] = true
-			fmt.Println("SSL cert: " + s)
-			CC = ""
+			siteSSLConfig[domain]["C"] = true
+			fmt.Println("SSL cert: " + domain)
+			currentCertDomain = ""
 		}()
 		return
 	}
 
-	if CC == s {
+	if currentCertDomain == domain {
 		return
 	} // To prevent new certificate attempts from the same site
 
-	CD += 100
-	time.AfterFunc(CD*time.Millisecond, func() { obtainCertificate(s, p, z) })
+	certRetryDelayMs += 100
+	time.AfterFunc(certRetryDelayMs*time.Millisecond, func() { obtainCertificate(domain, certDir, siteDir) })
 }

@@ -23,7 +23,7 @@ For commercial licensing, please visit one of the following:
 package main
 
 var (
-	_AB = map[string]map[string][]byte{
+	embeddedBinaryFiles = map[string]map[string][]byte{
 		"inside": {},
 		"admin": {
 			"i.png": {

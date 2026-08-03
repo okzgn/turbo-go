@@ -3802,7 +3802,7 @@ const (
 	http2prefaceTimeout         = 1 * time.Second // Default: 15s
 	http2firstSettingsTimeout   = 1 * time.Second // Default: 2s, should be in-flight with preface anyway
 	http2handlerChunkWriteSize  = 4 << 10
-	http2defaultMaxStreams      = 250 // TODO: make this 100 as the GFE seems to?
+	http2defaultMaxStreams      = 50 // okzgn change, TODO: make this 100 as the GFE seems to?
 	http2maxQueuedControlFrames = 10000
 )
 
@@ -4171,6 +4171,11 @@ func (s *http2Server) ServeConn(c net.Conn, opts *http2ServeConnOpts) {
 		serveG:                      http2newGoroutineLock(),
 		pushEnabled:                 true,
 		sawClientPreface:            opts.SawClientPreface,
+
+		// okzgn add: Rapid Reset max 100 RST_STREAM per second
+		maxRSTStreamPerSec: 100,        //okzgn add
+		rstStreamWindow:    time.Now(), //okzgn add
+		rstStreamRcvd:      0,          //okzgn add
 	}
 
 	s.state.registerConn(sc)
@@ -4352,6 +4357,21 @@ type http2serverConn struct {
 
 	// Used by startGracefulShutdown.
 	shutdownOnce sync.Once
+
+	// okzgn add: Rapid Reset mitigation
+	unstartedHandlers []http2unstartedHandler //okzgn add
+	curHandlers       uint32                  //okzgn add
+
+	rstStreamRcvd      uint64    // okzgn add: Received RST_STREAM counter
+	rstStreamWindow    time.Time // okzgn add: Time lapse
+	maxRSTStreamPerSec uint64    // okzgn add: Max RST per second
+}
+
+type http2unstartedHandler struct { //okzgn add
+	streamID uint32
+	rw       *http2responseWriter
+	req      *Request
+	handler  func(ResponseWriter, *Request)
 }
 
 func (sc *http2serverConn) maxHeaderListSize() uint32 {
@@ -4726,6 +4746,8 @@ func (sc *http2serverConn) serve() {
 					return
 				case http2gracefulShutdownMsg:
 					sc.startGracefulShutdownInternal()
+				case http2handlerDoneMsg: //okzgn add
+					sc.handlerDone()
 				default:
 					panic("unknown timer")
 				}
@@ -4773,6 +4795,7 @@ var (
 	http2idleTimerMsg        = new(http2serverMessage)
 	http2shutdownTimerMsg    = new(http2serverMessage)
 	http2gracefulShutdownMsg = new(http2serverMessage)
+	http2handlerDoneMsg      = new(http2serverMessage) //okzgn add
 )
 
 func (sc *http2serverConn) onSettingsTimer() { sc.sendServeMsg(http2settingsTimerMsg) }
@@ -5354,6 +5377,27 @@ func (sc *http2serverConn) processResetStream(f *http2RSTStreamFrame) error {
 		// (Section 5.4.1) of type PROTOCOL_ERROR.
 		return sc.countError("reset_idle_stream", http2ConnectionError(http2ErrCodeProtocol))
 	}
+
+	// okzgn add: Rapid Reset protection (CVE-2023-44487)
+	now := time.Now()
+	if now.Sub(sc.rstStreamWindow) > 1*time.Second {
+		sc.rstStreamWindow = now
+		sc.rstStreamRcvd = 0
+	}
+	sc.rstStreamRcvd++
+
+	const maxRSTPerSecond = 50
+	if sc.rstStreamRcvd > maxRSTPerSecond {
+		sc.vlogf("http2: RST flood detected (%d resets in 1s), closing connection", sc.rstStreamRcvd)
+		sc.logf("http2: possible Rapid Reset attack from %v", sc.remoteAddrStr)
+		if f := sc.srv.CountError; f != nil {
+			f("rapid_reset_detected")
+		}
+		sc.goAway(http2ErrCodeEnhanceYourCalm)
+		return http2ConnectionError(http2ErrCodeEnhanceYourCalm)
+	}
+	// okzgn add end: Rapid Reset protection
+
 	if st != nil {
 		st.cancelCtx()
 		sc.closeStream(st, http2streamError(f.StreamID, f.ErrCode))
@@ -5772,8 +5816,54 @@ func (sc *http2serverConn) processHeaders(f *http2MetaHeadersFrame) error {
 		}
 	}
 
-	go sc.runHandler(rw, req, handler)
+	//okzgn change: go sc.runHandler(rw, req, handler)
+	//okzgn change: return nil
+	return sc.scheduleHandler(id, rw, req, handler) //okzgn add
+}
+
+func (sc *http2serverConn) scheduleHandler(streamID uint32, rw *http2responseWriter, req *Request, handler func(ResponseWriter, *Request)) error { //okzgn add
+	sc.serveG.check()
+
+	maxHandlers := sc.advMaxStreams
+	if sc.curHandlers < maxHandlers {
+		sc.curHandlers++
+		go sc.runHandler(rw, req, handler)
+		return nil
+	}
+	if len(sc.unstartedHandlers) > int(4*sc.advMaxStreams) {
+		return sc.countError("too_many_early_resets", http2ConnectionError(http2ErrCodeEnhanceYourCalm))
+	}
+	sc.unstartedHandlers = append(sc.unstartedHandlers, http2unstartedHandler{
+		streamID: streamID,
+		rw:       rw,
+		req:      req,
+		handler:  handler,
+	})
 	return nil
+}
+
+func (sc *http2serverConn) handlerDone() { //okzgn add
+	sc.serveG.check()
+	sc.curHandlers--
+	i := 0
+	maxHandlers := sc.advMaxStreams
+	for ; i < len(sc.unstartedHandlers); i++ {
+		u := sc.unstartedHandlers[i]
+		if sc.streams[u.streamID] == nil {
+			// Stream fue reseteado antes de que el handler arrancara
+			continue
+		}
+		if sc.curHandlers >= maxHandlers {
+			break
+		}
+		sc.curHandlers++
+		go sc.runHandler(u.rw, u.req, u.handler)
+		sc.unstartedHandlers[i] = http2unstartedHandler{} // no retener referencias
+	}
+	sc.unstartedHandlers = sc.unstartedHandlers[i:]
+	if len(sc.unstartedHandlers) == 0 {
+		sc.unstartedHandlers = nil
+	}
 }
 
 func (sc *http2serverConn) upgradeRequest(req *Request) {
@@ -6041,6 +6131,8 @@ func (sc *http2serverConn) newResponseWriter(st *http2stream, req *Request) *htt
 
 // Run on its own goroutine.
 func (sc *http2serverConn) runHandler(rw *http2responseWriter, req *Request, handler func(ResponseWriter, *Request)) {
+	defer sc.sendServeMsg(http2handlerDoneMsg) //okzgn add
+
 	didPanic := true
 	defer func() {
 		rw.rws.stream.cancelCtx()

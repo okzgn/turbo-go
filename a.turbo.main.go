@@ -41,177 +41,172 @@ import (
 )
 
 var (
-	N  = customNetHttp.N  // Current servers
-	I  = customNetHttp.I  // Signed in tokens
-	J  = customNetHttp.J  // Persistent IPs
-	S_ = customNetHttp.S_ // Strings list
-	B_ = customNetHttp.B_ // Chars to encode
-	BF = customNetHttp.BF // Fixed chars to encode
+	servers                = customNetHttp.N  // Current servers
+	signedInTokens         = customNetHttp.I  // Signed-in tokens
+	persistentIPs          = customNetHttp.J  // Persistent IPs
+	stringStore             = customNetHttp.S_ // String store
+	charReplacements        = customNetHttp.B_ // Characters to encode
+	fixedCharReplacements   = customNetHttp.BF // Fixed character replacements
 
-	O = customNetHttp.O // Sites map & rewrites
-	W = customNetHttp.W // Sites with SSL
-	T = customNetHttp.T // MIMEs
-	Q = customNetHttp.Q // Headers
-	D = customNetHttp.D // Preprocessors
-	H = customNetHttp.H // Indexes
-	A = customNetHttp.A // Alias
+	sitesMap                = customNetHttp.O // Sites map and rewrites
+	siteSSLConfig           = customNetHttp.W // Sites with SSL
+	mimeTypes               = customNetHttp.T // MIME types
+	customHeaders           = customNetHttp.Q // Custom headers
+	preprocessors            = customNetHttp.D // Preprocessors
+	indexFiles               = customNetHttp.H // Index files
+	domainAliases            = customNetHttp.A // Domain aliases
 
-	V  = customNetHttp.V  // Server time limits
-	G  = customNetHttp.G  // Server requests limits
-	L_ = customNetHttp.L_ // Server upload/body limit
-	YH = customNetHttp.YH // Server max header length to read
-	YU = customNetHttp.YU // Server max URI length
-	YX = customNetHttp.YX // Serves max files in upload
-	YY = customNetHttp.YY // Servers max number of headers
+	serverTimeLimits       = customNetHttp.V  // Server time limits
+	serverRequestLimits    = customNetHttp.G  // Server request limits
+	maxBodySize             = customNetHttp.L_ // Server upload/body limit
+	maxHeaderBytes          = customNetHttp.YH // Maximum header bytes to read
+	maxURILength            = customNetHttp.YU // Maximum URI length
+	maxUploadFiles          = customNetHttp.YX // Maximum files in an upload
+	maxHeaderCount          = customNetHttp.YY // Maximum number of headers
 
-	Za = customNetHttp.Za // Reference of time lapses between requests
-	Zb = customNetHttp.Zb // Reference of requests between time lapses
+	lastRequestTimeNano     = customNetHttp.Za // Reference time between requests
+	requestCountInWindow    = customNetHttp.Zb // Request count within the time window
 
-	Pa = customNetHttp.Pa
-	Pb = customNetHttp.Pb
+	configCheckTicker       = customNetHttp.Pa
+	cleanupTicker            = customNetHttp.Pb
 
-	U = customNetHttp.U
+	tlsConfig                = customNetHttp.U
 
-	CC = customNetHttp.CC // For getting certificates in order
-	CD = customNetHttp.CD // Elapsed milliseconds between each new certificate attempt, increasing by 100 per intent
-	Y  = customNetHttp.Y  // HTTP responses
-	YF = customNetHttp.YF // Fixed http response codes
-	A_ = customNetHttp.A_ // Config file mod time reference
-	C_ = customNetHttp.C_ // Character lists
+	currentCertDomain        = customNetHttp.CC // Certificate domain currently being processed
+	certRetryDelayMs         = customNetHttp.CD // Delay between certificate attempts, increasing by 100 ms per attempt
+	httpResponses            = customNetHttp.Y  // HTTP responses
+	fixedHTTPResponses       = customNetHttp.YF // Fixed HTTP response codes
+	configFileModTime        = customNetHttp.A_ // Config file modification time reference
+	charEscapeLists          = customNetHttp.C_ // Character escape lists
 
-	LV = customNetHttp.LV // Visits log file pointer
-	LD = customNetHttp.LD // Denials log file pointer
+	visitsLogFile             = customNetHttp.LV // Visits log file pointer
+	denialsLogFile            = customNetHttp.LD // Denials log file pointer
 
-	L   sync.RWMutex        // Global mutex, for logs, ...
-	J_  sync.Map            // References per IP
-	H1_ = customNetHttp.H1_ // Headers key max length
-	H2_ = customNetHttp.H2_ // Headers values max length
+	globalMutex               sync.RWMutex        // Global mutex for logs and shared state
+	ipReferences              sync.Map            // References per IP
+	maxHeaderKeyLength        = customNetHttp.H1_ // Maximum header key length
+	maxHeaderValueLength      = customNetHttp.H2_ // Maximum header value length
 )
 
-type J_I struct {
-	x sync.Mutex
-	b int64
-	l int64
-	c int64
-}
-
 func main() {
-	// Compile and compress: go build -ldflags "-s -w"
-	// debug.SetGCPercent(1000) // Change frequency of GC
+	// Compile and compress with: go build -ldflags "-s -w"
+	// debug.SetGCPercent(1000) // Change the garbage collection frequency
 
-	Za = time.Now().UnixNano()
+	startTimeNano := time.Now().UnixNano()
+	lastRequestTimeNano = startTimeNano
 
-	S_["T"] = "OKZGN Turbo"
-	fmt.Println(S_["T"])
+	stringStore["T"] = "OKZGN Turbo"
+	fmt.Println(stringStore["T"])
 
-	S_["B"] = "admin"
-	S_["H"] = "inside"
+	stringStore["B"] = "admin"
+	stringStore["H"] = "inside"
 
-	S_["U"] = "Turbo"
-	k, e := os.LookupEnv("TURBO_USER")
-	if e {
+	// GUI access username & password
+	stringStore["U"] = "Turbo"
+	envValue, envExists := os.LookupEnv("TURBO_USER")
+	if envExists {
 		fmt.Println("Username env var set.")
-		S_["U"] = k
+		stringStore["U"] = envValue
 	}
 
-	S_["P"] = "Admin"
-	k, e = os.LookupEnv("TURBO_PASSWORD")
-	if e {
+	stringStore["P"] = "Admin"
+	envValue, envExists = os.LookupEnv("TURBO_PASSWORD")
+	if envExists {
 		fmt.Println("Password env var set.")
-		S_["P"] = k
+		stringStore["P"] = envValue
 	}
 
-	S_["A"] = currentDir()
-	k, e = os.LookupEnv("TURBO_DIR")
-	if e {
+	stringStore["A"] = currentDir()
+	envValue, envExists = os.LookupEnv("TURBO_DIR")
+	if envExists {
 		fmt.Println("Start dir env var set.")
-		S_["A"] = putSlash(k)
+		stringStore["A"] = putSlash(envValue)
 	}
 
-	S_["M"] = "ok"
-	S_["S"] = "turbo.certificates"
-	S_["F"] = "@"
-	S_["C"] = "fullchain.pem"
-	S_["K"] = "privkey.pem"
-	S_["N"] = "turbo.config"
-	S_["X"] = "turbo.denials"
-	S_["G"] = "turbo.visits"
-	S_["J"] = "#.html"
-	S_["D"] = "Content-Type"
-	S_["Z"] = "Faltan datos"
-	S_["Y"] = "turbo.dev"
+	stringStore["M"] = "ok"
+	stringStore["S"] = "turbo.certificates"
+	stringStore["F"] = "@"
+	stringStore["C"] = "fullchain.pem"
+	stringStore["K"] = "privkey.pem"
+	stringStore["N"] = "turbo.config"
+	stringStore["X"] = "turbo.denials"
+	stringStore["G"] = "turbo.visits"
+	stringStore["J"] = "#.html"
+	stringStore["D"] = "Content-Type"
+	stringStore["Z"] = "Faltan datos"
+	stringStore["Y"] = "turbo.dev"
 
-	Y[0] = S_["T"] + `\n{TURBO_RESPONSE_CODE}`
-	YF = map[int]bool{0: true}
+	httpResponses[0] = stringStore["T"] + `\n{TURBO_RESPONSE_CODE}`
+	fixedHTTPResponses = map[int]bool{0: true}
 
-	B_[";"] = "-.-" // This group of replacements can't be part of C_ because it need to be transferred to frontend
-	B_["#"] = "-,-"
-	B_["&"] = "-_-"
-	BF = map[string]bool{";": true, "#": true, "&": true}
+	charReplacements[";"] = "-.-" // This group cannot be part of charEscapeLists because it must be transferred to the frontend
+	charReplacements["#"] = "-,-"
+	charReplacements["&"] = "-_-"
+	fixedCharReplacements = map[string]bool{";": true, "#": true, "&": true}
 
-	C_['J'] = []string{
+	charEscapeLists['J'] = []string{
 		"\\", "\"", "\t", "\r", "\n", "\f", "\b",
 		`\\`, `\\"`, `\\t`, `\\r`, `\\n`, `\\f`, `\\b`,
 	}
 
 	updateSettings(false)
-	N[0] = createSafeServer(U)
-	N[1] = createHttpServer()
+	servers[0] = createSafeServer(tlsConfig)
+	servers[1] = createHttpServer()
 	for {
 		select {
-		case <-Pa.C:
+		case <-configCheckTicker.C:
 			updateSettings(true)
-		case <-Pb.C:
-			cleanOldValues(&I)
-			cleanOldValues(&J)
+		case <-cleanupTicker.C:
+			cleanOldValues(&signedInTokens)
+			cleanOldValues(&persistentIPs)
 		}
 	}
 }
 
-func createSafeServer(j *tls.Config) *customNetHttp.Server {
+func createSafeServer(tlsConfig *tls.Config) *customNetHttp.Server {
 	t := &customNetHttp.Server{
-		ReadHeaderTimeout: V["RHT"],
-		ReadTimeout:       V["RT"],
-		WriteTimeout:      V["WT"],
-		IdleTimeout:       V["IT"],
-		MaxHeaderBytes:    YH,
+		ReadHeaderTimeout: serverTimeLimits["RHT"],
+		ReadTimeout:       serverTimeLimits["RT"],
+		WriteTimeout:      serverTimeLimits["WT"],
+		IdleTimeout:       serverTimeLimits["IT"],
+		MaxHeaderBytes:    maxHeaderBytes,
 		ConnState:         connHandler,
 		Handler:           customNetHttp.HandlerFunc(serverHandlerFn("s")),
-		TLSConfig:         j,
+		TLSConfig:         tlsConfig,
 	}
 
-	if len(j.Certificates) > 0 {
-		return safeServerStart(t, j)
+	if len(tlsConfig.Certificates) > 0 {
+		return safeServerStart(t, tlsConfig)
 	}
 
 	return t
 }
 
-func safeServerStart(t *customNetHttp.Server, j *tls.Config) *customNetHttp.Server {
-	l, e := tls.Listen("tcp", ":443", j)
+func safeServerStart(server *customNetHttp.Server, tlsConfig *tls.Config) *customNetHttp.Server {
+	l, e := tls.Listen("tcp", ":443", tlsConfig)
 	if e != nil {
 		fmt.Println(e)
-		return t
+		return server
 	}
 
 	go func() {
-		if e = t.Serve(l); e != nil {
+		if e = server.Serve(l); e != nil {
 			fmt.Println(e)
 			l.Close()
 			return
 		}
 	}()
 
-	return t
+	return server
 }
 
 func createHttpServer() *customNetHttp.Server {
 	s := &customNetHttp.Server{
-		ReadHeaderTimeout: V["RHT"],
-		ReadTimeout:       V["RT"],
-		WriteTimeout:      V["WT"],
-		IdleTimeout:       V["IT"],
-		MaxHeaderBytes:    YH,
+		ReadHeaderTimeout: serverTimeLimits["RHT"],
+		ReadTimeout:       serverTimeLimits["RT"],
+		WriteTimeout:      serverTimeLimits["WT"],
+		IdleTimeout:       serverTimeLimits["IT"],
+		MaxHeaderBytes:    maxHeaderBytes,
 		ConnState:         connHandler,
 		Handler:           customNetHttp.HandlerFunc(serverHandlerFn("")),
 	}
@@ -219,70 +214,70 @@ func createHttpServer() *customNetHttp.Server {
 	return httpServerStart(s)
 }
 
-func httpServerStart(t *customNetHttp.Server) *customNetHttp.Server {
+func httpServerStart(server *customNetHttp.Server) *customNetHttp.Server {
 	l, e := net.Listen("tcp", ":80")
 	if e != nil {
 		fmt.Println(e)
-		return t
+		return server
 	}
 
 	go func() {
-		if e = t.Serve(l); e != nil {
+		if e = server.Serve(l); e != nil {
 			fmt.Println(e)
 			l.Close()
 			return
 		}
 	}()
 
-	return t
+	return server
 }
 
-func serverSetLogState(t string, l *os.File) {
-	L.Lock()
-	defer L.Unlock()
+func serverSetLogState(logType string, logFile *os.File) {
+	globalMutex.Lock()
+	defer globalMutex.Unlock()
 
-	switch t {
-	case S_["G"]:
-		if LV == l {
+	switch logType {
+	case stringStore["G"]:
+		if visitsLogFile == logFile {
 			return
 		}
-		if LV != nil {
-			LV.Close()
+		if visitsLogFile != nil {
+			visitsLogFile.Close()
 		}
-		LV = l
-	case S_["X"]:
-		if LD == l {
+		visitsLogFile = logFile
+	case stringStore["X"]:
+		if denialsLogFile == logFile {
 			return
 		}
-		if LD != nil {
-			LD.Close()
+		if denialsLogFile != nil {
+			denialsLogFile.Close()
 		}
-		LD = l
+		denialsLogFile = logFile
 	}
 }
 
-func serverGetLogState(t string) *os.File {
-	L.RLock()
-	defer L.RUnlock()
+func serverGetLogState(logType string) *os.File {
+	globalMutex.RLock()
+	defer globalMutex.RUnlock()
 
-	switch t {
-	case S_["G"]:
-		return LV
-	case S_["X"]:
-		return LD
+	switch logType {
+	case stringStore["G"]:
+		return visitsLogFile
+	case stringStore["X"]:
+		return denialsLogFile
 	}
 	return nil
 }
 
-func serverWriteLogs(t string, r *customNetHttp.Request, _t int64, p string) {
-	l := serverGetLogState(t)
+func serverWriteLogs(logType string, request *customNetHttp.Request, timestamp int64, prefix string) {
+	l := serverGetLogState(logType)
 
 	if l != nil {
 		c := ""
-		if r == nil {
-			c = p + " " + "\n"
+		if request == nil {
+			c = prefix + " " + "\n"
 		} else {
-			c = p + " " + r.RemoteAddr + " " + strconv.FormatInt(_t, 10) + " " + r.Method + " " + r.Host + " " + r.RequestURI + " " + "\n"
+			c = prefix + " " + request.RemoteAddr + " " + strconv.FormatInt(timestamp, 10) + " " + request.Method + " " + request.Host + " " + request.RequestURI + " " + "\n"
 		}
 		_, e := l.WriteString(c)
 		if e == nil {
@@ -290,276 +285,276 @@ func serverWriteLogs(t string, r *customNetHttp.Request, _t int64, p string) {
 		}
 	}
 
-	if _, e := os.Stat(S_["A"] + t); e == nil {
-		p, _e := os.OpenFile(S_["A"]+t, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if _, e := os.Stat(stringStore["A"] + logType); e == nil {
+		p, _e := os.OpenFile(stringStore["A"]+logType, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if _e == nil {
-			serverSetLogState(t, p)
+			serverSetLogState(logType, p)
 		}
 	} else {
-		serverSetLogState(t, nil)
+		serverSetLogState(logType, nil)
 	}
 }
 
-func serverHandlerFn(a string) func(w customNetHttp.ResponseWriter, r *customNetHttp.Request) {
+func serverHandlerFn(serverType string) func(w customNetHttp.ResponseWriter, r *customNetHttp.Request) {
 	return func(w customNetHttp.ResponseWriter, r *customNetHttp.Request) {
-		_t := time.Now().Unix()
+		currentTimestamp := time.Now().Unix()
 
 		/* New deny method */
-		_y := ipAddr(r.RemoteAddr)
+		clientIP := ipAddr(r.RemoteAddr)
 
-		if perIpNotAvailable(_y, true) == true {
+		if perIpNotAvailable(clientIP, true) == true {
 			reqMsg(w, r, 429)
 			return
 		}
 		/* End new deny method */
 
-		serverWriteLogs(S_["G"], r, _t, "Visit")
+		serverWriteLogs(stringStore["G"], r, currentTimestamp, "Visit")
 
 		if console(w, r) {
 			return
 		}
 
-		L.RLock()
-		defer L.RUnlock()
+		globalMutex.RLock()
+		defer globalMutex.RUnlock()
 
-		var f bool
-		e, b, s, d := host(r.Host)
+		var siteFound bool
+		validHost, wildcardDomain, subdomain, domain := host(r.Host)
 
-		k := d
-		l := s
-		c := s
-		if c != "" {
-			c += "." + d
+		firstDomain := domain
+		firstSubdomain := subdomain
+		fullHost := subdomain
+		if fullHost != "" {
+			fullHost += "." + domain
 		} else {
-			c = d
+			fullHost = domain
 		}
 
-		if _, f = A[c]; f {
-			e, b, s, d = host(A[c])
-			c = s
-			if c != "" {
-				c += "." + d
+		if _, siteFound = domainAliases[fullHost]; siteFound {
+			validHost, wildcardDomain, subdomain, domain = host(domainAliases[fullHost])
+			fullHost = subdomain
+			if fullHost != "" {
+				fullHost += "." + domain
 			} else {
-				c = d
+				fullHost = domain
 			}
 		}
 
-		if !f && b == "" { // Reset {FIRST_SITE} & {FIRST_SUBDOMAIN} if no Alias or Wildcard
-			k = ""
-			l = ""
+		if !siteFound && wildcardDomain == "" { // Reset {FIRST_SITE} & {FIRST_SUBDOMAIN} if no Alias or Wildcard
+			firstDomain = ""
+			firstSubdomain = ""
 		}
 
-		m := d
-		if b != "" { // Change domain & site reference if wildcard is detected
-			m = b
-			if s != "" {
-				c = s + "." + b
+		effectiveDomain := domain
+		if wildcardDomain != "" { // Change domain & site reference if wildcard is detected
+			effectiveDomain = wildcardDomain
+			if subdomain != "" {
+				fullHost = subdomain + "." + wildcardDomain
 			} else {
-				c = b
+				fullHost = wildcardDomain
 			}
 		}
 
-		if !e {
+		if !validHost {
 			reqMsg(w, r, 404)
 			return
 		}
 
-		if s == "" && W[m]["W"] == true {
-			redir(a, d, "www", w, r, 301)
+		if subdomain == "" && siteSSLConfig[effectiveDomain]["W"] == true {
+			redir(serverType, domain, "www", w, r, 301)
 			return
 		}
 
-		if s == "www" && W[m]["R"] == true {
-			redir(a, d, "", w, r, 301)
+		if subdomain == "www" && siteSSLConfig[effectiveDomain]["R"] == true {
+			redir(serverType, domain, "", w, r, 301)
 			return
 		}
 
-		if a == "" && W[c]["S"] != 0 {
-			redir("s", d, s, w, r, 301)
+		if serverType == "" && siteSSLConfig[fullHost]["S"] != 0 {
+			redir("s", domain, subdomain, w, r, 301)
 		}
 
-		serve(a, d, m, s, k, l, w, r)
+		serve(serverType, domain, effectiveDomain, subdomain, firstDomain, firstSubdomain, w, r)
 	}
 }
 
 func resetSettings() {
-	L.Lock()
-	defer L.Unlock()
+	globalMutex.Lock()
+	defer globalMutex.Unlock()
 
-	O = make(map[string]map[string]map[string]string) // Sites map & rewrites
-	W = make(map[string]map[string]interface{})       // Sites with SSL
-	T = make(map[string]map[string]string)            // MIMEs
-	Q = make(map[string]map[string]string)            // Headers
-	D = make(map[string]map[string]string)            // Preprocessors
-	H = make(map[string]map[string]bool)              // Indexes
-	A = make(map[string]string)                       // Alias
-	U.Certificates = []tls.Certificate{}
-	U.NameToCertificate = nil
-	LV = nil
-	LD = nil
+	sitesMap = make(map[string]map[string]map[string]string) // Sites map & rewrites
+	siteSSLConfig = make(map[string]map[string]interface{})  // Sites with SSL
+	mimeTypes = make(map[string]map[string]string)            // MIME types
+	customHeaders = make(map[string]map[string]string)       // Headers
+	preprocessors = make(map[string]map[string]string)       // Preprocessors
+	indexFiles = make(map[string]map[string]bool)             // Indexes
+	domainAliases = make(map[string]string)                   // Domain aliases
+	tlsConfig.Certificates = []tls.Certificate{}
+	tlsConfig.NameToCertificate = nil
+	visitsLogFile = nil
+	denialsLogFile = nil
 }
 
-func updateSettings(a bool) {
-	if a {
+func updateSettings(checkSitesFlag bool) {
+	if checkSitesFlag {
 		checkSites()
 	}
 
-	L.RLock()
-	_a := S_["A"]
-	_n := S_["N"]
-	_f := S_["F"]
-	a_ := A_
-	L.RUnlock()
+	globalMutex.RLock()
+	baseDir := stringStore["A"]
+	configFileName := stringStore["N"]
+	contentDirName := stringStore["F"]
+	lastConfigModTime := configFileModTime
+	globalMutex.RUnlock()
 
-	g, e := os.ReadDir(_a)
+	dirEntries, e := os.ReadDir(baseDir)
 	if e != nil {
-		fmt.Println("Start dir:", _a, e)
+		fmt.Println("Start dir:", baseDir, e)
 		return
 	}
 
-	h, e := os.Stat(_a + _n)
-	var t int64
+	configFileInfo, e := os.Stat(baseDir + configFileName)
+	var configModTime int64
 	if e != nil {
-		t = 1
+		configModTime = 1
 	} else {
-		t = h.ModTime().UnixNano()
+		configModTime = configFileInfo.ModTime().UnixNano()
 	}
 
-	if a_ != t {
-		L.Lock()
-		A_ = t
-		readSiteConfigFrom(_a + _n)
-		L.Unlock()
-		if t == 1 {
+	if lastConfigModTime != configModTime {
+		globalMutex.Lock()
+		configFileModTime = configModTime
+		readSiteConfigFrom(baseDir + configFileName)
+		globalMutex.Unlock()
+		if configModTime == 1 {
 			fmt.Println("Default settings applied.")
 		} else {
 			fmt.Println("Config file updated, readed and settings applied.")
 		}
 	}
 
-	for _, f := range g { // This is used when input is like: #.domain.com
-		n := f.Name()
-		_n := putWildcards(n)
-		if m, _ := hostOk(_n, false); !m {
+	for _, entry := range dirEntries { // This is used when input is like: #.domain.com
+		entryName := entry.Name()
+		wildcardName := putWildcards(entryName)
+		if hostValid, _ := hostOk(wildcardName, false); !hostValid {
 			continue
 		}
 
-		_, e = os.ReadDir(_a + n + "/" + _f)
+		_, e = os.ReadDir(baseDir + entryName + "/" + contentDirName)
 		if e != nil {
 			continue
 		}
 
-		d, e := os.ReadDir(_a + n)
+		subdirEntries, e := os.ReadDir(baseDir + entryName)
 		if e != nil {
 			continue
 		}
 
-		L.RLock()
-		_e := siteExists(_n, "")
-		L.RUnlock()
+		globalMutex.RLock()
+		siteExistsResult := siteExists(wildcardName, "")
+		globalMutex.RUnlock()
 
-		if !_e {
-			constructSite(_n, "")
-			L.Lock()
-			C["!"](false, W[_n], true, _n, "") // Set first true if you want to fmt.Println errors
-			L.Unlock()
-			if a {
-				fmt.Println("Site \"" + _n + "\" added to filesystem and enabled on server.")
+		if !siteExistsResult {
+			constructSite(wildcardName, "")
+			globalMutex.Lock()
+			subdomainContentCheckers["!"](false, siteSSLConfig[wildcardName], true, wildcardName, "") // Set first true to print errors
+			globalMutex.Unlock()
+			if checkSitesFlag {
+				fmt.Println("Site \"" + wildcardName + "\" added to filesystem and enabled on server.")
 			}
 		}
 
-		for _, f = range d {
-			z := f.Name()
-			_z := putWildcards(z)
-			if m, _ := hostOk(_z+"."+changeWildcards(_n, "x"), false); !m {
+		for _, entry = range subdirEntries {
+			subEntryName := entry.Name()
+			subWildcardName := putWildcards(subEntryName)
+			if hostValid, _ := hostOk(subWildcardName+"."+changeWildcards(wildcardName, "x"), false); !hostValid {
 				continue
 			}
 
-			b, e := os.Stat(_a + n + "/" + z + "/" + _f)
+			contentDirInfo, e := os.Stat(baseDir + entryName + "/" + subEntryName + "/" + contentDirName)
 
 			if e != nil {
 				continue
 			}
 
-			L.RLock()
-			_e = siteExists(_n, _z)
-			L.RUnlock()
+			globalMutex.RLock()
+			siteExistsResult = siteExists(wildcardName, subWildcardName)
+			globalMutex.RUnlock()
 
-			if b.IsDir() && !_e {
-				constructSite(_n, _z)
-				L.Lock()
-				C["!"](false, W[_z+"."+_n], true, _n, _z)
-				L.Unlock()
-				if a {
-					fmt.Println("Site \"" + _z + "." + _n + "\" added to filesystem and enabled on server.")
+			if contentDirInfo.IsDir() && !siteExistsResult {
+				constructSite(wildcardName, subWildcardName)
+				globalMutex.Lock()
+				subdomainContentCheckers["!"](false, siteSSLConfig[subWildcardName+"."+wildcardName], true, wildcardName, subWildcardName)
+				globalMutex.Unlock()
+				if checkSitesFlag {
+					fmt.Println("Site \"" + subWildcardName + "." + wildcardName + "\" added to filesystem and enabled on server.")
 				}
 			}
 		}
 	}
 }
 
-func connHandler(a net.Conn, b customNetHttp.ConnState) {
-	if !isConn(b) {
+func connHandler(conn net.Conn, connState customNetHttp.ConnState) {
+	if !isConn(connState) {
 		return
 	}
 
-	c := ipAddr(a.RemoteAddr().String())
+	c := ipAddr(conn.RemoteAddr().String())
 
 	if perIpNotAvailable(c, true) == true || globalAndPerIpControl(c) == true {
-		a.Close()
+		conn.Close()
 		return
 	}
 }
 
-func perIpNotAvailable(c string, m bool) bool {
-	v, _ := J_.LoadOrStore(c, &J_I{l: time.Now().UnixNano()})
-	t := v.(*J_I)
+func perIpNotAvailable(ip string, incrementCounter bool) bool {
+	ipRef, _ := ipReferences.LoadOrStore(ip, &IPReference{lastRequestNano: time.Now().UnixNano()})
+	ipData := ipRef.(*IPReference)
 
-	t.x.Lock()
-	defer t.x.Unlock()
+	ipData.mutex.Lock()
+	defer ipData.mutex.Unlock()
 
-	if t.b > time.Now().Unix() {
+	if ipData.blockedUntil > time.Now().Unix() {
 		return true
 	}
 
-	n := time.Now().UnixNano()
-	if m {
-		t.c++
+	nowNano := time.Now().UnixNano()
+	if incrementCounter {
+		ipData.requestCount++
 	}
 
-	d := n - t.l
-	l := atomic.LoadInt64(&G[0])
-	b := atomic.LoadInt64(&G[1])
-	e := atomic.LoadInt64(&G[2])
+	timeDiff := nowNano - ipData.lastRequestNano
+	intervalLimit := atomic.LoadInt64(&serverRequestLimits[0])
+	windowLimit := atomic.LoadInt64(&serverRequestLimits[1])
+	maxRequests := atomic.LoadInt64(&serverRequestLimits[2])
 
-	if d > l {
-		t.l = n
-		t.c = 1
+	if timeDiff > intervalLimit {
+		ipData.lastRequestNano = nowNano
+		ipData.requestCount = 1
 	}
 
-	if (d > b && t.c < e) || b == 0 || e == 0 {
+	if (timeDiff > windowLimit && ipData.requestCount < maxRequests) || windowLimit == 0 || maxRequests == 0 {
 		return false
 	}
 
-	_d := t.c / e
-	_l := d / b
+	requestRatio := ipData.requestCount / maxRequests
+	timeRatio := timeDiff / windowLimit
 
-	if _d > _l {
-		L.RLock()
-		_, z := J[c]
-		L.RUnlock()
+	if requestRatio > timeRatio {
+		globalMutex.RLock()
+		_, z := persistentIPs[ip]
+		globalMutex.RUnlock()
 
-		t.b = time.Now().Unix()
-		m := c + " conn denial"
+		ipData.blockedUntil = time.Now().Unix()
+		denialMsg := ip + " conn denial"
 
 		if z {
-			t.b += 10
-			m += " persistent"
+			ipData.blockedUntil += 10
+			denialMsg += " persistent"
 		} else {
-			t.b += 5
+			ipData.blockedUntil += 5
 		}
 
-		serverWriteLogs(S_["X"], nil, 0, m)
+		serverWriteLogs(stringStore["X"], nil, 0, denialMsg)
 
 		return true
 	}
@@ -567,99 +562,99 @@ func perIpNotAvailable(c string, m bool) bool {
 	return false
 }
 
-func globalAndPerIpControl(a string) bool {
-	var l int64 = atomic.LoadInt64(&G[0])
-	var b int64 = atomic.LoadInt64(&G[1])
-	var e int64 = atomic.LoadInt64(&G[2])
+func globalAndPerIpControl(ip string) bool {
+	var globalInterval int64 = atomic.LoadInt64(&serverRequestLimits[0])
+	var globalWindow int64 = atomic.LoadInt64(&serverRequestLimits[1])
+	var globalMaxReqs int64 = atomic.LoadInt64(&serverRequestLimits[2])
 
-	s := atomic.LoadInt64(&Za)
-	h := atomic.LoadInt64(&Zb)
-	atomic.AddInt64(&Zb, 1)
+	lastGlobalTime := atomic.LoadInt64(&lastRequestTimeNano)
+	globalReqCount := atomic.LoadInt64(&requestCountInWindow)
+	atomic.AddInt64(&requestCountInWindow, 1)
 
-	c := time.Now().UnixNano()
-	d := c - s
-	h++
+	nowNano := time.Now().UnixNano()
+	timeDiff := nowNano - lastGlobalTime
+	globalReqCount++
 
-	if (d > b && h < e) || b == 0 || e == 0 { // Continue with unnecessary checking
+	if (timeDiff > globalWindow && globalReqCount < globalMaxReqs) || globalWindow == 0 || globalMaxReqs == 0 { // Continue with unnecessary checking
 		return false
 	}
 
-	_d := (h / e)
-	_l := (d / b)
+	globalReqRatio := (globalReqCount / globalMaxReqs)
+	globalTimeRatio := (timeDiff / globalWindow)
 
 	// Shows details
 	// fmt.Println(_d, _l)
 
-	z := false
+	exceeded := false
 
-	if _d > _l {
-		L.Lock()
-		J[a] = time.Now().Unix() + 59 // Time to preserve on cleanOldValues
-		L.Unlock()
-		serverWriteLogs(S_["X"], nil, 0, a+" rate limit exceed at: "+strconv.FormatInt(J[a], 10))
-		z = true
+	if globalReqRatio > globalTimeRatio {
+		globalMutex.Lock()
+		persistentIPs[ip] = time.Now().Unix() + 59 // Time to preserve during cleanOldValues
+		globalMutex.Unlock()
+		serverWriteLogs(stringStore["X"], nil, 0, ip+" rate limit exceed at: "+strconv.FormatInt(persistentIPs[ip], 10))
+		exceeded = true
 	}
 
-	if d > l {
-		atomic.StoreInt64(&Za, c)
-		atomic.StoreInt64(&Zb, 1)
+	if timeDiff > globalInterval {
+		atomic.StoreInt64(&lastRequestTimeNano, nowNano)
+		atomic.StoreInt64(&requestCountInWindow, 1)
 	}
 
-	return z
+	return exceeded
 }
 
-func _constructSite(s string, d string) {
-	if _, e := O[s]; !e {
-		O[s] = make(map[string]map[string]string)
+func _constructSite(domain string, subdomain string) {
+	if _, e := sitesMap[domain]; !e {
+		sitesMap[domain] = make(map[string]map[string]string)
 	}
-	O[s][d] = make(map[string]string) // Rewrites
-	if d != "" {
-		s = d + "." + s
+	sitesMap[domain][subdomain] = make(map[string]string) // Rewrites
+	if subdomain != "" {
+		domain = subdomain + "." + domain
 	}
-	D[s] = make(map[string]string)      // Preprocessors
-	H[s] = make(map[string]bool)        // Indexes
-	T[s] = make(map[string]string)      // MIMEs
-	Q[s] = make(map[string]string)      // Headers
-	W[s] = make(map[string]interface{}) // Site config.
-	W[s]["S"] = 0
-	W[s]["C"] = false
-	W[s]["R"] = false
-	W[s]["W"] = false
-	W[s]["E"] = ""
-	W[s]["A"] = ""
+	preprocessors[domain] = make(map[string]string)      // Preprocessors
+	indexFiles[domain] = make(map[string]bool)           // Indexes
+	mimeTypes[domain] = make(map[string]string)          // MIME types
+	customHeaders[domain] = make(map[string]string)      // Headers
+	siteSSLConfig[domain] = make(map[string]interface{}) // Site configuration
+	siteSSLConfig[domain]["S"] = 0
+	siteSSLConfig[domain]["C"] = false
+	siteSSLConfig[domain]["R"] = false
+	siteSSLConfig[domain]["W"] = false
+	siteSSLConfig[domain]["E"] = ""
+	siteSSLConfig[domain]["A"] = ""
 }
 
-func constructSite(s string, d string) {
-	L.Lock()
-	defer L.Unlock()
-	_constructSite(s, d)
+func constructSite(domain string, subdomain string) {
+	globalMutex.Lock()
+	defer globalMutex.Unlock()
+	_constructSite(domain, subdomain)
 }
 
-func deleteSite(s string, d string) {
-	L.Lock()
-	defer L.Unlock()
+func deleteSite(domain string, subdomain string) {
+	globalMutex.Lock()
+	defer globalMutex.Unlock()
 
 	var k string
-	if d != "" {
-		delete(O[s], d)
-		s = d + "." + s
-		deleteCertificate(s)
+	if subdomain != "" {
+		delete(sitesMap[domain], subdomain)
+		domain = subdomain + "." + domain
+		deleteCertificate(domain)
 	} else {
-		for k, _ = range O[s] {
+		for k, _ = range sitesMap[domain] {
 			if k != "" {
-				deleteCertificate(k + "." + s)
+				deleteCertificate(k + "." + domain)
 			}
 		}
-		delete(O, s)
+		delete(sitesMap, domain)
 	}
-	delete(D, s)
-	delete(H, s)
-	delete(W, s)
-	delete(T, s)
-	delete(Q, s)
-	for k, d = range A {
-		if d == s {
-			delete(A, k)
+	delete(preprocessors, domain)
+	delete(indexFiles, domain)
+	delete(siteSSLConfig, domain)
+	delete(mimeTypes, domain)
+	delete(customHeaders, domain)
+	for k, subdomain = range domainAliases {
+		if subdomain == domain {
+			delete(domainAliases, k)
 		}
 	}
 }
@@ -668,15 +663,15 @@ func checkSites() {
 	type _d struct{ s, d string }
 	var _l []_d
 
-	L.RLock()
-	for d := range O {
-		for s := range O[d] {
-			if b, _ := E["/"](false, d, s); !b { // E["/"] is used when input is like: *.domain.com
+	globalMutex.RLock()
+	for d := range sitesMap {
+		for s := range sitesMap[d] {
+			if b, _ := siteExistenceCheckers["/"](false, d, s); !b { // siteExistenceCheckers["/"] is used when input is like: *.domain.com
 				_l = append(_l, _d{s, d})
 			}
 		}
 	}
-	L.RUnlock()
+	globalMutex.RUnlock()
 
 	for _, i := range _l {
 		deleteSite(i.d, i.s)
@@ -689,293 +684,300 @@ func checkSites() {
 	}
 }
 
-func redir(z string, h string, s string, w customNetHttp.ResponseWriter, r *customNetHttp.Request, j int) {
-	if s != "" {
-		s += "."
+func redir(schemeSuffix string, host string, subdomain string, responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request, statusCode int) {
+	if subdomain != "" {
+		subdomain += "."
 	}
-	customNetHttp.Redirect(w, r, "http"+z+"://"+s+h+r.RequestURI, j)
+	customNetHttp.Redirect(responseWriter, request, "http"+schemeSuffix+"://"+subdomain+host+request.RequestURI, statusCode)
 }
 
-func serve(z string, g string, h string, s string, k string, l string, w customNetHttp.ResponseWriter, r *customNetHttp.Request) { //i, n, o
-	a, _, _, b := detectWildcards(s, h)
+func serve(serverType string, host string, domain string, subdomain string, firstDomain string, firstSubdomain string, responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request) { //i, n, o
+	wildcardMatch, _, _, wildcardDomain := detectWildcards(subdomain, domain)
 
 	// fmt.Println("SUBDOMAIN", a, i, o, b)
-	if !a {
+	if !wildcardMatch {
 		// Without 404 response: b = s
-		reqMsg(w, r, 404)
+		reqMsg(responseWriter, request, 404)
 		return
 	}
 
 	// fmt.Println("REQUEST", r.RequestURI)
-	if z == "" && s != "" && W[b+"."+h]["S"] != 0 {
-		redir("s", g, s, w, r, 301)
+	if serverType == "" && subdomain != "" && siteSSLConfig[wildcardDomain+"."+domain]["S"] != 0 {
+		redir("s", host, subdomain, responseWriter, request, 301)
 		return
 	}
 
-	var c bool
-	x, f, c := choose(w, r, g, h, b, s, k, l)
-	if !c {
+	var continueServe bool
+	rewrittenPath, queryString, continueServe := choose(responseWriter, request, host, domain, wildcardDomain, subdomain, firstDomain, firstSubdomain)
+	if !continueServe {
 		return
 	}
-	r.RequestURI = x
+	request.RequestURI = rewrittenPath
 
-	z = S_["A"] + changeWildcards(h) + "/"
-	if s != "" {
-		if a {
-			s = changeWildcards(b)
+	serverType = stringStore["A"] + changeWildcards(domain) + "/"
+	if subdomain != "" {
+		if wildcardMatch {
+			subdomain = changeWildcards(wildcardDomain)
 		}
-		z += s + "/" + S_["F"]
+		serverType += subdomain + "/" + stringStore["F"]
 	} else {
-		z += S_["F"]
+		serverType += stringStore["F"]
 	}
 
-	d, e := os.Stat(z + x)
-	if e != nil {
-		reqMsg(w, r, 404)
+	fileInfo, err := os.Stat(serverType + rewrittenPath)
+	if err != nil {
+		reqMsg(responseWriter, request, 404)
 		return
 	}
 
-	if s != "" {
-		s = b + "." + h
+	if subdomain != "" {
+		subdomain = wildcardDomain + "." + domain
 	} else {
-		s = h
+		subdomain = domain
 	}
 
-	if d.IsDir() {
-		t := "/"
-		if x == t || x[len(x)-1] == '/' {
-			t = ""
+	if fileInfo.IsDir() {
+		trailingSlash := "/"
+		if rewrittenPath == trailingSlash || rewrittenPath[len(rewrittenPath)-1] == '/' {
+			trailingSlash = ""
 		}
-		y := " " // Hide default indexes when H is empty
+		indexFile := " " // Hide default indexes when indexFiles is empty
 
-		for u := range H[s] {
-			y = t + u
-			i, e := os.Stat(z + x + y)
-			if e == nil && !i.IsDir() { // Make sure this is the best error handling for Indexes, before: !os.IsNotExist(e)
-				x += y
-				y = ""
+		for indexName := range indexFiles[subdomain] {
+			indexFile = trailingSlash + indexName
+			preprocFileInfo, err := os.Stat(serverType + rewrittenPath + indexFile)
+			if err == nil && !preprocFileInfo.IsDir() { // Make sure this is the best error handling for Indexes, before: !os.IsNotExist(e)
+				rewrittenPath += indexFile
+				indexFile = ""
 				break
 			}
 		}
 
-		if y != "" {
-			reqMsg(w, r, 404)
+		if indexFile != "" {
+			reqMsg(responseWriter, request, 404)
 			return
 		}
 	}
 
-	h = ext(x)
-	j := w.Header()
+	extension := ext(rewrittenPath)
+	responseHeaders := responseWriter.Header()
 
-	if _, c = Q[s]; c {
-		for u := range Q[s] {
-			j.Set(u, Q[s][u])
+	if _, continueServe = customHeaders[subdomain]; continueServe {
+		for u := range customHeaders[subdomain] {
+			responseHeaders.Set(u, customHeaders[subdomain][u])
 		}
 	} // Headers inclution
 
-	if _, c = D[s][h]; c && D[s][h] != "" { // Preprocessors verify
-		i, e := os.Stat(D[s][h])
-		if e == nil && !i.IsDir() { // Before: !os.IsNotExist(e)
-			dynamic(z, x, f, D[s][h], w, r, &j)
+	if _, continueServe = preprocessors[subdomain][extension]; continueServe && preprocessors[subdomain][extension] != "" { // Verify preprocessors
+		preprocFileInfo, err := os.Stat(preprocessors[subdomain][extension])
+		if err == nil && !preprocFileInfo.IsDir() { // Before: !os.IsNotExist(e)
+			dynamic(serverType, rewrittenPath, queryString, preprocessors[subdomain][extension], responseWriter, request, &responseHeaders)
 			return
 		}
 	}
 
-	if _, c = T[s][h]; c {
-		j.Set(S_["D"], T[s][h])
+	if _, continueServe = mimeTypes[subdomain][extension]; continueServe {
+		responseHeaders.Set(stringStore["D"], mimeTypes[subdomain][extension])
 	}
-	customNetHttp.ServeFile(w, r, z+x)
+	customNetHttp.ServeFile(responseWriter, request, serverType+rewrittenPath)
 	// fmt.Println(j) Show headers
 }
 
-func dynamic(z string, x string, f string, p string, w customNetHttp.ResponseWriter, r *customNetHttp.Request, _ *customNetHttp.Header) {
+func dynamic(basePath string, requestPath string, queryString string, scriptPath string, responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request, headers *customNetHttp.Header) {
 	l := new(customNetHttp.CgiHandler) // Before: new(cgi.Handler)
-	l.Path = p
-	l.Root = z
+	l.Path = scriptPath
+	l.Root = basePath
 	l.Env = append(l.Env, "REDIRECT_STATUS=CGI") // This is need for execution of scripts (it will not executed if isn't set). Also depends of 'cgi.force-redirect' on php.ini.
-	if r.URL.RawQuery != "" {
-		f = r.URL.RawQuery + "&" + f
+	if request.URL.RawQuery != "" {
+		queryString = request.URL.RawQuery + "&" + queryString
 	}
-	l.Env = append(l.Env, "QUERY_STRING="+f) // If not set, not includes rewrite query string
-	l.Env = append(l.Env, "DOCUMENT_ROOT="+z)
-	l.Env = append(l.Env, "SCRIPT_FILENAME="+z+x)
-	l.ServeHTTP(w, r)
+	l.Env = append(l.Env, "QUERY_STRING="+queryString) // If not set, not includes rewrite query string
+	l.Env = append(l.Env, "DOCUMENT_ROOT="+basePath)
+	l.Env = append(l.Env, "SCRIPT_FILENAME="+basePath+requestPath)
+	l.ServeHTTP(responseWriter, request)
 	// fmt.Println(j) Show headers
 }
 
-func rewrite(y string, h string, b string) (string, string) {
+func rewrite(requestURI string, domain string, subdomain string) (string, string) {
 	var c bool
-	if _, c = O[h][b][y]; c {
-		return O[h][b][y], y
+	if _, c = sitesMap[domain][subdomain][requestURI]; c {
+		return sitesMap[domain][subdomain][requestURI], requestURI
 	}
-	if y == "/" {
+	if requestURI == "/" {
 		return "", ""
 	} // To prevent passing through 'choose' unecessary functions. Before: return y, ""
-	y = y[1:]
+	requestURI = requestURI[1:]
 	for {
-		d := strings.LastIndexByte(y, '/')
+		d := strings.LastIndexByte(requestURI, '/')
 		if d == -1 {
 			break
 		}
 		d++
-		if _, c := O[h][b]["/"+y[:d]]; c {
-			return O[h][b]["/"+y[:d]], "/" + y[:d]
+		if _, c := sitesMap[domain][subdomain]["/"+requestURI[:d]]; c {
+			return sitesMap[domain][subdomain]["/"+requestURI[:d]], "/" + requestURI[:d]
 		} else {
-			y = y[:d-1]
+			requestURI = requestURI[:d-1]
 		}
 	}
-	if _, c = O[h][b]["/"]; c {
-		return O[h][b]["/"], "/"
+	if _, c = sitesMap[domain][subdomain]["/"]; c {
+		return sitesMap[domain][subdomain]["/"], "/"
 	} // At the end of large unmatched string is obligatory to check if match with a top level rewrite
 	return "", ""
 }
 
-func choose(w customNetHttp.ResponseWriter, r *customNetHttp.Request, g string, h string, b string, s string, n string, m string) (string, string, bool) {
-	k := cutAt(r.RequestURI, '?')
-	y, c := rewrite(k, h, b) // h is reference to site map key, and b is reference to site subdomain map key, both in O
-	if y == "" {
-		return k, "", true
+func choose(responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request, host string, domain string, subdomain string, currentSubdomain string, firstDomain string, firstSubdomain string) (string, string, bool) {
+	pathWithoutQuery := cutAt(request.RequestURI, '?')
+	rewriteResult, matchedRewrite := rewrite(pathWithoutQuery, domain, subdomain) // domain is the site map key and subdomain is the site subdomain map key, both in sitesMap
+	if rewriteResult == "" {
+		return pathWithoutQuery, "", true
 	} // This is for unmatched URIs for rewrite
-	y = shortcutWords(r, y, h, b, g, s, n, m, c)
-	j := strings.IndexByte(y, '?')
-	if j != -1 {
-		k = y[j+1:]
-		y = y[:j]
+	rewriteResult = shortcutWords(request, rewriteResult, domain, subdomain, host, currentSubdomain, firstDomain, firstSubdomain, matchedRewrite)
+	queryIndex := strings.IndexByte(rewriteResult, '?')
+	if queryIndex != -1 {
+		pathWithoutQuery = rewriteResult[queryIndex+1:]
+		rewriteResult = rewriteResult[:queryIndex]
 	} else {
-		k = ""
+		pathWithoutQuery = ""
 	}
-	switch y[0] {
+	switch rewriteResult[0] {
 	case 'H':
-		redir("", y[1:]+k, "", w, r, 302)
+		redir("", rewriteResult[1:]+pathWithoutQuery, "", responseWriter, request, 302)
 		return "", "", false
 	case 'S':
-		redir("s", y[1:]+k, "", w, r, 302)
+		redir("s", rewriteResult[1:]+pathWithoutQuery, "", responseWriter, request, 302)
 		return "", "", false
 	case 'N':
-		y = y[1:]
+		rewriteResult = rewriteResult[1:]
 	}
-	return y, k, true
+	return rewriteResult, pathWithoutQuery, true
 }
 
-func shortcutWords(r *customNetHttp.Request, u string, h string, i string, g string, s string, k string, l string, c string) string {
-	d := u
-	e := ""
-	f := ""
-	var z bool
+func shortcutWords(request *customNetHttp.Request, input string, domain string, subdomain string, host string, currentSubdomain string, firstDomain string, firstSubdomain string, rewriteMatch string) string {
+	remaining := input
+	placeholder := ""
+	result := ""
+	var placeholderExists bool
 	for {
-		a := strings.IndexByte(d, '{')
-		b := strings.IndexByte(d, '}')
-		if d == "" || a == -1 || b == -1 || b < a {
+		openBraceIdx := strings.IndexByte(remaining, '{')
+		closeBraceIdx := strings.IndexByte(remaining, '}')
+		if remaining == "" || openBraceIdx == -1 || closeBraceIdx == -1 || closeBraceIdx < openBraceIdx {
 			break
 		}
-		e = d[a+1 : b]
-		if _, z = _R[e]; z {
-			f += d[:a] + _R[e](r, h, i, g, s, k, l, c)
+		placeholder = remaining[openBraceIdx+1 : closeBraceIdx]
+		if _, placeholderExists = shortcutWordReplacers[placeholder]; placeholderExists {
+			result += remaining[:openBraceIdx] + shortcutWordReplacers[placeholder](request, domain, subdomain, host, currentSubdomain, firstDomain, firstSubdomain, rewriteMatch)
 		} else {
-			f += d[:a]
+			result += remaining[:openBraceIdx]
 		}
-		if b < len(d) {
-			d = d[b+1:]
+		if closeBraceIdx < len(remaining) {
+			remaining = remaining[closeBraceIdx+1:]
 		} else {
-			d = ""
+			remaining = ""
 		}
 	}
-	f += d
-	return f
+	result += remaining
+	return result
 }
 
-func readSiteConfigFrom(p string) {
+func readSiteConfigFrom(configPath string) {
 	// Probably need to check file permissions, because can't read and generate an err.
-	if fileExists(p) {
-		f, e := os.ReadFile(p)
-		if e != nil || !json.Valid([]byte(f)) {
-			fmt.Println("Config file:", p, e)
+	if fileExists(configPath) {
+		configBytes, e := os.ReadFile(configPath)
+		if e != nil || !json.Valid([]byte(configBytes)) {
+			fmt.Println("Config file:", configPath, e)
 			setDefaultSettings()
 			return
 		}
-		json.Unmarshal(f, &X)
-		var a bool
-		var b string
-		var d string
-		var k string
-		for k, _ = range _MX {
-			if _, a = X[k]; a { // This is for another kind of lists in config file
-				for z, l := range X[k] {
-					b, a = l.(string)
-					if a {
-						_MX[k](z, b)
+		json.Unmarshal(configBytes, &rawConfigMap)
+		var keyExists bool
+		var stringValue string
+		//var subKey string
+		var configKey string
+		for configKey, _ = range adminAddHandlers {
+			if _, keyExists = rawConfigMap[configKey]; keyExists { // This is for another kind of lists in config file
+				for subKey, subValue := range rawConfigMap[configKey] {
+					stringValue, keyExists = subValue.(string)
+					if keyExists {
+						adminAddHandlers[configKey](subKey, stringValue)
 					}
 				}
 				continue
 			}
 		}
-		for k, _ = range M { // Default settings check
-			if _, a = X[k]; a {
-				for _, l := range _MO[k] {
-					if _, a = X[k][l]; a {
-						b, a = X[k][l].(string)
-						var z string
-						if a {
-							if a, z = M[k][l](b, S_["P"]); a {
+		for configKey, _ = range defaultSettingValidators { // Default settings check
+			if _, keyExists = rawConfigMap[configKey]; keyExists {
+				for _, subValue := range defaultSettingKeysGroup[configKey] {
+					if _, keyExists = rawConfigMap[configKey][subValue]; keyExists {
+						stringValue, keyExists = rawConfigMap[configKey][subValue].(string)
+						var subKeyIter string
+						if keyExists {
+							if keyExists, subKeyIter = defaultSettingValidators[configKey][subValue](stringValue, stringStore["P"]); keyExists {
 								continue
 							}
-							if _, a = _ME[k][l][z]; a { // ME (E, for exceptions) There are some exceptions on errors, some cause unnecessary resets
+							if _, keyExists = defaultSettingErrorExceptions[configKey][subValue][subKeyIter]; keyExists { // ME (E, for exceptions) There are some exceptions on errors, some cause unnecessary resets
 								continue
 							}
 						}
 					}
-					R_[k][l]()
+					defaultSettingsResetFallbacks[configKey][subValue]()
 				}
 			} else {
-				for m, _ := range R_[k] {
-					R_[k][m]()
+				for subMap, _ := range defaultSettingsResetFallbacks[configKey] {
+					defaultSettingsResetFallbacks[configKey][subMap]()
 				} // Reset specific defaults if doesn't exists
 			}
 		}
-		for s, _ := range X { // Site & subdomains existence check
-			if _, a = M[s]; a {
+		for domain, _ := range rawConfigMap { // Site & subdomains existence check
+			if _, keyExists = defaultSettingValidators[domain]; keyExists {
 				continue
 			}
-			if !siteExistenceCheck(s, "") {
+			if !siteExistenceCheck(domain, "") {
 				continue
 			}
-			for d, _ = range X[s] {
-				if _, a = C[d]; a || (d != "" && !siteExistenceCheck(s, d)) {
+			for subKey, _ := range rawConfigMap[domain] {
+				if _, keyExists = subdomainContentCheckers[subKey]; keyExists || (subKey != "" && !siteExistenceCheck(domain, subKey)) {
 					continue
 				}
-				c, a := X[s][d].(map[string]interface{})
-				if !a {
+				subdomainData, keyExists := rawConfigMap[domain][subKey].(map[string]interface{})
+				if !keyExists {
 					continue
 				}
-				for n, _ := range C { // Subdomains content check
-					if _, a = c[n]; a {
-						C[n](false, c[n], true, s, d) // Returns something like: a, _
+				for settingKey, _ := range subdomainContentCheckers { // Subdomains content check
+					if _, keyExists = subdomainData[settingKey]; keyExists {
+						subdomainContentCheckers[settingKey](false, subdomainData[settingKey], true, domain, subKey) // Returns something like: a, _
 					}
 				}
 			}
 		}
-		X = make(map[string]map[string]interface{})
+		rawConfigMap = make(map[string]map[string]interface{})
 		return
 	}
 	setDefaultSettings()
 }
 
 func setDefaultSettings() {
-	for k, _ := range R_ {
-		for m, _ := range R_[k] {
-			R_[k][m]()
+	for k, _ := range defaultSettingsResetFallbacks {
+		for m, _ := range defaultSettingsResetFallbacks[k] {
+			defaultSettingsResetFallbacks[k][m]()
 		}
 	}
 }
 
-func siteExistenceCheck(s string, d string) bool {
+func siteExistenceCheck(domain string, subdomain string) bool {
 	var c bool
 	var m string
-	for m, _ = range E {
-		if c, _ = E[m](true, s, d); !c {
-			F[m](s, d)
+	for m, _ = range siteExistenceCheckers {
+		if c, _ = siteExistenceCheckers[m](true, domain, subdomain); !c {
+			siteExistenceResetFallbacks[m](domain, subdomain)
 			return false
 		}
 	}
 	return true
+}
+
+type IPReference struct {
+	mutex            sync.Mutex
+	blockedUntil     int64
+	lastRequestNano  int64
+	requestCount     int64
 }
