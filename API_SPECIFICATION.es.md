@@ -114,10 +114,6 @@ Devuelve la configuración general, mapas de sitios raíz, IPs denegadas, respue
   }
   ```
 
-Aquí tienes la actualización precisa del **Punto 4.2**, incluyendo un ejemplo exacto de cómo la API estructura la respuesta JSON al devolver la lista de subdominios y sus configuraciones simplificadas.
-
----
-
 ### 4.2. Obtener Lista de Subdominios de un Sitio
 Devuelve un objeto JSON con todos los subdominios que pertenecen a un dominio raíz específico, incluyendo el alias (si aplica) y la configuración SSL/Redirecciones de cada uno.
 

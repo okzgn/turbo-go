@@ -114,10 +114,6 @@ Returns the general configuration, root site maps, denied IPs, custom HTTP respo
   }
   ```
 
-Here is the precise update to Point 4.2, including an exact example of how the API structures the JSON response when returning the list of subdomains and their simplified configurations.
-
----
-
 ### 4.2. Get List of Subdomains for a Site
 Returns a JSON object with all subdomains belonging to a specific root domain, including the alias (if applicable) and the SSL/Redirect configuration for each.
 
