@@ -1,3 +1,5 @@
+// Origen: go1.26.10, src/vendor/golang.org/x/net/http2/hpack/huffman.go. Regenerado con customNetHttp/regenerar; parches en customNetHttp/PATCHES.md.
+
 // Copyright 2014 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
@@ -108,10 +110,10 @@ func huffmanDecode(buf *bytes.Buffer, maxLen int, v []byte) error {
 // incomparable is a zero-width, non-comparable type. Adding it to a struct
 // makes that struct also non-comparable, and generally doesn't add
 // any size (as long as it's first).
-//type incomparable [0]func()
+type hpack_incomparable [0]func()
 
 type node struct {
-	_ incomparable
+	_ hpack_incomparable
 
 	// children is non-nil for internal nodes
 	children *[256]*node

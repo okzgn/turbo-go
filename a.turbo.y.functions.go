@@ -25,21 +25,20 @@ package main
 import (
 	"context"
 	"crypto/tls"
-	"fmt"
+	"crypto/x509"
+	"encoding/pem"
+	"errors"
+	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	pathpkg "path"
+	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 	"turbo/customNetHttp"
 )
-
-func isConn(connState customNetHttp.ConnState) bool {
-	if connState == customNetHttp.StateNew || connState == customNetHttp.StateActive || connState == customNetHttp.StateIdle {
-		return true
-	}
-	return false
-}
 
 func ipAddr(address string) string {
 	if address[0] == '[' {
@@ -52,18 +51,21 @@ func ipAddr(address string) string {
 }
 
 func cutAt(input string, delimiter byte) string {
-	c := strings.IndexByte(input, delimiter)
-	if c != -1 {
-		return input[:c]
+	index := strings.IndexByte(input, delimiter)
+	if index != -1 {
+		return input[:index]
 	}
 	return input
 }
 
+// cleanOldValues deletes expired entries; it takes the global lock, so callers must not hold it.
 func cleanOldValues(store *map[string]int64) {
-	c := time.Now().Unix()
-	for a, b := range *store {
-		if c > b {
-			delete(*store, a)
+	globalMutex.Lock()
+	defer globalMutex.Unlock()
+	now := time.Now().Unix()
+	for key, expiry := range *store {
+		if now > expiry {
+			delete(*store, key)
 		}
 	}
 }
@@ -81,27 +83,26 @@ func host(hostHeader string) (bool, string, string, string) {
 	return hostExist(hostHeader)
 }
 
+// hostExist resolves a host against the configured sites. It returns whether a site matches, the wildcard
+// pattern that matched (empty without wildcard), the subdomain part and the domain part.
 func hostExist(hostHeader string) (bool, string, string, string) {
-	a, b, c, d := detectWildcards(hostHeader, "")
+	matched, prefix, wildcardHost, site := detectWildcards(hostHeader, "")
 
-	if !a {
-		b, c, d, hostHeader = hostParts(hostHeader)
-		if b != "" {
-			b += "."
+	if !matched {
+		upperSubdomains, subdomain, domainName, tld := hostParts(hostHeader)
+		if upperSubdomains != "" {
+			upperSubdomains += "."
 		}
-		if d != "" {
-			d += "."
+		if domainName != "" {
+			domainName += "."
 		}
-		//fmt.Println("UNKNOWN DOMAIN", b + c, d + e)
-		return a, "", b + c, d + hostHeader
+		return false, "", upperSubdomains + subdomain, domainName + tld
 	}
 
-	if c != "" { // c is filled when wildcard is detected
-		//fmt.Println("WILDCARD", a, d, b, c)
-		return a, d, b, c
+	if wildcardHost != "" { // Filled when a wildcard is detected; site is then the pattern
+		return true, site, prefix, wildcardHost
 	}
-	//fmt.Println("DOMAIN", a, c, b, d)
-	return a, c, b, d
+	return true, "", prefix, site
 }
 
 func hostParts(hostHeader string) (string, string, string, string) {
@@ -148,16 +149,16 @@ func hostParts(hostHeader string) (string, string, string, string) {
 }
 
 func hostDisposition(hostHeader string) bool {
-	l := len(hostHeader)
-	m := strings.LastIndexByte(hostHeader, '*')
-	if l < 1 || l > 220 ||
-		hostHeader[0] == '.' || hostHeader[l-1] == '.' ||
-		hostHeader[0] == '-' || hostHeader[l-1] == '-' ||
+	length := len(hostHeader)
+	lastWildcard := strings.LastIndexByte(hostHeader, '*')
+	if length < 1 || length > 220 ||
+		hostHeader[0] == '.' || hostHeader[length-1] == '.' ||
+		hostHeader[0] == '-' || hostHeader[length-1] == '-' ||
 		strings.Contains(hostHeader, "--") ||
 		strings.Contains(hostHeader, "..") ||
 		strings.Contains(hostHeader, ".-") ||
 		strings.Contains(hostHeader, "-.") ||
-		((m != -1) && l > 1 && ((m != 0) || (hostHeader[m+1] != '.'))) {
+		((lastWildcard != -1) && length > 1 && ((lastWildcard != 0) || (hostHeader[lastWildcard+1] != '.'))) {
 		return true
 	}
 	return false
@@ -171,34 +172,30 @@ func hostOk(hostHeader string, checkExists bool) (bool, string) {
 		return false, "Caracteres incorrectos"
 	}
 	if checkExists {
-		c, _, _, _ := hostExist(hostHeader)
-		if c {
+		exists, _, _, _ := hostExist(hostHeader)
+		if exists {
 			return false, "Sitio existente"
 		}
 	}
-	a, b, d, hostHeader := hostParts(hostHeader)
-	k := len(hostHeader)
-	if k > 31 {
+	upperSubdomains, subdomain, domainName, tld := hostParts(hostHeader)
+	if len(tld) > 31 {
 		return false, "TLD incorrecto"
 	}
-	k = len(d)
-	if k > 63 {
+	if len(domainName) > 63 {
 		return false, "Dominio incorrecto"
-	} // Initially unsupported 1 digit domain names: (b != "" && k == 1) ||
-	k = len(b)
-	if k > 63 {
+	} // Initially unsupported 1 digit domain names: (subdomain != "" && len(domainName) == 1) ||
+	if len(subdomain) > 63 {
 		return false, "Longitud excesiva"
 	}
-	k = len(a)
-	if k > 63 {
+	if len(upperSubdomains) > 63 {
 		return false, "Longitud excesiva"
 	}
 	return true, ""
 }
 
 func hostChars(hostHeader string) bool {
-	for k, _ := range hostHeader {
-		if (hostHeader[k] < 97 || hostHeader[k] > 122) && (hostHeader[k] < 45 || hostHeader[k] > 46) && (hostHeader[k] < 48 || hostHeader[k] > 57) && hostHeader[k] != 42 {
+	for index := range hostHeader {
+		if (hostHeader[index] < 97 || hostHeader[index] > 122) && (hostHeader[index] < 45 || hostHeader[index] > 46) && (hostHeader[index] < 48 || hostHeader[index] > 57) && hostHeader[index] != 42 {
 			return false
 		}
 	}
@@ -206,14 +203,17 @@ func hostChars(hostHeader string) bool {
 }
 
 func extChars(extension string) bool {
-	if extension[0] == '.' {
+	if extension != "" && extension[0] == '.' {
 		extension = extension[1:]
+	}
+	if extension == "" { // "." alone isn't an extension
+		return false
 	}
 	if extension[0] == '-' || extension[len(extension)-1] == '.' || extension[len(extension)-1] == '-' || strings.Contains(extension, "..") || strings.Contains(extension, "--") {
 		return false
 	}
-	for k, _ := range extension {
-		if (extension[k] < 97 || extension[k] > 122) && (extension[k] < 45 || extension[k] > 46) && (extension[k] < 48 || extension[k] > 57) && (extension[k] < 65 || extension[k] > 90) {
+	for index := range extension {
+		if (extension[index] < 97 || extension[index] > 122) && (extension[index] < 45 || extension[index] > 46) && (extension[index] < 48 || extension[index] > 57) && (extension[index] < 65 || extension[index] > 90) {
 			return false
 		}
 	}
@@ -221,8 +221,8 @@ func extChars(extension string) bool {
 }
 
 func headerChars(headerName string) bool {
-	for k, _ := range headerName {
-		if (headerName[k] < 97 || headerName[k] > 122) && (headerName[k] < 45 || headerName[k] > 46) && (headerName[k] < 48 || headerName[k] > 57) && (headerName[k] < 65 || headerName[k] > 90) {
+	for index := range headerName {
+		if (headerName[index] < 97 || headerName[index] > 122) && (headerName[index] < 45 || headerName[index] > 46) && (headerName[index] < 48 || headerName[index] > 57) && (headerName[index] < 65 || headerName[index] > 90) {
 			return false
 		}
 	}
@@ -230,24 +230,24 @@ func headerChars(headerName string) bool {
 }
 
 func replaceURIChars(uri string) string {
-	for k, v := range charReplacements {
-		uri = strings.ReplaceAll(uri, v, k)
+	for char, replacement := range charReplacements {
+		uri = strings.ReplaceAll(uri, replacement, char)
 	}
 	return uri
 }
 func changeWildcards(input ...string) string {
-	r := "#"
+	replacement := "#"
 	if len(input) == 2 {
-		r = input[1]
+		replacement = input[1]
 	}
-	return strings.ReplaceAll(input[0], "*", r)
+	return strings.ReplaceAll(input[0], "*", replacement)
 }
 func putWildcards(input ...string) string {
-	r := "#"
+	replacement := "#"
 	if len(input) == 2 {
-		r = input[1]
+		replacement = input[1]
 	}
-	return strings.ReplaceAll(input[0], r, "*")
+	return strings.ReplaceAll(input[0], replacement, "*")
 }
 func detectWildcards(hostInput string, subdomain string) (bool, string, string, string) {
 	if hostInput == "" && subdomain == "" {
@@ -288,12 +288,12 @@ func detectWildcards(hostInput string, subdomain string) (bool, string, string, 
 
 func existWildcards(pattern string, domain string) bool {
 	if domain != "" {
-		if _, c := sitesMap[domain][pattern]; c {
+		if _, exists := sitesMap[domain][pattern]; exists {
 			return true
 		}
 		return false
 	}
-	if _, c := sitesMap[pattern]; c {
+	if _, exists := sitesMap[pattern]; exists {
 		return true
 	}
 	return false
@@ -324,27 +324,27 @@ func changeChars(reverse bool, input string, pairs []string) string {
 }
 
 func putSlash(path string) string {
-	l := len(path)
-	if l > 0 && path[l-1] != '/' {
+	length := len(path)
+	if length > 0 && path[length-1] != '/' {
 		path += "/"
 	}
 	return path
 }
 
 func fileExists(path string) bool {
-	m, i := os.Stat(path)
-	if !os.IsNotExist(i) && !m.IsDir() {
-		return true
+	info, err := os.Stat(path) // #nosec G703 -- helper: callers pass paths under the sites directory or already validated by the panel
+	if err != nil {            // Doesn't exist or the path isn't valid on this system
+		return false
 	}
-	return false
+	return !info.IsDir()
 }
 
 func currentDir() string {
-	d, e := os.Getwd()
-	if e != nil {
+	workingDir, err := os.Getwd()
+	if err != nil {
 		return ""
 	}
-	return putSlash(d)
+	return putSlash(workingDir)
 }
 
 func reqMsg(responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request, statusCode int) {
@@ -384,43 +384,197 @@ func dir(path string) string {
 }
 
 func siteExists(domain string, subdomain string) bool {
-	var i bool
-	if _, i = sitesMap[domain]; !i {
+	var exists bool
+	if _, exists = sitesMap[domain]; !exists {
 		return false
 	}
-	if _, i = sitesMap[domain][subdomain]; !i {
+	if _, exists = sitesMap[domain][subdomain]; !exists {
 		return false
 	}
 	return true
 }
 
-func deleteCertificate(siteKey string) {
-	var hasSSL bool
-	if _, hasSSL = siteSSLConfig[siteKey]["S"]; !hasSSL {
-		return
+// The certificate of each site with HTTPS on, and the names those certificates cover. Handshakes choose the
+// certificate by SNI (DP11): a name no certificate covers, or no SNI (access by IP), is rejected, so there is
+// no default certificate and tlsConfig.Certificates stays empty.
+var (
+	siteCertificates   = make(map[string]*tls.Certificate)         // By site key; guarded by globalMutex
+	certificatesByName atomic.Pointer[map[string]*tls.Certificate] // By covered name ("*.example.com" for wildcards); read without locks
+	httpsListening     bool                                        // httpsAddr (:443) is open; guarded by globalMutex
+)
+
+func init() {
+	tlsConfig.GetCertificate = certificateForHello
+}
+
+func certificateForHello(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	if cert := certificateFor(hello.ServerName); cert != nil {
+		return cert, nil
 	}
-	certCount := len(tlsConfig.Certificates)
-	if certCount > 1 {
-		targetIdx := siteSSLConfig[siteKey]["S"].(int)
-		if certCount != targetIdx {
-			for currentSiteKey, _ := range siteSSLConfig {
-				if siteSSLConfig[currentSiteKey]["S"] == certCount { // Assign the map key and value to deletion to the last one that will be removed instead
-					tlsConfig.Certificates[targetIdx-1] = tlsConfig.Certificates[certCount-1]
-					tlsConfig.NameToCertificate[currentSiteKey] = &tlsConfig.Certificates[targetIdx-1]
-					siteSSLConfig[currentSiteKey]["S"] = targetIdx
-					break
-				}
+	return nil, errors.New("sin certificado para \"" + hello.ServerName + "\"")
+}
+
+// certificateFor returns the certificate that covers a host name, exactly or with a wildcard, or nil.
+func certificateFor(name string) *tls.Certificate {
+	name = strings.ToLower(strings.TrimSuffix(name, "."))
+	byName := certificatesByName.Load()
+	if name == "" || byName == nil {
+		return nil
+	}
+	if cert := (*byName)[name]; cert != nil {
+		return cert
+	}
+	if _, parent, found := strings.Cut(name, "."); found {
+		return (*byName)["*."+parent]
+	}
+	return nil
+}
+
+// setSiteCertificate loads (or, with nil, removes) the certificate of a site and publishes the names covered.
+// Removing one doesn't affect the others. Callers hold the global lock.
+func setSiteCertificate(siteKey string, cert *tls.Certificate) {
+	if cert == nil {
+		delete(siteCertificates, siteKey)
+	} else {
+		siteCertificates[siteKey] = cert
+	}
+	siteKeys := make([]string, 0, len(siteCertificates))
+	for key := range siteCertificates {
+		siteKeys = append(siteKeys, key)
+	}
+	sort.Strings(siteKeys) // A name covered twice always gets the same certificate
+	byName := make(map[string]*tls.Certificate)
+	for _, key := range siteKeys {
+		for _, name := range certificateNames(siteCertificates[key]) {
+			if _, taken := byName[name]; !taken {
+				byName[name] = siteCertificates[key]
 			}
 		}
-		tlsConfig.Certificates = tlsConfig.Certificates[:certCount-1]
-		delete(tlsConfig.NameToCertificate, siteKey)
-	} else {
-		tlsConfig.Certificates = []tls.Certificate{}
-		tlsConfig.NameToCertificate = nil
-		// Don't close servers[0] because need to restart createSafeServer(tlsConfig)
+	}
+	certificatesByName.Store(&byName)
+}
+
+// certificateNames returns the host names a certificate covers: its DNS names, or its common name without them.
+func certificateNames(cert *tls.Certificate) []string {
+	leaf := cert.Leaf
+	if leaf == nil && len(cert.Certificate) > 0 {
+		leaf, _ = x509.ParseCertificate(cert.Certificate[0])
+	}
+	if leaf == nil {
+		return nil
+	}
+	names := leaf.DNSNames
+	if len(names) == 0 && leaf.Subject.CommonName != "" {
+		names = []string{leaf.Subject.CommonName}
+	}
+	lowerNames := make([]string, len(names))
+	for i, name := range names {
+		lowerNames[i] = strings.ToLower(name)
+	}
+	return lowerNames
+}
+
+// loadSiteCertificate loads the certificate files of a site folder and puts them in use for the site.
+// Callers hold the global lock.
+func loadSiteCertificate(siteKey string, siteDir string) error {
+	cert, err := tls.LoadX509KeyPair(siteDir+certFileName, siteDir+keyFileName)
+	if err != nil {
+		return err
+	}
+	setSiteCertificate(siteKey, &cert)
+	return nil
+}
+
+const certificateRenewBefore = 30 * 24 * time.Hour
+
+// renewCertificates asks Certbot, one site at a time, to renew the certificates issued by Turbo (the site has
+// an e-mail and a folder in turbo.certificates) that expire in less than 30 days (DP5). It runs daily.
+func renewCertificates() {
+	type renewal struct{ siteKey, certDir, siteDir string }
+	var due []renewal
+	globalMutex.RLock()
+	certificatesDir := sitesDir.Get() + putSlash(certificatesDirName)
+	for domain := range sitesMap {
+		for subdomain := range sitesMap[domain] {
+			siteKey, siteDir := domain, sitesDir.Get()+changeWildcards(domain)+"/"
+			if subdomain != "" {
+				siteKey = subdomain + "." + domain
+				siteDir += changeWildcards(subdomain) + "/"
+			}
+			certDir := certificatesDir + changeWildcards(siteKey) // As in the "C" validator
+			if email, _ := siteSSLConfig[siteKey]["E"].(string); email == "" {
+				continue
+			}
+			// Issued by Turbo: its own folder, or (subdomains issued before each site had one) its lineage in the
+			// folder of the domain.
+			if !dirExists(certDir) && (subdomain == "" || !dirExists(certificatesDir+changeWildcards(domain)+"/archive/"+siteKey)) {
+				continue
+			}
+			if expiry, err := certificateExpiry(siteDir + certFileName); err == nil && time.Until(expiry) < certificateRenewBefore {
+				due = append(due, renewal{siteKey, certDir, siteDir})
+			}
+		}
+	}
+	globalMutex.RUnlock()
+	for _, site := range due {
+		slog.Info("Renovando el certificado", "sitio", site.siteKey)
+		withGlobalLock(func() { obtainCertificate(site.siteKey, site.certDir, site.siteDir) })
 	}
 }
 
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+// certificateExpiry returns when the first certificate of a PEM file expires.
+func certificateExpiry(path string) (time.Time, error) {
+	data, err := os.ReadFile(path) // #nosec G304 -- certificate file of a site, path under the sites directory chosen by the administrator (TURBO_DIR or M)
+	if err != nil {
+		return time.Time{}, err
+	}
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return time.Time{}, errors.New("sin certificado PEM")
+	}
+	leaf, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return leaf.NotAfter, nil
+}
+
+// requestHostname returns the host of a request without its port.
+func requestHostname(request *customNetHttp.Request) string {
+	if hostname, _, err := net.SplitHostPort(request.Host); err == nil {
+		return hostname
+	}
+	return request.Host
+}
+
+// httpsRedirect sends an HTTP request to HTTPS, on the host it asked for, when the site has HTTPS on and a
+// certificate covers that host. An alias without a certificate keeps being served by HTTP under its own name.
+// Callers hold the global read lock.
+func httpsRedirect(siteKey string, responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request) bool {
+	hostname := requestHostname(request)
+	if !httpsEnabled(siteKey) || certificateFor(hostname) == nil {
+		return false
+	}
+	customNetHttp.Redirect(responseWriter, request, "https://"+hostname+request.RequestURI, 301)
+	return true
+}
+
+// setCertificateStatus records the result of a certificate attempt, if the site still exists.
+func setCertificateStatus(domain string, status interface{}) {
+	withGlobalLock(func() {
+		if _, siteExists := siteSSLConfig[domain]; siteExists {
+			siteSSLConfig[domain]["C"] = status
+		}
+	})
+}
+
+// obtainCertificate starts a Certbot attempt for domain. Callers hold the global lock; the goroutine and the
+// retries take it themselves.
 func obtainCertificate(domain string, certDir string, siteDir string) {
 	if currentCertDomain == "" {
 		currentCertDomain = domain
@@ -431,26 +585,38 @@ func obtainCertificate(domain string, certDir string, siteDir string) {
 
 			//j := exec.CommandContext(x, "C://timeWaitExample.exe") // Windows tests
 
-			if _, b := siteSSLConfig[domain]; !b { // If site is deleted
-				currentCertDomain = ""
-				fmt.Println("Certificate intent truncated from deleted site \"" + domain + "\"")
+			var siteFound bool
+			var adapter, email, contentDirName string
+			withGlobalLock(func() {
+				if _, siteFound = siteSSLConfig[domain]; !siteFound { // If site is deleted
+					currentCertDomain = ""
+					return
+				}
+				adapter, _ = siteSSLConfig[domain]["A"].(string)
+				email, _ = siteSSLConfig[domain]["E"].(string)
+				contentDirName = publicDirName
+			})
+			if !siteFound {
+				slog.Warn("Emisión de certificado interrumpida: el sitio se ha borrado", "sitio", domain)
 				return
+			}
+			finishAttempt := func(status interface{}) {
+				withGlobalLock(func() { currentCertDomain = "" })
+				setCertificateStatus(domain, status)
 			}
 
 			cmd := exec.CommandContext(timeoutCtx, "certbot", "--version")
 			_, execErr := cmd.CombinedOutput()
 
 			if execErr != nil {
-				currentCertDomain = ""
-				siteSSLConfig[domain]["C"] = "Certbot no está instalado"
+				finishAttempt("Certbot no está instalado")
 				return
 			}
 
 			_, execErr = os.ReadDir(certDir)
 			if execErr == nil {
 				if os.RemoveAll(certDir) != nil {
-					currentCertDomain = ""
-					siteSSLConfig[domain]["C"] = "Error al vaciar directorio de certificado anterior"
+					finishAttempt("Error al vaciar directorio de certificado anterior")
 					return
 				}
 			}
@@ -469,40 +635,44 @@ func obtainCertificate(domain string, certDir string, siteDir string) {
 			//"--force-renewal", "--break-my-certs", // Both needed for --test-cert
 			"--config-dir", certDir)*/
 
-			if siteSSLConfig[domain]["A"] != "" {
-				cmd = exec.CommandContext(timeoutCtx, // For incompatibility with wildcards or --dns-route53
+			if adapter != "" {
+				cmd = exec.CommandContext(timeoutCtx, // #nosec G204 -- fixed program; domain checked by hostOk, email by the E validator and the adapter by validCertbotAdapter. For incompatibility with wildcards or --dns-route53
 					"certbot",
 					"certonly",
 					"-d", domain,
-					"--"+siteSSLConfig[domain]["A"].(string),
+					"--"+adapter,
 					"-n", // Not interactive
 					"--agree-tos",
-					"-m", siteSSLConfig[domain]["E"].(string), // Email for expiring notifications
+					"-m", email, // Email for expiring notifications
 					// "--test-cert",
 					"--no-eff-email", // --eff-email
 					// "--force-renewal", "--break-my-certs", // Both needed for --test-cert
-					"--config-dir", certDir)
+					"--config-dir", certDir,
+					"--work-dir", certDir+"/work",
+					"--logs-dir", certDir+"/logs")
 			} else {
-				cmd = exec.CommandContext(timeoutCtx, // For incompatibility with wildcards or --dns-route53
+				cmd = exec.CommandContext(timeoutCtx, // #nosec G204 -- fixed program; domain checked by hostOk, email by the E validator and the adapter by validCertbotAdapter. For incompatibility with wildcards or --dns-route53
 					"certbot",
 					"certonly",
 					"-d", domain,
 					"--webroot",
-					"--webroot-path", siteDir+stringStore["F"],
+					"--webroot-path", siteDir+contentDirName,
 					"-n", // Not interactive
 					"--agree-tos",
-					"-m", siteSSLConfig[domain]["E"].(string), // Email for expiring notifications
+					"-m", email, // Email for expiring notifications
 					// "--test-cert",
 					"--no-eff-email", // --eff-email
 					// "--force-renewal", "--break-my-certs", // Both needed for --test-cert
-					"--config-dir", certDir)
+					"--config-dir", certDir,
+					"--work-dir", certDir+"/work",
+					"--logs-dir", certDir+"/logs")
 			}
 
 			cmdOutput, execErr := cmd.CombinedOutput()
-			currentCertDomain = ""
+			withGlobalLock(func() { currentCertDomain = "" })
 
 			if execErr != nil {
-				siteSSLConfig[domain]["C"] = string(cmdOutput)
+				setCertificateStatus(domain, string(cmdOutput))
 				return
 			}
 
@@ -510,31 +680,31 @@ func obtainCertificate(domain string, certDir string, siteDir string) {
 
 			archiveEntries, execErr := os.ReadDir(certDir)
 			if execErr != nil {
-				siteSSLConfig[domain]["C"] = "Directorio de certificado ilegible al obtenerlo"
+				setCertificateStatus(domain, "Directorio de certificado ilegible al obtenerlo")
 				return
 			}
 
 			var fullchainPath string
 			var privkeyPath string
 			nowUnix := time.Now().Unix()
-			for _, f := range archiveEntries {
-				n := certDir + f.Name() + "/"
-				certSubEntries, execErr := os.ReadDir(n)
+			for _, archiveEntry := range archiveEntries {
+				entryDir := certDir + archiveEntry.Name() + "/"
+				certSubEntries, execErr := os.ReadDir(entryDir)
 				if execErr != nil {
 					continue
 				}
-				for _, f = range certSubEntries {
-					m := f.Name()
-					fileInfo, execErr := os.Stat(n + m)
+				for _, archiveEntry = range certSubEntries {
+					fileName := archiveEntry.Name()
+					fileInfo, execErr := os.Stat(entryDir + fileName)
 					if execErr != nil {
 						continue
 					}
-					if len(m) > 10 && nowUnix-fileInfo.ModTime().Unix() < 216000 {
-						switch m[:4] {
+					if len(fileName) > 10 && nowUnix-fileInfo.ModTime().Unix() < 216000 {
+						switch fileName[:4] {
 						case "full":
-							fullchainPath = n + m
+							fullchainPath = entryDir + fileName
 						case "priv":
-							privkeyPath = n + m
+							privkeyPath = entryDir + fileName
 						}
 					}
 				}
@@ -542,25 +712,31 @@ func obtainCertificate(domain string, certDir string, siteDir string) {
 			}
 
 			if fullchainPath == "" || privkeyPath == "" {
-				siteSSLConfig[domain]["C"] = "Archivos de certificado inexistentes al obtenerlo"
+				setCertificateStatus(domain, "Archivos de certificado inexistentes al obtenerlo")
 				return
 			}
 
-			renameErr := os.Rename(fullchainPath, siteDir+stringStore["C"])
+			renameErr := os.Rename(fullchainPath, siteDir+certFileName)
 			if renameErr != nil {
-				siteSSLConfig[domain]["C"] = "'Fullchain' inmovible al obtenerlo"
+				setCertificateStatus(domain, "'Fullchain' inmovible al obtenerlo")
 				return
 			}
 
-			renameErr = os.Rename(privkeyPath, siteDir+stringStore["K"])
+			renameErr = os.Rename(privkeyPath, siteDir+keyFileName)
 			if renameErr != nil {
-				siteSSLConfig[domain]["C"] = "'Privkey' inmovible al obtenerlo"
+				setCertificateStatus(domain, "'Privkey' inmovible al obtenerlo")
 				return
 			}
 
-			siteSSLConfig[domain]["C"] = true
-			fmt.Println("SSL cert: " + domain)
-			currentCertDomain = ""
+			setCertificateStatus(domain, true)
+			withGlobalLock(func() { // A renewed certificate replaces the one in use, without restarting
+				if httpsEnabled(domain) {
+					if err := loadSiteCertificate(domain, siteDir); err != nil {
+						slog.Error("No se puede cargar el certificado", "sitio", domain, "error", err)
+					}
+				}
+			})
+			slog.Info("Certificado emitido", "sitio", domain)
 		}()
 		return
 	}
@@ -569,6 +745,8 @@ func obtainCertificate(domain string, certDir string, siteDir string) {
 		return
 	} // To prevent new certificate attempts from the same site
 
-	certRetryDelayMs += 100
-	time.AfterFunc(certRetryDelayMs*time.Millisecond, func() { obtainCertificate(domain, certDir, siteDir) })
+	certRetryDelay += 100 * time.Millisecond
+	time.AfterFunc(certRetryDelay, func() {
+		withGlobalLock(func() { obtainCertificate(domain, certDir, siteDir) })
+	})
 }

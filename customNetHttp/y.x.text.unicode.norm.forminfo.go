@@ -1,3 +1,5 @@
+// Origen: go1.26.10, src/vendor/golang.org/x/text/unicode/norm/forminfo.go. Regenerado con customNetHttp/regenerar; parches en customNetHttp/PATCHES.md.
+
 // Copyright 2011 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
@@ -6,7 +8,7 @@ package customNetHttp
 
 import "encoding/binary"
 
-// This file contains NormalizeForm-specific logic and wrappers for data in tables.go.
+// This file contains Form-specific logic and wrappers for data in tables.go.
 
 // Rune info is stored in a separate trie per composing form. A composing form
 // and its corresponding decomposing form share the same trie.  Each trie maps
@@ -37,7 +39,7 @@ const (
 )
 
 // Properties provides access to normalization properties of a rune.
-type Properties struct {
+type norm_Properties struct {
 	pos   uint8  // start position in reorderBuffer; used in composition.go
 	size  uint8  // length of UTF-8 encoding of this rune
 	ccc   uint8  // leading canonical combining class (ccc if not decomposition)
@@ -48,11 +50,11 @@ type Properties struct {
 }
 
 // functions dispatchable per form
-type lookupFunc func(b input, i int) Properties
+type lookupFunc func(b input, i int) norm_Properties
 
-// formInfo holds NormalizeForm-specific functions and tables.
+// formInfo holds Form-specific functions and tables.
 type formInfo struct {
-	form                     NormalizeForm
+	form                     norm_Form
 	composing, compatibility bool // form type
 	info                     lookupFunc
 	nextMain                 iterFunc
@@ -92,7 +94,7 @@ var formTable = []*formInfo{{
 
 // BoundaryBefore returns true if this rune starts a new segment and
 // cannot combine with any rune on the left.
-func (p Properties) BoundaryBefore() bool {
+func (p norm_Properties) BoundaryBefore() bool {
 	if p.ccc == 0 && !p.combinesBackward() {
 		return true
 	}
@@ -104,7 +106,7 @@ func (p Properties) BoundaryBefore() bool {
 
 // BoundaryAfter returns true if runes cannot combine with or otherwise
 // interact with this or previous runes.
-func (p Properties) BoundaryAfter() bool {
+func (p norm_Properties) BoundaryAfter() bool {
 	// TODO: loosen these conditions.
 	return p.isInert()
 }
@@ -120,32 +122,32 @@ func (p Properties) BoundaryAfter() bool {
 // influenced by normalization.
 type qcInfo uint8
 
-func (p Properties) isYesC() bool { return p.flags&0x10 == 0 }
-func (p Properties) isYesD() bool { return p.flags&0x4 == 0 }
+func (p norm_Properties) isYesC() bool { return p.flags&0x10 == 0 }
+func (p norm_Properties) isYesD() bool { return p.flags&0x4 == 0 }
 
-func (p Properties) combinesForward() bool  { return p.flags&0x20 != 0 }
-func (p Properties) combinesBackward() bool { return p.flags&0x8 != 0 } // == isMaybe
-func (p Properties) hasDecomposition() bool { return p.flags&0x4 != 0 } // == isNoD
+func (p norm_Properties) combinesForward() bool  { return p.flags&0x20 != 0 }
+func (p norm_Properties) combinesBackward() bool { return p.flags&0x8 != 0 } // == isMaybe
+func (p norm_Properties) hasDecomposition() bool { return p.flags&0x4 != 0 } // == isNoD
 
-func (p Properties) isInert() bool {
+func (p norm_Properties) isInert() bool {
 	return p.flags&qcInfoMask == 0 && p.ccc == 0
 }
 
-func (p Properties) multiSegment() bool {
+func (p norm_Properties) multiSegment() bool {
 	return p.index >= firstMulti && p.index < endMulti
 }
 
-func (p Properties) nLeadingNonStarters() uint8 {
+func (p norm_Properties) nLeadingNonStarters() uint8 {
 	return p.nLead
 }
 
-func (p Properties) nTrailingNonStarters() uint8 {
+func (p norm_Properties) nTrailingNonStarters() uint8 {
 	return uint8(p.flags & 0x03)
 }
 
 // Decomposition returns the decomposition for the underlying rune
 // or nil if there is none.
-func (p Properties) Decomposition() []byte {
+func (p norm_Properties) Decomposition() []byte {
 	// TODO: create the decomposition for Hangul?
 	if p.index == 0 {
 		return nil
@@ -157,12 +159,12 @@ func (p Properties) Decomposition() []byte {
 }
 
 // Size returns the length of UTF-8 encoding of the rune.
-func (p Properties) Size() int {
+func (p norm_Properties) Size() int {
 	return int(p.size)
 }
 
 // CCC returns the canonical combining class of the underlying rune.
-func (p Properties) CCC() uint8 {
+func (p norm_Properties) CCC() uint8 {
 	if p.index >= firstCCCZeroExcept {
 		return 0
 	}
@@ -171,13 +173,13 @@ func (p Properties) CCC() uint8 {
 
 // LeadCCC returns the CCC of the first rune in the decomposition.
 // If there is no decomposition, LeadCCC equals CCC.
-func (p Properties) LeadCCC() uint8 {
+func (p norm_Properties) LeadCCC() uint8 {
 	return ccc[p.ccc]
 }
 
 // TrailCCC returns the CCC of the last rune in the decomposition.
 // If there is no decomposition, TrailCCC equals CCC.
-func (p Properties) TrailCCC() uint8 {
+func (p norm_Properties) TrailCCC() uint8 {
 	return ccc[p.tccc]
 }
 
@@ -211,18 +213,18 @@ func combine(a, b rune) rune {
 	return recompMap[key]
 }
 
-func lookupInfoNFC(b input, i int) Properties {
+func lookupInfoNFC(b input, i int) norm_Properties {
 	v, sz := b.charinfoNFC(i)
 	return compInfo(v, sz)
 }
 
-func lookupInfoNFKC(b input, i int) Properties {
+func lookupInfoNFKC(b input, i int) norm_Properties {
 	v, sz := b.charinfoNFKC(i)
 	return compInfo(v, sz)
 }
 
 // Properties returns properties for the first rune in s.
-func (f NormalizeForm) Properties(s []byte) Properties {
+func (f norm_Form) Properties(s []byte) norm_Properties {
 	if f == NFC || f == NFD {
 		return compInfo(nfcData.lookup(s))
 	}
@@ -230,7 +232,7 @@ func (f NormalizeForm) Properties(s []byte) Properties {
 }
 
 // PropertiesString returns properties for the first rune in s.
-func (f NormalizeForm) PropertiesString(s string) Properties {
+func (f norm_Form) PropertiesString(s string) norm_Properties {
 	if f == NFC || f == NFD {
 		return compInfo(nfcData.lookupString(s))
 	}
@@ -240,11 +242,11 @@ func (f NormalizeForm) PropertiesString(s string) Properties {
 // compInfo converts the information contained in v and sz
 // to a Properties.  See the comment at the top of the file
 // for more information on the format.
-func compInfo(v uint16, sz int) Properties {
+func compInfo(v uint16, sz int) norm_Properties {
 	if v == 0 {
-		return Properties{size: uint8(sz)}
+		return norm_Properties{size: uint8(sz)}
 	} else if v >= 0x8000 {
-		p := Properties{
+		p := norm_Properties{
 			size:  uint8(sz),
 			ccc:   uint8(v),
 			tccc:  uint8(v),
@@ -258,7 +260,7 @@ func compInfo(v uint16, sz int) Properties {
 	// has decomposition
 	h := decomps[v]
 	f := (qcInfo(h&headerFlagsMask) >> 2) | 0x4
-	p := Properties{size: uint8(sz), flags: f, index: v}
+	p := norm_Properties{size: uint8(sz), flags: f, index: v}
 	if v >= firstCCC {
 		v += uint16(h&headerLenMask) + 1
 		c := decomps[v]

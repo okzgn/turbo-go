@@ -1,3 +1,5 @@
+// Origen: go1.26.10, src/vendor/golang.org/x/net/http2/hpack/hpack.go. Regenerado con customNetHttp/regenerar; parches en customNetHttp/PATCHES.md.
+
 // Copyright 2014 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
@@ -81,7 +83,7 @@ type Decoder struct {
 	emit   func(f HeaderField)
 
 	emitEnabled bool // whether calls to emit are enabled
-	//maxStrLen   int  // 0 means unlimited
+	maxStrLen   int  // 0 means unlimited
 
 	// buf is the unparsed buffer. It's only written to
 	// saveBuf if it was truncated in the middle of a header
@@ -119,9 +121,9 @@ var ErrStringLength = errors.New("hpack: string too long")
 // value string. If a string exceeds this length (even after any
 // decompression), Write will return ErrStringLength.
 // A value of 0 means unlimited and is the default from NewDecoder.
-/*func (d *Decoder) SetMaxStringLength(n int) {
+func (d *Decoder) SetMaxStringLength(n int) {
 	d.maxStrLen = n
-}*/
+}
 
 // SetEmitFunc changes the callback used when new header fields
 // are decoded.
@@ -267,7 +269,7 @@ func (d *Decoder) Write(p []byte) (n int, err error) {
 			// overlong things and return ErrStringLength,
 			// but keep this as a last resort.
 			const varIntOverhead = 8 // conservative
-			if YH != 0 && int64(len(d.buf)) > 2*(int64(YH)+varIntOverhead) {
+			if d.maxStrLen != 0 && int64(len(d.buf)) > 2*(int64(d.maxStrLen)+varIntOverhead) {
 				return 0, ErrStringLength
 			}
 			d.saveBuf.Write(d.buf)
@@ -356,6 +358,7 @@ func (d *Decoder) parseFieldLiteral(n uint8, it indexType) error {
 	if err != nil {
 		return err
 	}
+
 	var hf HeaderField
 	wantStr := d.emitEnabled || it.indexed()
 	var undecodedName undecodedString
@@ -396,8 +399,8 @@ func (d *Decoder) parseFieldLiteral(n uint8, it indexType) error {
 }
 
 func (d *Decoder) callEmit(hf HeaderField) error {
-	if YH != 0 {
-		if len(hf.Name) > YH || len(hf.Value) > YH {
+	if d.maxStrLen != 0 {
+		if len(hf.Name) > d.maxStrLen || len(hf.Value) > d.maxStrLen {
 			return ErrStringLength
 		}
 	}
@@ -484,7 +487,7 @@ func (d *Decoder) readString(p []byte) (u undecodedString, remain []byte, err er
 	if err != nil {
 		return u, p, err
 	}
-	if YH != 0 && strLen > uint64(YH) {
+	if d.maxStrLen != 0 && strLen > uint64(d.maxStrLen) {
 		// Returning an error here means Huffman decoding errors
 		// for non-indexed strings past the maximum string length
 		// are ignored, but the server is returning an error anyway
@@ -512,7 +515,7 @@ func (d *Decoder) decodeString(u undecodedString) (string, error) {
 	buf := bufPool.Get().(*bytes.Buffer)
 	buf.Reset() // don't trust others
 	var s string
-	err := huffmanDecode(buf, YH, u.b)
+	err := huffmanDecode(buf, d.maxStrLen, u.b)
 	if err == nil {
 		s = buf.String()
 	}

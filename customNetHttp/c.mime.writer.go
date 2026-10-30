@@ -1,3 +1,5 @@
+// Origen: go1.26.10, src/mime/multipart/writer.go. Regenerado con customNetHttp/regenerar; parches en customNetHttp/PATCHES.md.
+
 // Copyright 2011 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
@@ -10,39 +12,40 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/textproto"
-	"sort"
+	"slices"
 	"strings"
 )
 
 // A Writer generates multipart messages.
-type Writer struct {
+type multipart_Writer struct {
 	w        io.Writer
 	boundary string
 	lastpart *part
 }
 
-// NewWriter returns a new multipart Writer with a random boundary,
+// NewWriter returns a new multipart [Writer] with a random boundary,
 // writing to w.
-func NewWriter(w io.Writer) *Writer {
-	return &Writer{
+func multipart_NewWriter(w io.Writer) *multipart_Writer {
+	return &multipart_Writer{
 		w:        w,
 		boundary: randomBoundary(),
 	}
 }
 
-// Boundary returns the Writer's boundary.
-func (w *Writer) Boundary() string {
+// Boundary returns the [Writer]'s boundary.
+func (w *multipart_Writer) Boundary() string {
 	return w.boundary
 }
 
-// SetBoundary overrides the Writer's default randomly-generated
+// SetBoundary overrides the [Writer]'s default randomly-generated
 // boundary separator with an explicit value.
 //
 // SetBoundary must be called before any parts are created, may only
 // contain certain ASCII characters, and must be non-empty and
 // at most 70 bytes long.
-func (w *Writer) SetBoundary(boundary string) error {
+func (w *multipart_Writer) SetBoundary(boundary string) error {
 	if w.lastpart != nil {
 		return errors.New("mime: SetBoundary called after write")
 	}
@@ -70,8 +73,8 @@ func (w *Writer) SetBoundary(boundary string) error {
 }
 
 // FormDataContentType returns the Content-Type for an HTTP
-// multipart/form-data with this Writer's Boundary.
-func (w *Writer) FormDataContentType() string {
+// multipart/form-data with this [Writer]'s Boundary.
+func (w *multipart_Writer) FormDataContentType() string {
 	b := w.boundary
 	// We must quote the boundary if it contains any of the
 	// tspecials characters defined by RFC 2045, or space.
@@ -92,9 +95,9 @@ func randomBoundary() string {
 
 // CreatePart creates a new multipart section with the provided
 // header. The body of the part should be written to the returned
-// Writer. After calling CreatePart, any previous part may no longer
+// [Writer]. After calling CreatePart, any previous part may no longer
 // be written to.
-func (w *Writer) CreatePart(header textproto.MIMEHeader) (io.Writer, error) {
+func (w *multipart_Writer) CreatePart(header textproto.MIMEHeader) (io.Writer, error) {
 	if w.lastpart != nil {
 		if err := w.lastpart.close(); err != nil {
 			return nil, err
@@ -107,12 +110,7 @@ func (w *Writer) CreatePart(header textproto.MIMEHeader) (io.Writer, error) {
 		fmt.Fprintf(&b, "--%s\r\n", w.boundary)
 	}
 
-	keys := make([]string, 0, len(header))
-	for k := range header {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
+	for _, k := range slices.Sorted(maps.Keys(header)) {
 		for _, v := range header[k] {
 			fmt.Fprintf(&b, "%s: %s\r\n", k, v)
 		}
@@ -129,34 +127,51 @@ func (w *Writer) CreatePart(header textproto.MIMEHeader) (io.Writer, error) {
 	return p, nil
 }
 
-var quoteEscaper = strings.NewReplacer("\\", "\\\\", `"`, "\\\"")
+var quoteEscaper = strings.NewReplacer("\\", "\\\\", `"`, "\\\"", "\r", "%0D", "\n", "%0A")
 
+// escapeQuotes escapes special characters in field parameter values.
+//
+// For historical reasons, this uses \ escaping for " and \ characters,
+// and percent encoding for CR and LF.
+//
+// The WhatWG specification for form data encoding suggests that we should
+// use percent encoding for " (%22), and should not escape \.
+// https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#multipart/form-data-encoding-algorithm
+//
+// Empirically, as of the time this comment was written, it is necessary
+// to escape \ characters or else Chrome (and possibly other browsers) will
+// interpet the unescaped \ as an escape.
 func escapeQuotes(s string) string {
 	return quoteEscaper.Replace(s)
 }
 
-// CreateFormFile is a convenience wrapper around CreatePart. It creates
+// CreateFormFile is a convenience wrapper around [Writer.CreatePart]. It creates
 // a new form-data header with the provided field name and file name.
-func (w *Writer) CreateFormFile(fieldname, filename string) (io.Writer, error) {
+func (w *multipart_Writer) CreateFormFile(fieldname, filename string) (io.Writer, error) {
 	h := make(textproto.MIMEHeader)
-	h.Set("Content-Disposition",
-		fmt.Sprintf(`form-data; name="%s"; filename="%s"`,
-			escapeQuotes(fieldname), escapeQuotes(filename)))
+	h.Set("Content-Disposition", FileContentDisposition(fieldname, filename))
 	h.Set("Content-Type", "application/octet-stream")
 	return w.CreatePart(h)
 }
 
-// CreateFormField calls CreatePart with a header using the
+// CreateFormField calls [Writer.CreatePart] with a header using the
 // given field name.
-func (w *Writer) CreateFormField(fieldname string) (io.Writer, error) {
+func (w *multipart_Writer) CreateFormField(fieldname string) (io.Writer, error) {
 	h := make(textproto.MIMEHeader)
 	h.Set("Content-Disposition",
 		fmt.Sprintf(`form-data; name="%s"`, escapeQuotes(fieldname)))
 	return w.CreatePart(h)
 }
 
-// WriteField calls CreateFormField and then writes the given value.
-func (w *Writer) WriteField(fieldname, value string) error {
+// FileContentDisposition returns the value of a Content-Disposition header
+// with the provided field name and file name.
+func FileContentDisposition(fieldname, filename string) string {
+	return fmt.Sprintf(`form-data; name="%s"; filename="%s"`,
+		escapeQuotes(fieldname), escapeQuotes(filename))
+}
+
+// WriteField calls [Writer.CreateFormField] and then writes the given value.
+func (w *multipart_Writer) WriteField(fieldname, value string) error {
 	p, err := w.CreateFormField(fieldname)
 	if err != nil {
 		return err
@@ -167,7 +182,7 @@ func (w *Writer) WriteField(fieldname, value string) error {
 
 // Close finishes the multipart message and writes the trailing
 // boundary end line to the output.
-func (w *Writer) Close() error {
+func (w *multipart_Writer) Close() error {
 	if w.lastpart != nil {
 		if err := w.lastpart.close(); err != nil {
 			return err
@@ -179,7 +194,7 @@ func (w *Writer) Close() error {
 }
 
 type part struct {
-	mw     *Writer
+	mw     *multipart_Writer
 	closed bool
 	we     error // last error that occurred writing
 }

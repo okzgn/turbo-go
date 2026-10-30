@@ -1,3 +1,5 @@
+// Origen: go1.26.10, src/net/http/internal/ascii/print.go. Regenerado con customNetHttp/regenerar; parches en customNetHttp/PATCHES.md.
+
 // Copyright 2021 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
@@ -9,14 +11,14 @@ import (
 	"unicode"
 )
 
-// EqualFold is strings.EqualFold, ASCII only. It reports whether s and t
+// EqualFold is [strings.EqualFold], ASCII only. It reports whether s and t
 // are equal, ASCII-case-insensitively.
 func EqualFold(s, t string) bool {
 	if len(s) != len(t) {
 		return false
 	}
 	for i := 0; i < len(s); i++ {
-		if lower(s[i]) != lower(t[i]) {
+		if ascii_lower(s[i]) != ascii_lower(t[i]) {
 			return false
 		}
 	}
@@ -24,7 +26,7 @@ func EqualFold(s, t string) bool {
 }
 
 // lower returns the ASCII lowercase version of b.
-func lower(b byte) byte {
+func ascii_lower(b byte) byte {
 	if 'A' <= b && b <= 'Z' {
 		return b + ('a' - 'A')
 	}

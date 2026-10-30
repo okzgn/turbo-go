@@ -1,3 +1,5 @@
+// Origen: go1.26.10, src/vendor/golang.org/x/text/unicode/bidi/bidi.go. Regenerado con customNetHttp/regenerar; parches en customNetHttp/PATCHES.md.
+
 // Copyright 2015 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
@@ -26,13 +28,13 @@ import (
 // embedding hierarchy, though.
 
 // A Direction indicates the overall flow of text.
-type Direction int
+type bidi_Direction int
 
 const (
 	// LeftToRight indicates the text contains no right-to-left characters and
 	// that either there are some left-to-right characters or the option
 	// DefaultDirection(LeftToRight) was passed.
-	LeftToRight Direction = iota
+	LeftToRight bidi_Direction = iota
 
 	// RightToLeft indicates the text contains no left-to-right characters and
 	// that either there are some right-to-left characters or the option
@@ -48,12 +50,12 @@ const (
 	Neutral
 )
 
-type bidiPropOptions struct {
-	defaultDirection Direction
+type bidi_options struct {
+	defaultDirection bidi_Direction
 }
 
 // An Option is an option for Bidi processing.
-type BidiPropOption func(*bidiPropOptions)
+type bidi_Option func(*bidi_options)
 
 // ICU allows the user to define embedding levels. This may be used, for example,
 // to use hierarchical structure of markup languages to define embeddings.
@@ -66,8 +68,8 @@ type BidiPropOption func(*bidiPropOptions)
 
 // DefaultDirection sets the default direction for a Paragraph. The direction is
 // overridden if the text contains directional characters.
-func DefaultDirection(d Direction) BidiPropOption {
-	return func(opts *bidiPropOptions) {
+func DefaultDirection(d bidi_Direction) bidi_Option {
+	return func(opts *bidi_options) {
 		opts.defaultDirection = d
 	}
 }
@@ -76,12 +78,12 @@ func DefaultDirection(d Direction) BidiPropOption {
 type Paragraph struct {
 	p          []byte
 	o          Ordering
-	opts       []BidiPropOption
+	opts       []bidi_Option
 	types      []Class
 	pairTypes  []bracketType
 	pairValues []rune
 	runes      []rune
-	options    bidiPropOptions
+	options    bidi_options
 }
 
 // Initialize the p.pairTypes, p.pairValues and p.types from the input previously
@@ -128,9 +130,9 @@ func (p *Paragraph) prepareInput() (n int, err error) {
 // SetBytes configures p for the given paragraph text. It replaces text
 // previously set by SetBytes or SetString. If b contains a paragraph separator
 // it will only process the first paragraph and report the number of bytes
-// consumed from b including this separator. Error may be non-nil if bidiPropOptions are
+// consumed from b including this separator. Error may be non-nil if options are
 // given.
-func (p *Paragraph) SetBytes(b []byte, opts ...BidiPropOption) (n int, err error) {
+func (p *Paragraph) SetBytes(b []byte, opts ...bidi_Option) (n int, err error) {
 	p.p = b
 	p.opts = opts
 	return p.prepareInput()
@@ -139,9 +141,9 @@ func (p *Paragraph) SetBytes(b []byte, opts ...BidiPropOption) (n int, err error
 // SetString configures s for the given paragraph text. It replaces text
 // previously set by SetBytes or SetString. If s contains a paragraph separator
 // it will only process the first paragraph and report the number of bytes
-// consumed from s including this separator. Error may be non-nil if bidiPropOptions are
+// consumed from s including this separator. Error may be non-nil if options are
 // given.
-func (p *Paragraph) SetString(s string, opts ...BidiPropOption) (n int, err error) {
+func (p *Paragraph) SetString(s string, opts ...bidi_Option) (n int, err error) {
 	p.p = []byte(s)
 	p.opts = opts
 	return p.prepareInput()
@@ -157,7 +159,7 @@ func (p *Paragraph) IsLeftToRight() bool {
 // Direction returns the direction of the text of this paragraph.
 //
 // The direction may be LeftToRight, RightToLeft, Mixed, or Neutral.
-func (p *Paragraph) Direction() Direction {
+func (p *Paragraph) Direction() bidi_Direction {
 	return p.o.Direction()
 }
 
@@ -179,7 +181,7 @@ func (p *Paragraph) RunAt(pos int) Run {
 }
 
 func calculateOrdering(levels []level, runes []rune) Ordering {
-	var curDir Direction
+	var curDir bidi_Direction
 
 	prevDir := Neutral
 	prevI := 0
@@ -251,14 +253,14 @@ func (p *Paragraph) Line(start, end int) (Ordering, error) {
 // The methods of an Ordering should only be called by one goroutine at a time.
 type Ordering struct {
 	runes      [][]rune
-	directions []Direction
+	directions []bidi_Direction
 	startpos   []int
 }
 
 // Direction reports the directionality of the runs.
 //
 // The direction may be LeftToRight, RightToLeft, Mixed, or Neutral.
-func (o *Ordering) Direction() Direction {
+func (o *Ordering) Direction() bidi_Direction {
 	return o.directions[0]
 }
 
@@ -277,7 +279,7 @@ func (o *Ordering) Run(i int) Run {
 	return r
 }
 
-// TODO: perhaps with bidiPropOptions.
+// TODO: perhaps with options.
 // // Reorder creates a reader that reads the runes in visual order per character.
 // // Modifiers remain after the runes they modify.
 // func (l *Runs) Reorder() io.Reader {
@@ -287,7 +289,7 @@ func (o *Ordering) Run(i int) Run {
 // A Run is a continuous sequence of characters of a single direction.
 type Run struct {
 	runes     []rune
-	direction Direction
+	direction bidi_Direction
 	startpos  int
 }
 
@@ -307,7 +309,7 @@ func (r *Run) Bytes() []byte {
 // - bracket replacement.
 
 // Direction reports the direction of the run.
-func (r *Run) Direction() Direction {
+func (r *Run) Direction() bidi_Direction {
 	return r.direction
 }
 

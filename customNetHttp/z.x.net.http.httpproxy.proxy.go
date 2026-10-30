@@ -1,3 +1,5 @@
+// Origen: go1.26.10, src/vendor/golang.org/x/net/http/httpproxy/proxy.go. Regenerado con customNetHttp/regenerar; parches en customNetHttp/PATCHES.md.
+
 // Copyright 2017 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
@@ -14,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"strings"
@@ -134,7 +137,7 @@ func (cfg *config) proxyForURL(reqURL *url.URL) (*url.URL, error) {
 	if proxy == nil {
 		return nil, nil
 	}
-	if !cfg.useProxy(canonicalAddr(reqURL)) {
+	if !cfg.useProxy(httpproxy_canonicalAddr(reqURL)) {
 		return nil, nil
 	}
 
@@ -147,10 +150,7 @@ func parseProxy(proxy string) (*url.URL, error) {
 	}
 
 	proxyURL, err := url.Parse(proxy)
-	if err != nil ||
-		(proxyURL.Scheme != "http" &&
-			proxyURL.Scheme != "https" &&
-			proxyURL.Scheme != "socks5") {
+	if err != nil || proxyURL.Scheme == "" || proxyURL.Host == "" {
 		// proxy was bogus. Try prepending "http://" to it and
 		// see if that parses correctly. If not, we fall
 		// through and complain about the original one.
@@ -178,8 +178,10 @@ func (cfg *config) useProxy(addr string) bool {
 	if host == "localhost" {
 		return false
 	}
-	ip := net.ParseIP(host)
-	if ip != nil {
+	nip, err := netip.ParseAddr(host)
+	var ip net.IP
+	if err == nil {
+		ip = net.IP(nip.AsSlice())
 		if ip.IsLoopback() {
 			return false
 		}
@@ -264,14 +266,53 @@ func (c *config) init() {
 			matchHost = true
 			phost = "." + phost
 		}
-		if v, err := idnaASCII(phost); err == nil {
+		if v, err := httpproxy_idnaASCII(phost); err == nil {
 			phost = v
 		}
 		c.domainMatchers = append(c.domainMatchers, domainMatch{host: phost, port: pport, matchHost: matchHost})
 	}
 }
 
-func isASCII(s string) bool {
+var portMap = map[string]string{
+	"http":   "80",
+	"https":  "443",
+	"socks5": "1080",
+}
+
+// canonicalAddr returns url.Host but always with a ":port" suffix
+func httpproxy_canonicalAddr(url *url.URL) string {
+	addr := url.Hostname()
+	if v, err := httpproxy_idnaASCII(addr); err == nil {
+		addr = v
+	}
+	port := url.Port()
+	if port == "" {
+		port = portMap[url.Scheme]
+	}
+	return net.JoinHostPort(addr, port)
+}
+
+// Given a string of the form "host", "host:port", or "[ipv6::address]:port",
+// return true if the string includes a port.
+func httpproxy_hasPort(s string) bool { return strings.LastIndex(s, ":") > strings.LastIndex(s, "]") }
+
+func httpproxy_idnaASCII(v string) (string, error) {
+	// TODO: Consider removing this check after verifying performance is okay.
+	// Right now punycode verification, length checks, context checks, and the
+	// permissible character tests are all omitted. It also prevents the ToASCII
+	// call from salvaging an invalid IDN, when possible. As a result it may be
+	// possible to have two IDNs that appear identical to the user where the
+	// ASCII-only version causes an error downstream whereas the non-ASCII
+	// version does not.
+	// Note that for correct ASCII IDNs ToASCII will only do considerably more
+	// work, but it will not cause an allocation.
+	if httpproxy_isASCII(v) {
+		return v, nil
+	}
+	return idna_Lookup.ToASCII(v)
+}
+
+func httpproxy_isASCII(s string) bool {
 	for i := 0; i < len(s); i++ {
 		if s[i] >= utf8.RuneSelf {
 			return false
@@ -322,6 +363,9 @@ type domainMatch struct {
 }
 
 func (m domainMatch) match(host, port string, ip net.IP) bool {
+	if ip != nil {
+		return false
+	}
 	if strings.HasSuffix(host, m.host) || (m.matchHost && host == m.host[1:]) {
 		return m.port == "" || m.port == port
 	}

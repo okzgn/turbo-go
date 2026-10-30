@@ -1,3 +1,5 @@
+// Origen: go1.26.10, src/vendor/golang.org/x/text/unicode/norm/composition.go. Regenerado con customNetHttp/regenerar; parches en customNetHttp/PATCHES.md.
+
 // Copyright 2011 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
@@ -35,13 +37,13 @@ type streamSafe uint8
 
 // first inserts the first rune of a segment. It is a faster version of next if
 // it is known p represents the first rune in a segment.
-func (ss *streamSafe) first(p Properties) {
+func (ss *streamSafe) first(p norm_Properties) {
 	*ss = streamSafe(p.nTrailingNonStarters())
 }
 
 // insert returns a ssState value to indicate whether a rune represented by p
 // can be inserted.
-func (ss *streamSafe) next(p Properties) ssState {
+func (ss *streamSafe) next(p norm_Properties) ssState {
 	if *ss > maxNonStarters {
 		panic("streamSafe was not reset")
 	}
@@ -68,7 +70,7 @@ func (ss *streamSafe) next(p Properties) ssState {
 // when traversing a string backwards. Users do not need to call first
 // for the first rune. The state of the streamSafe retains the count of
 // the non-starters loaded.
-func (ss *streamSafe) backwards(p Properties) ssState {
+func (ss *streamSafe) backwards(p norm_Properties) ssState {
 	if *ss > maxNonStarters {
 		panic("streamSafe was not reset")
 	}
@@ -96,11 +98,11 @@ const GraphemeJoiner = "\u034F"
 // the UTF-8 characters in order.  Only the rune array is maintained in sorted
 // order. flush writes the resulting segment to a byte array.
 type reorderBuffer struct {
-	rune  [maxBufferSize]Properties // Per character info.
-	byte  [maxByteBufferSize]byte   // UTF-8 buffer. Referenced by runeInfo.pos.
-	nbyte uint8                     // Number or bytes.
-	ss    streamSafe                // For limiting length of non-starter sequence.
-	nrune int                       // Number of runeInfos.
+	rune  [maxBufferSize]norm_Properties // Per character info.
+	byte  [maxByteBufferSize]byte        // UTF-8 buffer. Referenced by runeInfo.pos.
+	nbyte uint8                          // Number or bytes.
+	ss    streamSafe                     // For limiting length of non-starter sequence.
+	nrune int                            // Number of runeInfos.
 	f     formInfo
 
 	src      input
@@ -111,14 +113,14 @@ type reorderBuffer struct {
 	flushF func(*reorderBuffer) bool
 }
 
-func (rb *reorderBuffer) init(f NormalizeForm, src []byte) {
+func (rb *reorderBuffer) init(f norm_Form, src []byte) {
 	rb.f = *formTable[f]
 	rb.src.setBytes(src)
 	rb.nsrc = len(src)
 	rb.ss = 0
 }
 
-func (rb *reorderBuffer) initString(f NormalizeForm, src string) {
+func (rb *reorderBuffer) initString(f norm_Form, src string) {
 	rb.f = *formTable[f]
 	rb.src.setString(src)
 	rb.nsrc = len(src)
@@ -181,7 +183,7 @@ func (rb *reorderBuffer) flushCopy(buf []byte) int {
 // insertOrdered inserts a rune in the buffer, ordered by Canonical Combining Class.
 // It returns false if the buffer is not large enough to hold the rune.
 // It is used internally by insert and insertString only.
-func (rb *reorderBuffer) insertOrdered(info Properties) {
+func (rb *reorderBuffer) insertOrdered(info norm_Properties) {
 	n := rb.nrune
 	b := rb.rune[:]
 	cc := info.ccc
@@ -215,7 +217,7 @@ const (
 // If a decomposition with multiple segments are encountered, they leading
 // ones are flushed.
 // It returns a non-zero error code if the rune was not inserted.
-func (rb *reorderBuffer) insertFlush(src input, i int, info Properties) insertErr {
+func (rb *reorderBuffer) insertFlush(src input, i int, info norm_Properties) insertErr {
 	if rune := src.hangul(i); rune != 0 {
 		rb.decomposeHangul(rune)
 		return iSuccess
@@ -231,7 +233,7 @@ func (rb *reorderBuffer) insertFlush(src input, i int, info Properties) insertEr
 // It is assumed there is sufficient space to hold the runes. It is the
 // responsibility of the caller to ensure this. This can be done by checking
 // the state returned by the streamSafe type.
-func (rb *reorderBuffer) insertUnsafe(src input, i int, info Properties) {
+func (rb *reorderBuffer) insertUnsafe(src input, i int, info norm_Properties) {
 	if rune := src.hangul(i); rune != 0 {
 		rb.decomposeHangul(rune)
 	}
@@ -264,14 +266,14 @@ func (rb *reorderBuffer) insertDecomposed(dcomp []byte) insertErr {
 
 // insertSingle inserts an entry in the reorderBuffer for the rune at
 // position i. info is the runeInfo for the rune at position i.
-func (rb *reorderBuffer) insertSingle(src input, i int, info Properties) {
+func (rb *reorderBuffer) insertSingle(src input, i int, info norm_Properties) {
 	src.copySlice(rb.byte[rb.nbyte:], i, i+int(info.size))
 	rb.insertOrdered(info)
 }
 
 // insertCGJ inserts a Combining Grapheme Joiner (0x034f) into rb.
 func (rb *reorderBuffer) insertCGJ() {
-	rb.insertSingle(input{str: GraphemeJoiner}, 0, Properties{size: uint8(len(GraphemeJoiner))})
+	rb.insertSingle(input{str: GraphemeJoiner}, 0, norm_Properties{size: uint8(len(GraphemeJoiner))})
 }
 
 // appendRune inserts a rune at the end of the buffer. It is used for Hangul.
@@ -279,7 +281,7 @@ func (rb *reorderBuffer) appendRune(r rune) {
 	bn := rb.nbyte
 	sz := utf8.EncodeRune(rb.byte[bn:], rune(r))
 	rb.nbyte += utf8.UTFMax
-	rb.rune[rb.nrune] = Properties{pos: bn, size: uint8(sz)}
+	rb.rune[rb.nrune] = norm_Properties{pos: bn, size: uint8(sz)}
 	rb.nrune++
 }
 
@@ -287,7 +289,7 @@ func (rb *reorderBuffer) appendRune(r rune) {
 func (rb *reorderBuffer) assignRune(pos int, r rune) {
 	bn := rb.rune[pos].pos
 	sz := utf8.EncodeRune(rb.byte[bn:], rune(r))
-	rb.rune[pos] = Properties{pos: bn, size: uint8(sz)}
+	rb.rune[pos] = norm_Properties{pos: bn, size: uint8(sz)}
 }
 
 // runeAt returns the rune at position n. It is used for Hangul and recomposition.

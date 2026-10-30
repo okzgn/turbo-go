@@ -1,3 +1,5 @@
+// Origen: go1.26.10, src/vendor/golang.org/x/text/unicode/bidi/prop.go. Regenerado con customNetHttp/regenerar; parches en customNetHttp/PATCHES.md.
+
 // Copyright 2016 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
@@ -7,12 +9,12 @@ package customNetHttp
 import "unicode/utf8"
 
 // Properties provides access to BiDi properties of runes.
-type BidiPropProperties struct {
+type bidi_Properties struct {
 	entry uint8
 	last  uint8
 }
 
-var bidiPropTrie = newBidiTrie(0)
+var bidi_trie = newBidiTrie(0)
 
 // TODO: using this for bidirule reduces the running time by about 5%. Consider
 // if this is worth exposing or if we can find a way to speed up the Class
@@ -20,12 +22,12 @@ var bidiPropTrie = newBidiTrie(0)
 //
 // // CompactClass is like Class, but maps all of the BiDi control classes
 // // (LRO, RLO, LRE, RLE, PDF, LRI, RLI, FSI, PDI) to the class Control.
-// func (p BidiPropProperties) CompactClass() Class {
+// func (p Properties) CompactClass() Class {
 // 	return Class(p.entry & 0x0F)
 // }
 
 // Class returns the Bidi class for p.
-func (p BidiPropProperties) Class() Class {
+func (p bidi_Properties) Class() Class {
 	c := Class(p.entry & 0x0F)
 	if c == Control {
 		c = controlByteToClass[p.last&0xF]
@@ -34,14 +36,14 @@ func (p BidiPropProperties) Class() Class {
 }
 
 // IsBracket reports whether the rune is a bracket.
-func (p BidiPropProperties) IsBracket() bool { return p.entry&0xF0 != 0 }
+func (p bidi_Properties) IsBracket() bool { return p.entry&0xF0 != 0 }
 
 // IsOpeningBracket reports whether the rune is an opening bracket.
 // IsBracket must return true.
-func (p BidiPropProperties) IsOpeningBracket() bool { return p.entry&openMask != 0 }
+func (p bidi_Properties) IsOpeningBracket() bool { return p.entry&openMask != 0 }
 
 // TODO: find a better API and expose.
-func (p BidiPropProperties) reverseBracket(r rune) rune {
+func (p bidi_Properties) reverseBracket(r rune) rune {
 	return xorMasks[p.entry>>xorMaskShift] ^ r
 }
 
@@ -58,10 +60,10 @@ var controlByteToClass = [16]Class{
 }
 
 // LookupRune returns properties for r.
-func LookupRune(r rune) (p BidiPropProperties, size int) {
+func LookupRune(r rune) (p bidi_Properties, size int) {
 	var buf [4]byte
 	n := utf8.EncodeRune(buf[:], r)
-	return BidiPropLookup(buf[:n])
+	return bidi_Lookup(buf[:n])
 }
 
 // TODO: these lookup methods are based on the generated trie code. The returned
@@ -82,125 +84,125 @@ func LookupRune(r rune) (p BidiPropProperties, size int) {
 // Lookup returns properties for the first rune in s and the width in bytes of
 // its encoding. The size will be 0 if s does not hold enough bytes to complete
 // the encoding.
-func BidiPropLookup(s []byte) (p BidiPropProperties, sz int) {
+func bidi_Lookup(s []byte) (p bidi_Properties, sz int) {
 	c0 := s[0]
 	switch {
 	case c0 < 0x80: // is ASCII
-		return BidiPropProperties{entry: bidiValues[c0]}, 1
+		return bidi_Properties{entry: bidiValues[c0]}, 1
 	case c0 < 0xC2:
-		return BidiPropProperties{}, 1
+		return bidi_Properties{}, 1
 	case c0 < 0xE0: // 2-byte UTF-8
 		if len(s) < 2 {
-			return BidiPropProperties{}, 0
+			return bidi_Properties{}, 0
 		}
 		i := bidiIndex[c0]
 		c1 := s[1]
 		if c1 < 0x80 || 0xC0 <= c1 {
-			return BidiPropProperties{}, 1
+			return bidi_Properties{}, 1
 		}
-		return BidiPropProperties{entry: bidiPropTrie.lookupValue(uint32(i), c1)}, 2
+		return bidi_Properties{entry: bidi_trie.lookupValue(uint32(i), c1)}, 2
 	case c0 < 0xF0: // 3-byte UTF-8
 		if len(s) < 3 {
-			return BidiPropProperties{}, 0
+			return bidi_Properties{}, 0
 		}
 		i := bidiIndex[c0]
 		c1 := s[1]
 		if c1 < 0x80 || 0xC0 <= c1 {
-			return BidiPropProperties{}, 1
+			return bidi_Properties{}, 1
 		}
 		o := uint32(i)<<6 + uint32(c1)
 		i = bidiIndex[o]
 		c2 := s[2]
 		if c2 < 0x80 || 0xC0 <= c2 {
-			return BidiPropProperties{}, 1
+			return bidi_Properties{}, 1
 		}
-		return BidiPropProperties{entry: bidiPropTrie.lookupValue(uint32(i), c2), last: c2}, 3
+		return bidi_Properties{entry: bidi_trie.lookupValue(uint32(i), c2), last: c2}, 3
 	case c0 < 0xF8: // 4-byte UTF-8
 		if len(s) < 4 {
-			return BidiPropProperties{}, 0
+			return bidi_Properties{}, 0
 		}
 		i := bidiIndex[c0]
 		c1 := s[1]
 		if c1 < 0x80 || 0xC0 <= c1 {
-			return BidiPropProperties{}, 1
+			return bidi_Properties{}, 1
 		}
 		o := uint32(i)<<6 + uint32(c1)
 		i = bidiIndex[o]
 		c2 := s[2]
 		if c2 < 0x80 || 0xC0 <= c2 {
-			return BidiPropProperties{}, 1
+			return bidi_Properties{}, 1
 		}
 		o = uint32(i)<<6 + uint32(c2)
 		i = bidiIndex[o]
 		c3 := s[3]
 		if c3 < 0x80 || 0xC0 <= c3 {
-			return BidiPropProperties{}, 1
+			return bidi_Properties{}, 1
 		}
-		return BidiPropProperties{entry: bidiPropTrie.lookupValue(uint32(i), c3)}, 4
+		return bidi_Properties{entry: bidi_trie.lookupValue(uint32(i), c3)}, 4
 	}
 	// Illegal rune
-	return BidiPropProperties{}, 1
+	return bidi_Properties{}, 1
 }
 
 // LookupString returns properties for the first rune in s and the width in
 // bytes of its encoding. The size will be 0 if s does not hold enough bytes to
 // complete the encoding.
-func LookupString(s string) (p BidiPropProperties, sz int) {
+func LookupString(s string) (p bidi_Properties, sz int) {
 	c0 := s[0]
 	switch {
 	case c0 < 0x80: // is ASCII
-		return BidiPropProperties{entry: bidiValues[c0]}, 1
+		return bidi_Properties{entry: bidiValues[c0]}, 1
 	case c0 < 0xC2:
-		return BidiPropProperties{}, 1
+		return bidi_Properties{}, 1
 	case c0 < 0xE0: // 2-byte UTF-8
 		if len(s) < 2 {
-			return BidiPropProperties{}, 0
+			return bidi_Properties{}, 0
 		}
 		i := bidiIndex[c0]
 		c1 := s[1]
 		if c1 < 0x80 || 0xC0 <= c1 {
-			return BidiPropProperties{}, 1
+			return bidi_Properties{}, 1
 		}
-		return BidiPropProperties{entry: bidiPropTrie.lookupValue(uint32(i), c1)}, 2
+		return bidi_Properties{entry: bidi_trie.lookupValue(uint32(i), c1)}, 2
 	case c0 < 0xF0: // 3-byte UTF-8
 		if len(s) < 3 {
-			return BidiPropProperties{}, 0
+			return bidi_Properties{}, 0
 		}
 		i := bidiIndex[c0]
 		c1 := s[1]
 		if c1 < 0x80 || 0xC0 <= c1 {
-			return BidiPropProperties{}, 1
+			return bidi_Properties{}, 1
 		}
 		o := uint32(i)<<6 + uint32(c1)
 		i = bidiIndex[o]
 		c2 := s[2]
 		if c2 < 0x80 || 0xC0 <= c2 {
-			return BidiPropProperties{}, 1
+			return bidi_Properties{}, 1
 		}
-		return BidiPropProperties{entry: bidiPropTrie.lookupValue(uint32(i), c2), last: c2}, 3
+		return bidi_Properties{entry: bidi_trie.lookupValue(uint32(i), c2), last: c2}, 3
 	case c0 < 0xF8: // 4-byte UTF-8
 		if len(s) < 4 {
-			return BidiPropProperties{}, 0
+			return bidi_Properties{}, 0
 		}
 		i := bidiIndex[c0]
 		c1 := s[1]
 		if c1 < 0x80 || 0xC0 <= c1 {
-			return BidiPropProperties{}, 1
+			return bidi_Properties{}, 1
 		}
 		o := uint32(i)<<6 + uint32(c1)
 		i = bidiIndex[o]
 		c2 := s[2]
 		if c2 < 0x80 || 0xC0 <= c2 {
-			return BidiPropProperties{}, 1
+			return bidi_Properties{}, 1
 		}
 		o = uint32(i)<<6 + uint32(c2)
 		i = bidiIndex[o]
 		c3 := s[3]
 		if c3 < 0x80 || 0xC0 <= c3 {
-			return BidiPropProperties{}, 1
+			return bidi_Properties{}, 1
 		}
-		return BidiPropProperties{entry: bidiPropTrie.lookupValue(uint32(i), c3)}, 4
+		return bidi_Properties{entry: bidi_trie.lookupValue(uint32(i), c3)}, 4
 	}
 	// Illegal rune
-	return BidiPropProperties{}, 1
+	return bidi_Properties{}, 1
 }

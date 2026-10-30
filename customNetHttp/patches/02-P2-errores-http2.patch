@@ -1,0 +1,15 @@
+diff --git a/1.net.http.h2_bundle.go b/1.net.http.h2_bundle.go
+index 8c1aacf..3e0a651 100644
+--- a/1.net.http.h2_bundle.go
++++ b/1.net.http.h2_bundle.go
+@@ -6510,8 +6510,8 @@ func http2handleHeaderListTooLong(w ResponseWriter, r *Request) {
+ 	// willing to handle can send an HTTP 431 (Request Header Fields Too
+ 	// Large) status code"
+ 	const statusRequestHeaderFieldsTooLarge = 431 // only in Go 1.6+
+-	w.WriteHeader(statusRequestHeaderFieldsTooLarge)
+-	io.WriteString(w, "<h1>HTTP Error 431</h1><p>Request Header Field(s) Too Large</p>")
++	// turbo:P2: plantilla de error de Turbo.
++	turboEscribirError(w, "", statusRequestHeaderFieldsTooLarge)
+ }
+ 
+ // called from handler goroutines.

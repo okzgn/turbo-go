@@ -1,0 +1,99 @@
+diff --git a/1.net.http.request.go b/1.net.http.request.go
+index 3a98f78..8a30997 100644
+--- a/1.net.http.request.go
++++ b/1.net.http.request.go
+@@ -29,9 +29,7 @@ import (
+ 	_ "unsafe" // for linkname
+ )
+ 
+-const (
+-	defaultMaxMemory = 32 << 20 // 32 MB
+-)
++// turbo:P10: sin defaultMaxMemory (32 MB): los formularios se limitan con TurboMaxBodySize.
+ 
+ // ErrMissingFile is returned by FormFile when the provided file field name
+ // is either not present in the request or not a file field.
+@@ -1275,9 +1273,9 @@ func parsePostForm(r *Request) (vs url.Values, err error) {
+ 	switch {
+ 	case ct == "application/x-www-form-urlencoded":
+ 		var reader io.Reader = r.Body
+-		maxFormSize := int64(1<<63 - 1)
++		maxFormSize := TurboMaxBodySize.Load() // turbo:P10: el límite es MBB (Go: sin límite)
+ 		if _, ok := r.Body.(*maxBytesReader); !ok {
+-			maxFormSize = int64(10 << 20) // 10 MB is a lot of text.
++			maxFormSize = TurboMaxBodySize.Load() // turbo:P10 (Go: 10 MB)
+ 			reader = io.LimitReader(r.Body, maxFormSize+1)
+ 		}
+ 		b, e := io.ReadAll(reader)
+@@ -1418,7 +1416,7 @@ func (r *Request) ParseMultipartForm(maxMemory int64) error {
+ // then inspect [Request.Form] directly.
+ func (r *Request) FormValue(key string) string {
+ 	if r.Form == nil {
+-		r.ParseMultipartForm(defaultMaxMemory)
++		r.ParseMultipartForm(TurboMaxBodySize.Load()) // turbo:P10
+ 	}
+ 	if vs := r.Form[key]; len(vs) > 0 {
+ 		return vs[0]
+@@ -1433,7 +1431,7 @@ func (r *Request) FormValue(key string) string {
+ // If key is not present, PostFormValue returns the empty string.
+ func (r *Request) PostFormValue(key string) string {
+ 	if r.PostForm == nil {
+-		r.ParseMultipartForm(defaultMaxMemory)
++		r.ParseMultipartForm(TurboMaxBodySize.Load()) // turbo:P10
+ 	}
+ 	if vs := r.PostForm[key]; len(vs) > 0 {
+ 		return vs[0]
+@@ -1448,7 +1446,7 @@ func (r *Request) FormFile(key string) (multipart_File, *FileHeader, error) {
+ 		return nil, nil, errors.New("http: multipart handled by MultipartReader")
+ 	}
+ 	if r.MultipartForm == nil {
+-		err := r.ParseMultipartForm(defaultMaxMemory)
++		err := r.ParseMultipartForm(TurboMaxBodySize.Load()) // turbo:P10
+ 		if err != nil {
+ 			return nil, nil, err
+ 		}
+diff --git a/c.mime.formdata.go b/c.mime.formdata.go
+index 818d63a..46b5a59 100644
+--- a/c.mime.formdata.go
++++ b/c.mime.formdata.go
+@@ -51,7 +51,7 @@ func (r *multipart_Reader) readForm(maxMemory int64) (_ *multipart_Form, err err
+ 		combineFiles = false
+ 		// multipartfiles.IncNonDefault() // TODO: uncomment after documenting
+ 	}
+-	maxParts := 1000
++	maxParts := TurboMaxFormParts // turbo:P10: máximo de partes de Turbo (Go: 1000)
+ 	if s := multipartmaxparts.Value(); s != "" {
+ 		if v, err := strconv.Atoi(s); err == nil && v >= 0 {
+ 			maxParts = v
+@@ -101,7 +101,7 @@ func (r *multipart_Reader) readForm(maxMemory int64) (_ *multipart_Form, err err
+ 	if maxFileMemoryBytes == math.MaxInt64 {
+ 		maxFileMemoryBytes--
+ 	}
+-	maxMemoryBytes := maxMemory + int64(10<<20)
++	maxMemoryBytes := maxMemory // turbo:P10: todo el formulario cabe en maxMemory (Go: 10 MB más)
+ 	if maxMemoryBytes <= 0 {
+ 		maxMemoryBytes = math.MaxInt64
+ 	}
+@@ -172,6 +172,9 @@ func (r *multipart_Reader) readForm(maxMemory int64) (_ *multipart_Form, err err
+ 		if err != nil && err != io.EOF {
+ 			return nil, err
+ 		}
++		if n > maxMemoryBytes { // turbo:P10: sin archivos temporales; lo que no cabe en memoria se rechaza
++			return nil, ErrMessageTooLarge
++		}
+ 		if n > maxFileMemoryBytes {
+ 			if file == nil {
+ 				file, err = os.CreateTemp(r.tempDir, "multipart-")
+diff --git a/c.mime.multipart.go b/c.mime.multipart.go
+index 0ae6bbf..db7770f 100644
+--- a/c.mime.multipart.go
++++ b/c.mime.multipart.go
+@@ -360,7 +360,7 @@ func maxMIMEHeaders() int64 {
+ 			return v
+ 		}
+ 	}
+-	return 10000
++	return TurboMaxFormHeaders // turbo:P10: máximo de cabeceras de Turbo (Go: 10000)
+ }
+ 
+ // NextPart returns the next part in the multipart or an error.

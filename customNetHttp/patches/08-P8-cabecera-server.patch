@@ -1,0 +1,25 @@
+diff --git a/1.net.http.h2_bundle.go b/1.net.http.h2_bundle.go
+index 33dd121..af3038c 100644
+--- a/1.net.http.h2_bundle.go
++++ b/1.net.http.h2_bundle.go
+@@ -11132,6 +11132,7 @@ func (w *http2writeResHeaders) writeFrame(ctx http2writeContext) error {
+ 	}
+ 	if w.date != "" {
+ 		http2encKV(enc, "date", w.date)
++		http2encKV(enc, "server", TurboServerName) // turbo:P8
+ 	}
+ 
+ 	headerBlock := buf.Bytes()
+diff --git a/1.net.http.server.go b/1.net.http.server.go
+index 60bc196..d0b222c 100644
+--- a/1.net.http.server.go
++++ b/1.net.http.server.go
+@@ -1221,6 +1221,8 @@ func (h extraHeader) Write(w *bufio.Writer) {
+ 		w.Write(headerDate)
+ 		w.Write(h.date)
+ 		w.Write(crlf)
++		w.WriteString("Server: " + TurboServerName) // turbo:P8
++		w.Write(crlf)
+ 	}
+ 	if h.contentLength != nil {
+ 		w.Write(headerContentLength)

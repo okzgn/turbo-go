@@ -1,0 +1,76 @@
+diff --git a/a.server.cgi.host.go b/a.server.cgi.host.go
+index 64b6cfd..27c9a18 100644
+--- a/a.server.cgi.host.go
++++ b/a.server.cgi.host.go
+@@ -18,6 +18,7 @@ package customNetHttp
+ 
+ import (
+ 	"bufio"
++	"context"
+ 	"fmt"
+ 	"io"
+ 	"log"
+@@ -30,6 +31,7 @@ import (
+ 	"runtime"
+ 	"strconv"
+ 	"strings"
++	"time"
+ )
+ 
+ var trailingPort = regexp.MustCompile(`:([0-9]+)$`)
+@@ -69,6 +71,10 @@ type CgiHandler struct {
+ 	Args       []string    // optional arguments to pass to child process
+ 	Stderr     io.Writer   // optional stderr for the child process; nil means os.Stderr
+ 
++	// Timeout ends the CGI process when it runs longer; zero means no limit.
++	// turbo:P12
++	Timeout time.Duration
++
+ 	// PathLocationHandler specifies the root http Handler that
+ 	// should handle internal redirects when the CGI process
+ 	// returns a Location header value starting with a "/", as
+@@ -218,17 +224,24 @@ func (h *CgiHandler) ServeHTTP(rw ResponseWriter, req *Request) {
+ 	}
+ 
+ 	internalError := func(err error) {
+-		rw.WriteHeader(StatusInternalServerError)
++		Error(rw, "", StatusInternalServerError) // turbo:P12: plantilla de Turbo; el detalle, solo en el log
+ 		h.printf("CGI error: %v", err)
+ 	}
+ 
+-	cmd := &exec.Cmd{
+-		Path:   path,
+-		Args:   append([]string{h.Path}, h.Args...),
+-		Dir:    cwd,
+-		Env:    env,
+-		Stderr: h.stderr(),
+-	}
++	// turbo:P12: el proceso termina con la petición o al pasar Timeout.
++	ctx := req.Context()
++	if h.Timeout > 0 {
++		var cancel context.CancelFunc
++		ctx, cancel = context.WithTimeout(ctx, h.Timeout)
++		defer cancel()
++	}
++	cmd := exec.CommandContext(ctx, path)
++	cmd.Path, cmd.Err = path, nil // como exec.Cmd{Path: path}: sin buscar en PATH
++	cmd.Args = append([]string{h.Path}, h.Args...)
++	cmd.Dir = cwd
++	cmd.Env = env
++	cmd.Stderr = h.stderr()
++	cmd.WaitDelay = time.Second // no esperar a hijos que mantengan abiertas las tuberías
+ 	if req.ContentLength != 0 {
+ 		cmd.Stdin = req.Body
+ 	}
+@@ -301,6 +314,11 @@ func (h *CgiHandler) ServeHTTP(rw ResponseWriter, req *Request) {
+ 			headers.Add(header, val)
+ 		}
+ 	}
++	if ctx.Err() == context.DeadlineExceeded { // turbo:P12
++		h.printf("cgi: timeout after %v: %s", h.Timeout, h.Path)
++		Error(rw, "", StatusGatewayTimeout)
++		return
++	}
+ 	if headerLines == 0 || !sawBlankLine {
+ 		rw.WriteHeader(StatusInternalServerError)
+ 		h.printf("cgi: no headers")

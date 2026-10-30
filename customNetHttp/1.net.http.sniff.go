@@ -1,3 +1,5 @@
+// Origen: go1.26.10, src/net/http/sniff.go. Regenerado con customNetHttp/regenerar; parches en customNetHttp/PATCHES.md.
+
 // Copyright 2011 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
@@ -85,7 +87,7 @@ var sniffSignatures = []sniffSig{
 		mask:   []byte("\xFF\xFF\xFF\xFF\xFF"),
 		pat:    []byte("<?xml"),
 		skipWS: true,
-		ct:     "text/xml; charset=UTF-8"},
+		ct:     "text/xml; charset=utf-8"},
 	&exactSig{[]byte("%PDF-"), "application/pdf"},
 	&exactSig{[]byte("%!PS-Adobe-"), "application/postscript"},
 
@@ -103,7 +105,7 @@ var sniffSignatures = []sniffSig{
 	&maskedSig{
 		mask: []byte("\xFF\xFF\xFF\x00"),
 		pat:  []byte("\xEF\xBB\xBF\x00"),
-		ct:   "text/plain; charset=UTF-8",
+		ct:   "text/plain; charset=utf-8",
 	},
 
 	// Image types
@@ -254,7 +256,7 @@ func (h htmlSig) match(data []byte, firstNonWS int) string {
 	if !isTT(data[len(h)]) {
 		return ""
 	}
-	return "text/html; charset=UTF-8"
+	return "text/html; charset=utf-8"
 }
 
 var mp4ftype = []byte("ftyp")
@@ -300,5 +302,5 @@ func (textSig) match(data []byte, firstNonWS int) string {
 			return ""
 		}
 	}
-	return "text/plain; charset=UTF-8"
+	return "text/plain; charset=utf-8"
 }

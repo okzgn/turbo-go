@@ -1,20 +1,27 @@
+// Origen: go1.26.10, src/vendor/golang.org/x/text/unicode/norm/trie.go. Regenerado con customNetHttp/regenerar; parches en customNetHttp/PATCHES.md.
+
 // Copyright 2011 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
 package customNetHttp
 
-type normTrieValueRange struct {
+type norm_valueRange struct {
 	value  uint16 // header: value:stride
 	lo, hi byte   // header: lo:n
 }
 
-var nfcSparse = sparseBlocks{
+type norm_sparseBlocks struct {
+	values []norm_valueRange
+	offset []uint16
+}
+
+var nfcSparse = norm_sparseBlocks{
 	values: nfcSparseValues[:],
 	offset: nfcSparseOffset[:],
 }
 
-var nfkcSparse = sparseBlocks{
+var nfkcSparse = norm_sparseBlocks{
 	values: nfkcSparseValues[:],
 	offset: nfkcSparseOffset[:],
 }
@@ -28,7 +35,7 @@ var (
 // For n < t.cutoff, the block is a simple lookup table. Otherwise, the block
 // is a list of ranges with an accompanying value. Given a matching range r,
 // the value for b is by r.value + (b - r.lo) * stride.
-func (t *sparseBlocks) lookup(n uint32, b byte) uint16 {
+func (t *norm_sparseBlocks) lookup(n uint32, b byte) uint16 {
 	offset := t.offset[n]
 	header := t.values[offset]
 	lo := offset + 1

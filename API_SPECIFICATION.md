@@ -11,11 +11,15 @@ The Turbo backend provides an **RPC/REST-style API over HTTP POST**. All interac
 
 ### 1.2. Headers and Security
 * **HTTP Method:** `POST` is mandatory for all API actions.
-* **Session Handling:** The authentication token must be sent in the `ok: <token_hash>` header or, alternatively, as a URL parameter `?ok=<token_hash>`.
+* **Parameters:** The action parameters (`s`, `d`, `a`, `b`…) can go in the URL query or in an `application/x-www-form-urlencoded` body. The GUI sends them in the body, so the current password (`b`) never appears in the URL that `turbo.visits` records; API clients should do the same.
+* **Session Handling:** After a successful login, the server sets the session cookie `turbo_session` (`Path=/; HttpOnly; SameSite=Strict`, plus `Secure` when the request arrives over HTTPS), which the browser sends by itself. API clients can instead send the token in the `ok: <token>` header. If both are present, the cookie is used. The token is **not** accepted as a URL parameter. The `turbo_session` cookie is removed from the `Cookie` header passed to CGI preprocessors.
+* **Same Origin:** A `POST` to `/admin:inside:` authenticated with the cookie must come from the panel's own origin: the browser must send `Sec-Fetch-Site: same-origin` (or `none`) or, without `Sec-Fetch-Site`, an `Origin` header equal to `<scheme>://<Host>`. Otherwise the server responds `403`. Requests authenticated with the `ok` header don't need it.
+* **Panel Response Headers:** Responses under `/admin:` carry `X-Frame-Options: DENY`, `Content-Security-Policy: frame-ancestors 'none'` and `Cache-Control: no-store`.
+* **Where the Panel Answers:** The global `PA` setting (see `setPA`, §5) can limit `/admin:` to a list of hosts or CIDR networks. Outside the list, `/admin:` responds `404`. Empty (the default) means no restriction.
 * **CORS (Cross-Origin Resource Sharing):**
   * `Access-Control-Allow-Origin: default://home`
   * `Access-Control-Allow-Headers: ok`
-* **Session Lifecycle:** Tokens are assigned to the client's IP address and expire after **60 seconds (1 minute)** of inactivity. Each successful request resets the timer.
+* **Session Lifecycle:** Tokens are assigned to the client's IP address and expire after **600 seconds (10 minutes)** of inactivity. Each request to `/admin:inside:` resets the timer. Without a valid session, `/admin:inside:` returns the HTML redirect to `/admin:` (see §3.2).
 
 ---
 
@@ -47,16 +51,17 @@ Validates the user's credentials and generates a unique token bound to the clien
   * `u`: Username.
   * `p`: Password.
 * **Successful Response (HTTP 200 OK):**
-  The server generates a cryptographically secure opaque token associated with the client's IP. The body will contain the token prefixed by the success variable (`"ok"` by default).
+  The server generates a cryptographically secure opaque token (32 random bytes, 64 hexadecimal characters), unique for each login and associated with the client's IP. It sets the `turbo_session` cookie with it, and the body contains the token prefixed by the success variable (`"ok"` by default), for clients that use the `ok` header.
   ```text
-  ok<sha256_token_hash>
+  ok<token>
   ```
+* **Incorrect Credentials:** HTTP 403 with an empty body.
 
 ### 3.2. Log Out
-Invalidates the current token in RAM memory and disconnects the session from the active IP.
+Invalidates the current token in RAM memory (other sessions from the same IP stay active) and expires the `turbo_session` cookie (`Max-Age=0`).
 
 * **Endpoint:** `POST /admin:signout:`
-* **Authentication:** `ok` header required.
+* **Authentication:** The session cookie or the `ok` header.
 * **Successful Response (HTTP 200 OK):**
   Returns an HTML string forcing browser redirection.
   ```html
@@ -67,7 +72,7 @@ Invalidates the current token in RAM memory and disconnects the session from the
 
 ## 4. Query and State Retrieval API (Data Retrieval)
 
-Endpoints intended to dump the in-memory configuration state to the client. They require the `ok: <token>` header.
+Endpoints intended to dump the in-memory configuration state to the client. They require an authenticated session (cookie or `ok: <token>` header, §1.2).
 
 ### 4.1. Get Global Server State
 Returns the general configuration, root site maps, denied IPs, custom HTTP responses, and character replacements.
@@ -83,23 +88,25 @@ Returns the general configuration, root site maps, denied IPs, custom HTTP respo
         "C": "1",
         "R": "0",
         "W": "0",
-        "E": "admin@sitio1.com",
+        "E": "admin%40sitio1.com",
         "A": ""
       }
     },
     "_": {
-      "-.-": ";",
-      "-,-": "#",
-      "-_-": "&"
+      ";": { "f": "-.-" },
+      "#": { "f": "-,-" },
+      "&": { "f": "-_-" }
     },
     "@": {
       "192.168.1.50": "1735689600"
     },
     "#": {
+      "0": { "f": "OKZGN Turbo\\n{TURBO_RESPONSE_CODE}" },
       "404": "Page not found: {TURBO_RESPONSE_CODE}"
     },
     ".": {
       "M": "/home/server/",
+      "PA": "",
       "RT": "5s",
       "RHT": "1s",
       "WT": "10s",
@@ -107,12 +114,13 @@ Returns the general configuration, root site maps, denied IPs, custom HTTP respo
       "MUB": "1000",
       "MHB": "5000",
       "MBB": "1048576",
-      "CIL": "1000",
-      "CIS": "100",
+      "CIL": "10000",
+      "CIS": "1000",
       "CII": "100"
     }
   }
   ```
+  *(Note: Fixed entries, which cannot be deleted, are returned as `{"f": <value>}`. Text values in the `!` block are URL-encoded, e.g. `@` → `%40`).*
 
 ### 4.2. Get List of Subdomains for a Site
 Returns a JSON object with all subdomains belonging to a specific root domain, including the alias (if applicable) and the SSL/Redirect configuration for each.
@@ -131,7 +139,7 @@ Returns a JSON object with all subdomains belonging to a specific root domain, i
         "C": "1",
         "R": "0",
         "W": "1",
-        "E": "contacto@ejemplo.com",
+        "E": "contacto%40ejemplo.com",
         "A": ""
       }
     },
@@ -141,7 +149,7 @@ Returns a JSON object with all subdomains belonging to a specific root domain, i
         "C": "1",
         "R": "0",
         "W": "0",
-        "E": "api-admin@ejemplo.com",
+        "E": "api-admin%40ejemplo.com",
         "A": "dns-route53"
       }
     },
@@ -169,15 +177,16 @@ Returns all operational rules (Rewrites, Headers, MIME types, Indexes, Preproces
 * **Response Structure (JSON):**
   ```json
   {
-    "=": { "/old-path": "N/new-path" },
+    "=": { "/old-path": "/new-path" },
     "$": { "png": "image/png" },
     ".": { "Cache-Control": "max-age=3600" },
-    "?": { "php": "cgi>/usr/bin/php-cgi" },
-    "-": { "index.php": "" },
+    "?": { "php": "/usr/bin/php-cgi" },
+    "-": { "index.html": "1", "index.php": "2" },
     "&": { "alias.com": "" },
     "!": { "S": "1", "C": "1" }
   }
   ```
+  *(Note: Each index in `-` comes with its position, the order in which indexes are tried).*
 
 ---
 
@@ -186,23 +195,29 @@ Returns all operational rules (Rewrites, Headers, MIME types, Indexes, Preproces
 Modifies the server's global parameters and operational limits. Several of these actions force a rewrite of the `turbo.config` file and an internal hot-reload of the configuration.
 
 * **Base Route:** `POST /admin:inside:set<KEY>`
+* **Required Parameters:** `a` (value) and `b` (current password) in **every** `set<KEY>`. If `b` is missing, the server responds HTTP 400 `"Faltan datos"` *(lit. "Missing data")*; if it is incorrect, HTTP 400 `"Contraseña actual incorrecta"` *(lit. "Incorrect current password")*. A value equal to the current one is also answered with HTTP 400 (for example, `"Usuario sin cambios"` or `"Contraseña sin cambios"`).
 
 | Endpoint | Parameter `a` | Parameter `b` | Description / Validation |
 |---|---|---|---|
-| `setU` | New Username | Current Password | Changes the username (1-24 chars). Requires correct `b`. |
-| `setP` | New Password | Current Password | Changes the password (1-24 chars). Requires correct `b`. |
-| `setM` | Directory Path | Current Password | Changes the base site directory. |
-| `setC` | (Ignored) | Current Password | Dumps the current in-RAM configuration to disk (`turbo.config`). |
+| `setU` | New Username | Current Password | Changes the username (1-24 chars). |
+| `setP` | New Password | Current Password | Changes the password (1-24 chars). |
+| `setM` | Directory Path | Current Password | Changes the base site directory (it must exist) and reloads the configuration. |
+| `setC` | (Ignored; `sobrescribir` to confirm, see below) | Current Password | Dumps the current in-RAM configuration to disk (`turbo.config`), including the username and the password hash (never the plain password). |
+| `setPA` | Hosts / CIDR networks | Current Password | Where the panel answers: comma-separated host names and/or CIDR networks (at most 32 entries and 1,024 chars). Empty or `*` = no restriction. |
 | `setMUB` | Integer value | Current Password | Adjusts the maximum URI length (40 - 10,240 bytes). |
 | `setMHB` | Integer value | Current Password | Adjusts the max. header length (600 - 20,480 bytes). |
 | `setMBB` | Integer value | Current Password | Adjusts the max. body size (1B - 100MB). |
-| `setCIL` | Value in ms | Current Password | Counter reset interval (100 - 80,000 ms). |
-| `setCIS` | Value in ms | Current Password | Counting window (1 - 5,000 ms). |
-| `setCII` | Integer value | Current Password | Request limit per interval. |
-| `setRT` | Time (`5s`, `0s`) | Current Password | Total request Read Timeout. |
-| `setRHT` | Time (`1s`, `0s`) | Current Password | Read Header Timeout. |
-| `setWT` | Time (`10s`, `0s`) | Current Password | Write Timeout for responses. |
-| `setIT` | Time (`2s`, `0s`) | Current Password | Idle Timeout for *Keep-Alive*. |
+| `setCIL` | Value in ms | Current Password | Counter reset interval (1,000 - 800,000 ms). |
+| `setCIS` | Value in ms | Current Password | Counting window (10 - 50,000 ms). |
+| `setCII` | Integer value | Current Password | Request limit per interval: from 1 up to the value of `CIS` in ms, and `CIS`/`CII` ≤ 66. |
+| `setRT` | Time (`5s`, `0s`) | Current Password | Total request Read Timeout (100 ms - 15 min; `0s` disables it). |
+| `setRHT` | Time (`1s`, `0s`) | Current Password | Read Header Timeout (50 ms - 7.5 min and at most half of `RT`; `0s` disables it). |
+| `setWT` | Time (`10s`, `0s`) | Current Password | Write Timeout for responses (100 ms - 30 min; `0s` disables it). |
+| `setIT` | Time (`2s`, `0s`) | Current Password | Idle Timeout for *Keep-Alive* (100 ms - 5 min; `0s` disables it). |
+
+*Notes:*
+* *`setPA`: Host entries are compared with the request's `Host` header, which the client chooses: they keep the panel off other domains but do not limit who can reach it. CIDR networks, compared with the client's IP, are what limit access.*
+* *`setC`: If `turbo.config` was written by a later version of Turbo (a later schema), saving would lose its new settings, so the server responds HTTP 400 with an explanation; send `a=sobrescribir` to confirm and overwrite it. The first time a file from an earlier schema is saved, the original is kept as `turbo.config.v<schema>.bak`. If the site directory is not the startup directory, a minimal `turbo.config` pointing to it is also written in the startup directory.*
 
 ---
 
@@ -217,12 +232,17 @@ The backend handles folder creation on disk and modifications to the in-RAM maps
 |---|---|---|---|---|
 | `addSite` | Web Domain | - | - | - |
 | `addSubdomain` | Web Domain | Subdomain | - | - |
-| `addRewrite` | Web Domain | Subdomain | Source URI (e.g.: `/old`) | Rewrite (`N/new`, `Hhttp://...`, `Shttps://...`), [dynamic keywords available](https://turbo-server.github.io/#so-2)|
+| `addRewrite` | Web Domain | Subdomain | Source URI (e.g.: `/old`) | Rewrite (`/new`, `http://...`, `https://...`), [dynamic keywords available](https://turbo-server.github.io/#so-2)|
 | `addMIME` | Web Domain | Subdomain | Extension (e.g.: `png`) | MIME Type (e.g.: `image/png`) |
 | `addHeader` | Web Domain | Subdomain | Header Name | Header Value |
 | `addPreprocessor`| Web Domain | Subdomain | Extension (e.g.: `php`) | CGI Executable (e.g.: `/usr/bin/php-cgi`) |
 | `addIndex` | Web Domain | Subdomain | Index File (`index.html`)| - |
 | `addAlias` | Web Domain | Subdomain | Alias Domain | - |
+
+*Notes:*
+* *`addRewrite`: The rewrite must start with `/` (internal path), `http://` or `https://`. Targets with `http://` or `https://` are answered with a `302` redirect: to the exact target when it has a path or a query, or to the target domain followed by the original URI when it is only a domain.*
+* *`addPreprocessor`: The executable path (at most 128 chars) must exist; the `cgi>` prefix is optional and other prefixes are rejected.*
+* *`addIndex`: The index is added at the end of the order; indexes are tried in the order in which they were added. New sites and subdomains start with `index.html`.*
 
 ### 6.2. Delete Resources (`del<Type>`)
 * **Base Route:** `POST /admin:inside:del<TYPE>`
@@ -237,16 +257,20 @@ The backend handles folder creation on disk and modifications to the in-RAM maps
 | `delIndex` | Web Domain | Subdomain | Index File |
 | `delAlias` | Web Domain | Subdomain | Alias Domain |
 
+*All three parameters are required (except `a` in `delSite`): if one is missing, the response is `400` "Faltan datos".*
+
 ---
 
 ## 7. Global Security and Interface API
 
 ### 7.1. Denied IP Control
+A denied IP is blocked until the given date: its requests are answered with HTTP 429 and a `Retry-After` header (seconds left), and its new connections are closed.
+
 * **`POST /admin:inside:addDenied`**
-  * `s`: IP address (IPv4 or IPv6).
-  * `d`: UNIX timestamp for block expiration.
+  * `s`: IP address (IPv4 or IPv6). Loopback addresses (`127.x.x.x`, `::1`) and the address the request comes from (`400` "IP actual": the panel would lock itself out) are not accepted.
+  * `d`: UNIX timestamp for block expiration (`0` or a past date removes an existing block).
 * **`POST /admin:inside:delDenied`**
-  * `s`: IP address to unblock from the `persistentIPs` memory map.
+  * `s`: IP address to unblock from the denied IP list.
 
 ### 7.2. HTTP Status Code Responses
 * **`POST /admin:inside:addHttpCodeResponse`**
@@ -259,6 +283,8 @@ The backend handles folder creation on disk and modifications to the in-RAM maps
 * **`POST /admin:inside:addCharsReplace`**
   * `s`: Character sequence to replace (e.g.: `;`).
   * `d`: Target encoded token (e.g.: `-.-`).
+* **`POST /admin:inside:delCharsReplace`**
+  * `s`: Character sequence to stop replacing (the fixed substitutions of §2.1 cannot be deleted).
 
 ---
 
@@ -270,18 +296,22 @@ Manages HTTPS enablement, application-layer redirects, and certificate configura
 
 | Endpoint | Parameter `a` (Action) | Parameter `s` (Domain) | Parameter `d` (Subdomain) | Optional Parameters |
 |---|---|---|---|---|
-| **`cfgC`** | `"1"` = Run Certbot<br>`"0"` = Remove from disk | Web Domain | Subdomain or Empty (`""`) | `z`: Registration e-mail.<br>`y`: Certbot adapter (e.g.: `dns-route53`). |
+| **`cfgC`** | `"1"` = Run Certbot<br>`"0"` = Remove from disk | Web Domain | Subdomain or Empty (`""`) | `z`: Registration e-mail.<br>`y`: Certbot adapter (`dns-<provider>`, e.g.: `dns-route53`). |
 | **`cfgS`** | `"1"` = Enable HTTPS<br>`"0"` = Disable HTTPS | Web Domain | Subdomain or Empty (`""`) | - |
 | **`cfgR`** | `"1"` = Enable<br>`"0"` = Disable | Web Domain | Subdomain or Empty (`""`) | *Only applies to the `www` subdomain.* Enables redirection to the Root. |
 | **`cfgW`** | `"1"` = Enable<br>`"0"` = Disable | Web Domain | Subdomain or Empty (`""`) | *Only applies to the Root subdomain.* Enables redirection to `www`. |
 | **`cfgE`** | E-mail to register | Web Domain | Subdomain or Empty (`""`) | Silently updates the E-mail for future Certbot renewals. |
-| **`cfgA`** | Adapter Name | Web Domain | Subdomain or Empty (`""`) | Silently updates the Adapter flag for Certbot. |
+| **`cfgA`** | Adapter Name (`dns-<provider>`, or empty for webroot) | Web Domain | Subdomain or Empty (`""`) | Silently updates the Adapter flag for Certbot. |
 
 ### 8.1. Operational Detail: Certificate Issuance (`cfgC`)
+Certbot only runs when it is requested with `a="1"`, and an e-mail is required (saved with `cfgE` or sent in `z`); without it the API responds HTTP 400 `"E-mail obligatorio para crear el certificado"` *(lit. "E-mail required to create the certificate")*. If the site already has a certificate less than 75 days old, the API responds `"Certificado SSL activo"` without running Certbot. With `a="0"` and no certificate on disk, nothing is deleted and the API responds HTTP 400 `"Sin certificado"` *(lit. "No certificate")*.
+
 Certificate issuance or renewal does not block the server. When `a="1"` is sent, the API delegates the work to a separate Goroutine, which handles:
-1. Running the Certbot binary in webroot mode or via the specified adapter.
-2. Reading the temporary `archive` folder and locating the most recent files (`fullchain*.pem` and `privkey*.pem`) that are less than 3 days old.
+1. Running the Certbot binary in webroot mode or via the specified adapter, with its working folder in `turbo.certificates/<site>`.
+2. Reading the temporary `archive` folder and locating the most recent files (`fullchain*.pem` and `privkey*.pem`) that are less than 2.5 days (216,000 seconds) old.
 3. Physically moving and renaming these files to the site's root path in Turbo.
+
+**Automatic Renewal:** At startup and every 24 hours, Turbo renews the certificates it issued (sites with an e-mail and a folder in `turbo.certificates`) that expire in less than 30 days, and loads them without a restart. Certificates placed by hand are not renewed.
 
 **HTTP Polling Flow for the Frontend:**
 Since the operation is asynchronous, the frontend must make continuous requests (polling) to the `cfgC` endpoint, evaluating the JSON response:
@@ -294,8 +324,10 @@ Since the operation is asynchronous, the frontend must make continuous requests 
 ### 8.2. Operational Detail: Hot SSL Activation (`cfgS`)
 Turbo does not require restarts to apply certificates. When the activation command (`a="1"`) is received:
 1. Go reads the `fullchain.pem` and `privkey.pem` files directly from disk and immediately injects them into the server's shared RAM memory.
-2. If port `443` was closed (because the server started without certificates), **a new socket Listener is automatically started**.
-3. From this point on, Turbo forces a `301 Moved Permanently` redirect to `https://` for all HTTP traffic entering that domain/subdomain.
+2. If port `443` (or the address in `TURBO_HTTPS_ADDR`) was closed (because the server started without certificates), **a new socket Listener is automatically started**.
+3. From this point on, Turbo forces a `301 Moved Permanently` redirect to `https://`, on the same host, for the HTTP traffic entering that domain/subdomain when a certificate covers the requested host. An alias without a certificate that covers its name keeps being served over HTTP.
+
+During the TLS handshake, each name receives the certificate that covers it (exactly or with a wildcard). Names that no certificate covers, and connections without SNI (access by IP), are rejected.
 
 *Note: Disabling HTTPS (`a="0"`) purges the certificate from RAM memory (preventing future TLS connections for that host), but it **does not delete** the `.pem` files from disk, nor does it close port 443 at the network level.*
 
@@ -303,7 +335,7 @@ Turbo does not require restarts to apply certificates. When the activation comma
 
 ## 9. Physical File Management API (`hardUpload`)
 
-Used to bulk-replace all public files associated with a subdomain/domain. The server will destructively delete the existing content in the content folder (`@`) and dump the new data.
+Used to bulk-replace all public files associated with a subdomain/domain. The server will destructively delete all the existing content in the content folder (`@`), subfolders included, and dump the new data.
 
 * **Endpoint:** `POST /admin:inside:hardUpload`
 * **Body Format:** `multipart/form-data`
@@ -311,10 +343,12 @@ Used to bulk-replace all public files associated with a subdomain/domain. The se
   * `s`: Primary domain (e.g.: `ejemplo.com`).
   * `d`: Subdomain (empty `""` for the root domain).
   * `f`: Array of attached files (`File[]`).
+
+  `s` and `d` are accepted both in the URL and in the multipart body.
 * **Nested Directory Handling:**
-  The backend parses the `filename` parameter within the `Content-Disposition` HTTP header of each multipart block. If the file name contains relative paths (e.g.: `assets/img/logo.png`), Turbo will extract the path and safely create the folder structure, denying any Directory Traversal (`..`) attempts.
+  The backend parses the `filename` parameter within the `Content-Disposition` HTTP header of each multipart block. The first segment of each path (the folder chosen in the browser) is discarded, and `\` counts as a separator. If the rest of the name contains relative paths (e.g.: `site/assets/img/logo.png` → `assets/img/logo.png`), Turbo will create the folder structure. Names that would leave `@` (with `..`, absolute or with `:`) are discarded.
 * **Successful Response (HTTP 200 OK):**
-  Returns the string `"Datos volcados"` *(lit. "Data dumped")*.
+  Returns the string `"Datos volcados"` *(lit. "Data dumped")*. If any file was discarded, the response lists them: `"Datos volcados. Descartados: <name>, <name>"` *(lit. "Data dumped. Discarded: ...")*.
 * **Specific Error Handling:**
   * If the upload size exceeds the global `MBB` (Max Body Bytes) limit, the API cuts off the read and returns HTTP 400 with the message `"Longitud máxima de contenidos excedida"` *(lit. "Maximum content length exceeded")*.
 
@@ -326,9 +360,10 @@ Used to bulk-replace all public files associated with a subdomain/domain. The se
 |---|---|---|
 | **`200 OK`** | Operation Processed | The command was executed in memory and/or on disk. Returns a plain-text confirmation (e.g.: `"Subdominio agregado"` *(lit. "Subdomain added")*). |
 | **`400 Bad Request`** | Validation / Logic Failure | Null parameters, invalid format, nonexistent resource, incorrect passwords, or exceeded limit restrictions. The Body contains the literal error string that should be shown to the user. |
-| **`403 Forbidden`** | Access Blocked | Initial authentication fails, or default credentials are incorrect. Empty Body. |
-| **`404 Not Found`** | Incorrect URL | A URI (`RequestURI`) was requested within the `/admin:` prefix that does not correspond to any listed endpoint. |
-| **`429 Too Many Requests`** | *Rate Limiter* Triggered | The connection originated while exceeding the interval limits stipulated by the server's control settings (CIL/CIS/CII). The Request is interrupted, and the IP is logged in RAM. |
+| **`403 Forbidden`** | Access Blocked | Login with incorrect credentials (empty Body), or a `POST` authenticated with the session cookie that does not come from the same origin (§1.2). |
+| **`404 Not Found`** | Incorrect URL | A URI (`RequestURI`) was requested within the `/admin:` prefix that does not correspond to any listed endpoint, or the panel does not answer on that host or network (`PA`). |
+| **`429 Too Many Requests`** | *Rate Limiter* Triggered | The client's IP exceeded the limits stipulated by the server's control settings (CIL/CIS/CII), per IP or globally, or the IP is denied (§7.1). Each request counts once. The response carries `Retry-After` with the seconds to wait, and new connections from a blocked IP are closed. |
+| **`500 Internal Server Error`** | Internal Failure | An unexpected error while processing the action. |
 
 ---
 
@@ -350,7 +385,7 @@ Turbo uses a dual licensing model.
 
 * **Third-Party Components:**
 
-    The `customNetHttp` package contains a modified version of the Go standard library `net/http` (based on Go v1.19/1.18), which is distributed under the **BSD 3-Clause License**. Please refer to the `customNetHttp/LICENSE`, `customNetHttp/PATENTS` and `customNetHttp/NOTICE` files within that directory for full details and attribution.
+    The `customNetHttp` package contains a modified version of the Go standard library `net/http` (based on Go 1.26.x; the exact version is in `customNetHttp/UPSTREAM` and the changes in `customNetHttp/PATCHES.md`), which is distributed under the **BSD 3-Clause License**. Please refer to the `customNetHttp/LICENCE`, `customNetHttp/PATENTS` and `customNetHttp/NOTICE` files within that directory for full details and attribution.
 
 ---
 

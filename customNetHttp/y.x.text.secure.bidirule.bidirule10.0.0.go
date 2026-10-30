@@ -1,3 +1,5 @@
+// Origen: go1.26.10, src/vendor/golang.org/x/text/secure/bidirule/bidirule10.0.0.go. Regenerado con customNetHttp/regenerar; parches en customNetHttp/PATCHES.md.
+
 // Copyright 2016 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
@@ -6,6 +8,6 @@
 
 package customNetHttp
 
-func (t *Transformer) isFinal() bool {
+func (t *bidirule_Transformer) isFinal() bool {
 	return t.state == ruleLTRFinal || t.state == ruleRTLFinal || t.state == ruleInitial
 }

@@ -19,7 +19,7 @@ A cross-platform, high-performance HTTP web server with a real-time, visual mana
 - **Security:** Integrated SSL certificate management and concurrency safety. See [Dependencies](#dependencies).
 - **Traffic Control:** Fine-grained request rate and size limiting.
 - **Deep Customization:** URI rewrites, request preprocessing, headers/MIMEs, and indexes.
-- **HTTP/2 Rapid Reset Mitigation:** Full patch and protection against the [vulnerability](https://blog.cloudflare.com/technical-breakdown-http2-rapid-reset-ddos-attack) (CVE-2023-44487).
+- **HTTP/2 Rapid Reset Mitigation:** Go's protection against the [attack](https://blog.cloudflare.com/technical-breakdown-http2-rapid-reset-ddos-attack) (CVE-2023-44487) plus Turbo's own limit of 50 `RST_STREAM` frames per second and connection.
 
 ---
 
@@ -29,28 +29,30 @@ A cross-platform, high-performance HTTP web server with a real-time, visual mana
 
 **API documentation:** [API_SPECIFICATION.md](./API_SPECIFICATION.md)
 
+**Changes and upgrading:** [CHANGELOG.md](./CHANGELOG.md) ([español](./CHANGELOG.es.md)). Upgrading from v2.3.rc3 changes the `turbo.config` format (the original is kept as `turbo.config.v1.bak`) and introduces breaking changes: read "Upgrading from v2.3.rc3" first.
+
 ---
 
 ## Requirements
 
 ### Operating Systems
-- **Windows:** Windows 11, 10, 8*, 7*.
-- **Linux:** Ubuntu, Alpine, Amazon Linux, and other mainstream distributions.
-- **macOS:** Compatible.
+- **Windows:** Windows 10 or later.
+- **Linux:** Ubuntu and other mainstream distributions. The release binaries are static (`CGO_ENABLED=0`) and need no system libraries; a binary built with cgo needs glibc 2.34 or later.
+- **macOS:** Builds; not tested.
 
 ### System Architecture
 - **x86-64** (Intel/AMD 64-bit processors).
 - **ARM64** (ARMv8 and later, including AWS Graviton processors).
 
 ### Dependencies
-- **Go 1.18+** (for building from source).
-- No external runtime dependencies — Turbo is distributed as a single, self-contained binary, except for **[Certbot](https://certbot.eff.org/)** for SSL certificate issuance. See [Commercial Version](#commercial-version).
+- **Go 1.26+** (for building from source; releases use the latest Go 1.26 patch).
+- No external runtime dependencies — Turbo is distributed as a single, self-contained static binary, except for **[Certbot](https://certbot.eff.org/)** for SSL certificate issuance. See [Commercial Version](#commercial-version).
 
 ### Minimum Recommended Requirements
 - **CPU:** 1 vCPU (1.5 GHz clock speed or higher).
 - **RAM:** ~128 MB for runtime or 1 GB+ to build from source.
 - **Storage:** ~100 MB for binary + websites + configuration files.
-- **Network:** Standard HTTP/HTTPS ports (80, 443); requires elevated privileges on Linux/macOS.
+- **Network:** Standard HTTP/HTTPS ports (80, 443), which need `CAP_NET_BIND_SERVICE` (or root) on Linux; other addresses can be set with `TURBO_HTTP_ADDR` and `TURBO_HTTPS_ADDR`.
 
 ---
 
@@ -60,39 +62,41 @@ A cross-platform, high-performance HTTP web server with a real-time, visual mana
 ```bash
 git clone https://github.com/okzgn/turbo-go.git
 cd turbo-go
-go build -ldflags "-s -w" -o turbo .
-sudo ./turbo
+CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o turbo .
 
-# Or:
-
-# Alternative without sudo (Linux)
+# Let a standard user open ports 80 and 443 (Linux), then run it without sudo
 sudo setcap cap_net_bind_service=+ep ./turbo
-
-# Run the binary as a standard user
 ./turbo
 ```
+
+### As a systemd Service (Linux)
+[`deploy/turbo.service`](./deploy/turbo.service) is a reference unit: Turbo runs as an unprivileged `turbo` user with `CAP_NET_BIND_SERVICE`, is restarted if it fails, and its messages go to the journal (`journalctl -u turbo`). The comments in the file explain how to install it.
 
 ### Supported Platforms
 ```bash
 # Linux x86-64
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o turbo-linux-amd64 .
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o turbo-linux-amd64 .
 
 # Linux ARM64 (AWS Graviton, Raspberry Pi, etc.)
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o turbo-linux-arm64 .
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o turbo-linux-arm64 .
 
 # Windows
-GOOS=windows GOARCH=amd64 go build -o turbo.exe .
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -o turbo.exe .
 
 # macOS x86-64
-GOOS=darwin GOARCH=amd64 go build -o turbo-darwin-amd64 .
+CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -trimpath -o turbo-darwin-amd64 .
 
 # macOS ARM64 (Apple Silicon)
-GOOS=darwin GOARCH=arm64 go build -o turbo-darwin-arm64 .
+CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -o turbo-darwin-arm64 .
 ```
+
+Releases are built with [`release.sh`](./release.sh), which also checks that `customNetHttp` matches the Go version in use (see [customNetHttp/PATCHES.md](./customNetHttp/PATCHES.md)).
+
+Before a release, [`deploy/prueba-puertos-reales.sh`](./deploy/prueba-puertos-reales.sh) checks a build on Linux with the real ports 80 and 443: HTTP, HTTPS redirection, HTTP/1.1 and HTTP/2, TLS versions, SNI, size limits, log messages and the exit when port 80 is taken. It needs `sudo -n setcap` and free ports.
 
 ### Execution
 - **Windows:** Run `turbo.exe` as Administrator for ports 80/443.
-- **Linux:** Grant execution permissions with `chmod +x` and run it: `./turbo` (requires free ports 80 and 443).
+- **Linux:** Grant execution permissions with `chmod +x` and run it: `./turbo` (requires free ports 80 and 443, or the addresses in `TURBO_HTTP_ADDR` and `TURBO_HTTPS_ADDR`). If it cannot open the HTTP address, Turbo exits with an error.
 
 ---
 
@@ -113,22 +117,33 @@ Once Turbo is running, access the admin interface (GUI) at:
 **Notes:**
 
 - If you run `./turbo` directly or without a `turbo.config` file, the folder to be served must be registered through the GUI using the exact site name routed to your server, the exact IP address, or `localhost` if running locally.
-- The **GUI can be customized or fully replaced** by modifying the files inside the `turbo.dev` folder.
+- The **GUI can be customized or fully replaced**: copy the `turbo.dev` folder to the sites directory and modify its files. Each file there replaces the embedded one; files that are missing are served from the binary.
 - On Windows, use [`rsrc`](https://github.com/akavel/rsrc) (installed beforehand) to generate a `.syso` file from `turbo.windows.manifest` and `turbo.icon.png`, then link it with the executable to produce an `.exe` with a custom icon.
-- **Environment Variables:** You can override the default credentials and directory on startup by passing `TURBO_USER`, `TURBO_PASSWORD`, and `TURBO_DIR`. Alternatively, change them via the GUI and save the configuration.
+- **Sites directory:** by default, the working directory; `TURBO_DIR` sets another one. If it is changed from the GUI and the configuration is saved, the `turbo.config` of the starting directory keeps a pointer to the new one.
+- **Environment Variables:**
+  - `TURBO_USER`, `TURBO_PASSWORD`: panel credentials. They take priority over the configuration.
+  - `TURBO_DIR`: sites directory.
+  - `TURBO_HTTP_ADDR`, `TURBO_HTTPS_ADDR`: listening addresses (`host:port`, `:port` or just the port; by default `:80` and `:443`), for example to run Turbo behind a proxy.
+
+  Credentials can also be changed via the GUI: saving the configuration stores the username and a PBKDF2 hash of the password in `turbo.config`.
+- A request for a path ending in `/index.html` is redirected (301) to its folder (`./`), as Go's file server does.
 
 **Logs:**
-- To log rate-limiter denials, create an accessible file named `turbo.denials`; to log every access to every file or route on the server, create one named `turbo.visits`. Do not create these files if logging is not needed, as they can grow very large.
-- Any other log will be shown at `stdout` or `console`.
+- To log rate-limiter denials, create an accessible file named `turbo.denials` in the sites directory; to log every access to every file or route on the server, create one named `turbo.visits`. Turbo checks for these files every 30 seconds, so logging starts (or stops, after deleting the file) within that time. Do not create these files if logging is not needed, as they can grow very large.
+- **Privacy:** for every request, `turbo.visits` records the client IP, the time, the method, the host and the full URL with its query string, including the requests to the GUI. It never records request bodies.
+  - The GUI sends its parameters, including the current password (`b`) of the general settings, in the request body, so they do not appear in the URL or in `turbo.visits`.
+  - An API client that put the password (or any other sensitive value) in the URL would leave it in `turbo.visits`: send the parameters in the body (`application/x-www-form-urlencoded`), as the GUI does.
+  - Treat `turbo.visits` as sensitive: restrict its permissions, do not share it, rotate or delete it, and do not commit it to version control (both log files are in `.gitignore`). Nothing is logged if the file does not exist.
+- Any other message (startup, configuration, sites, certificates, errors) goes to `stdout` with a level and a timestamp (`time=… level=INFO msg=…`); under systemd, to the journal.
 
 ---
 
 ## Known Limitations
 - Open-source GUI and API only available in Spanish language.
-- Linux distributions like Alpine or Amazon Linux have not been tested. macOS has not been tested.
+- Linux distributions like Alpine or Amazon Linux have not been tested with this version. macOS has not been tested.
   > **Ubuntu 24.04 LTS has been tested and is supported. Previous versions were successfully and extensively tested on Alpine and Amazon Linux.**
 - Admin interface (GUI) not extensively tested on older OS versions or old browsers.
-- Windows 8*-7* support requires Go 1.20 or earlier for compilation.
+- Behind a proxy, Turbo sees the proxy's address as the client IP (rate limits, denied IPs and logs).
 
 ---
 
@@ -194,7 +209,7 @@ Turbo uses a dual licensing model.
 
 * **Third-Party Components:**
 
-    The `customNetHttp` package contains a modified version of the Go standard library `net/http` (based on Go v1.19/1.18), which is distributed under the **BSD 3-Clause License**. Please refer to the `customNetHttp/LICENSE`, `customNetHttp/PATENTS` and `customNetHttp/NOTICE` files within that directory for full details and attribution.
+    The `customNetHttp` package contains the Go standard library `net/http` of Go 1.26.x (the exact version is in `customNetHttp/UPSTREAM`) with Turbo's patches, described in [`customNetHttp/PATCHES.md`](./customNetHttp/PATCHES.md). It is distributed under the **BSD 3-Clause License**. Please refer to the `customNetHttp/LICENCE`, `customNetHttp/PATENTS` and `customNetHttp/NOTICE` files within that directory for full details and attribution.
 
 ---
 

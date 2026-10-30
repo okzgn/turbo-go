@@ -1,3 +1,5 @@
+// Origen: go1.26.10, src/vendor/golang.org/x/text/unicode/norm/normalize.go. Regenerado con customNetHttp/regenerar; parches en customNetHttp/PATCHES.md.
+
 // Copyright 2011 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
@@ -13,15 +15,15 @@ import (
 	"unicode/utf8"
 )
 
-// A NormalizeForm denotes a canonical representation of Unicode code points.
+// A Form denotes a canonical representation of Unicode code points.
 // The Unicode-defined normalization and equivalence forms are:
 //
-//	NFC   Unicode Normalization NormalizeForm C
-//	NFD   Unicode Normalization NormalizeForm D
-//	NFKC  Unicode Normalization NormalizeForm KC
-//	NFKD  Unicode Normalization NormalizeForm KD
+//	NFC   Unicode Normalization Form C
+//	NFD   Unicode Normalization Form D
+//	NFKC  Unicode Normalization Form KC
+//	NFKD  Unicode Normalization Form KD
 //
-// For a NormalizeForm f, this documentation uses the notation f(x) to mean
+// For a Form f, this documentation uses the notation f(x) to mean
 // the bytes or string x converted to the given form.
 // A position n in x is called a boundary if conversion to the form can
 // proceed independently on both sides:
@@ -30,17 +32,17 @@ import (
 //
 // References: https://unicode.org/reports/tr15/ and
 // https://unicode.org/notes/tn5/.
-type NormalizeForm int
+type norm_Form int
 
 const (
-	NFC NormalizeForm = iota
+	NFC norm_Form = iota
 	NFD
 	NFKC
 	NFKD
 )
 
 // Bytes returns f(b). May return b if f(b) = b.
-func (f NormalizeForm) Bytes(b []byte) []byte {
+func (f norm_Form) Bytes(b []byte) []byte {
 	src := inputBytes(b)
 	ft := formTable[f]
 	n, ok := ft.quickSpan(src, 0, len(b), true)
@@ -54,7 +56,7 @@ func (f NormalizeForm) Bytes(b []byte) []byte {
 }
 
 // String returns f(s).
-func (f NormalizeForm) String(s string) string {
+func (f norm_Form) String(s string) string {
 	src := inputString(s)
 	ft := formTable[f]
 	n, ok := ft.quickSpan(src, 0, len(s), true)
@@ -68,7 +70,7 @@ func (f NormalizeForm) String(s string) string {
 }
 
 // IsNormal returns true if b == f(b).
-func (f NormalizeForm) IsNormal(b []byte) bool {
+func (f norm_Form) IsNormal(b []byte) bool {
 	src := inputBytes(b)
 	ft := formTable[f]
 	bp, ok := ft.quickSpan(src, 0, len(b), true)
@@ -107,7 +109,7 @@ func cmpNormalBytes(rb *reorderBuffer) bool {
 }
 
 // IsNormalString returns true if s == f(s).
-func (f NormalizeForm) IsNormalString(s string) bool {
+func (f norm_Form) IsNormalString(s string) bool {
 	src := inputString(s)
 	ft := formTable[f]
 	bp, ok := ft.quickSpan(src, 0, len(s), true)
@@ -188,11 +190,11 @@ func appendQuick(rb *reorderBuffer, i int) int {
 
 // Append returns f(append(out, b...)).
 // The buffer out must be nil, empty, or equal to f(out).
-func (f NormalizeForm) Append(out []byte, src ...byte) []byte {
+func (f norm_Form) Append(out []byte, src ...byte) []byte {
 	return f.doAppend(out, inputBytes(src), len(src))
 }
 
-func (f NormalizeForm) doAppend(out []byte, src input, n int) []byte {
+func (f norm_Form) doAppend(out []byte, src input, n int) []byte {
 	if n == 0 {
 		return out
 	}
@@ -208,10 +210,10 @@ func (f NormalizeForm) doAppend(out []byte, src input, n int) []byte {
 		return doAppendInner(&rb, p)
 	}
 	rb := reorderBuffer{f: *ft, src: src, nsrc: n}
-	return doAppend(&rb, out, 0)
+	return norm_doAppend(&rb, out, 0)
 }
 
-func doAppend(rb *reorderBuffer, out []byte, p int) []byte {
+func norm_doAppend(rb *reorderBuffer, out []byte, p int) []byte {
 	rb.setFlusher(out, appendFlush)
 	src, n := rb.src, rb.nsrc
 	doMerge := len(out) > 0
@@ -223,7 +225,7 @@ func doAppend(rb *reorderBuffer, out []byte, p int) []byte {
 	}
 	fd := &rb.f
 	if doMerge {
-		var info Properties
+		var info norm_Properties
 		if p < n {
 			info = fd.info(src, p)
 			if !info.BoundaryBefore() || info.nLeadingNonStarters() > 0 {
@@ -256,20 +258,20 @@ func doAppendInner(rb *reorderBuffer, p int) []byte {
 
 // AppendString returns f(append(out, []byte(s))).
 // The buffer out must be nil, empty, or equal to f(out).
-func (f NormalizeForm) AppendString(out []byte, src string) []byte {
+func (f norm_Form) AppendString(out []byte, src string) []byte {
 	return f.doAppend(out, inputString(src), len(src))
 }
 
 // QuickSpan returns a boundary n such that b[0:n] == f(b[0:n]).
 // It is not guaranteed to return the largest such n.
-func (f NormalizeForm) QuickSpan(b []byte) int {
+func (f norm_Form) QuickSpan(b []byte) int {
 	n, _ := formTable[f].quickSpan(inputBytes(b), 0, len(b), true)
 	return n
 }
 
-// Span implements SpanningTransformer. It returns a boundary n such
+// Span implements transform.SpanningTransformer. It returns a boundary n such
 // that b[0:n] == f(b[0:n]). It is not guaranteed to return the largest such n.
-func (f NormalizeForm) Span(b []byte, atEOF bool) (n int, err error) {
+func (f norm_Form) Span(b []byte, atEOF bool) (n int, err error) {
 	n, ok := formTable[f].quickSpan(inputBytes(b), 0, len(b), atEOF)
 	if n < len(b) {
 		if !ok {
@@ -283,7 +285,7 @@ func (f NormalizeForm) Span(b []byte, atEOF bool) (n int, err error) {
 
 // SpanString returns a boundary n such that s[0:n] == f(s[0:n]).
 // It is not guaranteed to return the largest such n.
-func (f NormalizeForm) SpanString(s string, atEOF bool) (n int, err error) {
+func (f norm_Form) SpanString(s string, atEOF bool) (n int, err error) {
 	n, ok := formTable[f].quickSpan(inputString(s), 0, len(s), atEOF)
 	if n < len(s) {
 		if !ok {
@@ -354,18 +356,18 @@ func (f *formInfo) quickSpan(src input, i, end int, atEOF bool) (n int, ok bool)
 
 // QuickSpanString returns a boundary n such that s[0:n] == f(s[0:n]).
 // It is not guaranteed to return the largest such n.
-func (f NormalizeForm) QuickSpanString(s string) int {
+func (f norm_Form) QuickSpanString(s string) int {
 	n, _ := formTable[f].quickSpan(inputString(s), 0, len(s), true)
 	return n
 }
 
 // FirstBoundary returns the position i of the first boundary in b
 // or -1 if b contains no boundary.
-func (f NormalizeForm) FirstBoundary(b []byte) int {
+func (f norm_Form) FirstBoundary(b []byte) int {
 	return f.firstBoundary(inputBytes(b), len(b))
 }
 
-func (f NormalizeForm) firstBoundary(src input, nsrc int) int {
+func (f norm_Form) firstBoundary(src input, nsrc int) int {
 	i := src.skipContinuationBytes(0)
 	if i >= nsrc {
 		return -1
@@ -395,25 +397,25 @@ func (f NormalizeForm) firstBoundary(src input, nsrc int) int {
 
 // FirstBoundaryInString returns the position i of the first boundary in s
 // or -1 if s contains no boundary.
-func (f NormalizeForm) FirstBoundaryInString(s string) int {
+func (f norm_Form) FirstBoundaryInString(s string) int {
 	return f.firstBoundary(inputString(s), len(s))
 }
 
 // NextBoundary reports the index of the boundary between the first and next
 // segment in b or -1 if atEOF is false and there are not enough bytes to
 // determine this boundary.
-func (f NormalizeForm) NextBoundary(b []byte, atEOF bool) int {
+func (f norm_Form) NextBoundary(b []byte, atEOF bool) int {
 	return f.nextBoundary(inputBytes(b), len(b), atEOF)
 }
 
 // NextBoundaryInString reports the index of the boundary between the first and
 // next segment in b or -1 if atEOF is false and there are not enough bytes to
 // determine this boundary.
-func (f NormalizeForm) NextBoundaryInString(s string, atEOF bool) int {
+func (f norm_Form) NextBoundaryInString(s string, atEOF bool) int {
 	return f.nextBoundary(inputString(s), len(s), atEOF)
 }
 
-func (f NormalizeForm) nextBoundary(src input, nsrc int, atEOF bool) int {
+func (f norm_Form) nextBoundary(src input, nsrc int, atEOF bool) int {
 	if nsrc == 0 {
 		if atEOF {
 			return 0
@@ -453,7 +455,7 @@ func (f NormalizeForm) nextBoundary(src input, nsrc int, atEOF bool) int {
 
 // LastBoundary returns the position i of the last boundary in b
 // or -1 if b contains no boundary.
-func (f NormalizeForm) LastBoundary(b []byte) int {
+func (f norm_Form) LastBoundary(b []byte) int {
 	return lastBoundary(formTable[f], b)
 }
 
@@ -551,12 +553,12 @@ end:
 
 // lastRuneStart returns the runeInfo and position of the last
 // rune in buf or the zero runeInfo and -1 if no rune was found.
-func lastRuneStart(fd *formInfo, buf []byte) (Properties, int) {
+func lastRuneStart(fd *formInfo, buf []byte) (norm_Properties, int) {
 	p := len(buf) - 1
 	for ; p >= 0 && !utf8.RuneStart(buf[p]); p-- {
 	}
 	if p < 0 {
-		return Properties{}, -1
+		return norm_Properties{}, -1
 	}
 	return fd.info(inputBytes(buf), p), p
 }
@@ -573,7 +575,7 @@ func decomposeToLastBoundary(rb *reorderBuffer) {
 	if info.BoundaryAfter() {
 		return
 	}
-	var add [maxNonStarters + 1]Properties // stores runeInfo in reverse order
+	var add [maxNonStarters + 1]norm_Properties // stores runeInfo in reverse order
 	padd := 0
 	ss := streamSafe(0)
 	p := len(rb.out)

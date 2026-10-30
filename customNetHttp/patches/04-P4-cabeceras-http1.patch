@@ -1,0 +1,23 @@
+diff --git a/1.net.http.server.go b/1.net.http.server.go
+index ce2daed..6b555e2 100644
+--- a/1.net.http.server.go
++++ b/1.net.http.server.go
+@@ -894,14 +894,13 @@ func putBufioWriter(bw *bufio.Writer) {
+ const DefaultMaxHeaderBytes = 1 << 20 // 1 MB
+ 
+ func (s *Server) maxHeaderBytes() int {
+-	if s.MaxHeaderBytes > 0 {
+-		return s.MaxHeaderBytes
+-	}
+-	return DefaultMaxHeaderBytes
++	// turbo:P4: el límite es TurboMaxHeaderBytes (ajuste MHB), leído en cada petición;
++	// Server.MaxHeaderBytes no se usa.
++	return int(TurboMaxHeaderBytes.Load())
+ }
+ 
+ func (s *Server) initialReadLimitSize() int64 {
+-	return int64(s.maxHeaderBytes()) + 4096 // bufio slop
++	return int64(s.maxHeaderBytes()) // turbo:P4: exacto, sin los 4096 bytes de margen
+ }
+ 
+ // tlsHandshakeTimeout returns the time limit permitted for the TLS

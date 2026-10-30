@@ -1,3 +1,5 @@
+// Origen: go1.26.10, src/vendor/golang.org/x/text/unicode/norm/iter.go. Regenerado con customNetHttp/regenerar; parches en customNetHttp/PATCHES.md.
+
 // Copyright 2011 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
@@ -14,12 +16,12 @@ import (
 const MaxSegmentSize = maxByteBufferSize
 
 // An Iter iterates over a string or byte slice, while normalizing it
-// to a given NormalizeForm.
+// to a given Form.
 type Iter struct {
 	rb     reorderBuffer
 	buf    [maxByteBufferSize]byte
-	info   Properties // first character saved from previous iteration
-	next   iterFunc   // implementation of next depends on form
+	info   norm_Properties // first character saved from previous iteration
+	next   iterFunc        // implementation of next depends on form
 	asciiF iterFunc
 
 	p        int    // current position in input source
@@ -28,8 +30,8 @@ type Iter struct {
 
 type iterFunc func(*Iter) []byte
 
-// Init initializes i to iterate over src after normalizing it to NormalizeForm f.
-func (i *Iter) Init(f NormalizeForm, src []byte) {
+// Init initializes i to iterate over src after normalizing it to Form f.
+func (i *Iter) Init(f norm_Form, src []byte) {
 	i.p = 0
 	if len(src) == 0 {
 		i.setDone()
@@ -44,8 +46,8 @@ func (i *Iter) Init(f NormalizeForm, src []byte) {
 	i.rb.ss.first(i.info)
 }
 
-// InitString initializes i to iterate over src after normalizing it to NormalizeForm f.
-func (i *Iter) InitString(f NormalizeForm, src string) {
+// InitString initializes i to iterate over src after normalizing it to Form f.
+func (i *Iter) InitString(f norm_Form, src string) {
 	i.p = 0
 	if len(src) == 0 {
 		i.setDone()
@@ -267,7 +269,7 @@ func nextDecomposed(i *Iter) (next []byte) {
 			prevCC := i.info.tccc
 			if i.p += sz; i.p >= i.rb.nsrc {
 				i.setDone()
-				i.info = Properties{} // Force BoundaryBefore to succeed.
+				i.info = norm_Properties{} // Force BoundaryBefore to succeed.
 			} else {
 				i.info = i.rb.f.info(i.rb.src, i.p)
 			}

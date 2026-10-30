@@ -1,3 +1,5 @@
+// Origen: go1.26.10, src/mime/multipart/formdata.go. Regenerado con customNetHttp/regenerar; parches en customNetHttp/PATCHES.md.
+
 // Copyright 2011 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
@@ -7,12 +9,11 @@ package customNetHttp
 import (
 	"bytes"
 	"errors"
-
-	//"fmt"
 	"io"
 	"math"
 	"net/textproto"
 	"os"
+	"strconv"
 )
 
 // ErrMessageTooLarge is returned by ReadForm if the message form
@@ -27,37 +28,39 @@ var ErrMessageTooLarge = errors.New("multipart: message too large")
 // It stores up to maxMemory bytes + 10MB (reserved for non-file parts)
 // in memory. File parts which can't be stored in memory will be stored on
 // disk in temporary files.
-// It returns ErrMessageTooLarge if all non-file parts can't be stored in
+// It returns [ErrMessageTooLarge] if all non-file parts can't be stored in
 // memory.
-func (r *Reader) ReadForm(maxMemory int64) (*Form, error) {
+func (r *multipart_Reader) ReadForm(maxMemory int64) (*multipart_Form, error) {
 	return r.readForm(maxMemory)
 }
 
 var (
-	multipartFiles    = InternalGodebugNew("multipartfiles")
-	multipartMaxParts = InternalGodebugNew("multipartmaxparts")
+	multipartfiles    = godebug_New("#multipartfiles") // TODO: document and remove #
+	multipartmaxparts = godebug_New("multipartmaxparts")
 )
 
-func (r *Reader) readForm(maxMemory int64) (_ *Form, err error) {
-	form := &Form{make(map[string][]string), make(map[string][]*FileHeader)}
-
-	//okzgn from ParseMultipartForm
-	// this is for big files or alternative way to handle files on uploads, saving into files
-	/*var (
-	file *os.File
-	fileOff int64 (okzgn was: addition for temp files based upload)
+func (r *multipart_Reader) readForm(maxMemory int64) (_ *multipart_Form, err error) {
+	form := &multipart_Form{make(map[string][]string), make(map[string][]*FileHeader)}
+	var (
+		file    *os.File
+		fileOff int64
 	)
 	numDiskFiles := 0
 	combineFiles := true
-	if multipartFiles.Value() == "distinct" {
+	if multipartfiles.Value() == "distinct" {
 		combineFiles = false
+		// multipartfiles.IncNonDefault() // TODO: uncomment after documenting
 	}
-	if s := multipartMaxParts.Value(); s != "" {
+	maxParts := TurboMaxFormParts // turbo:P10: máximo de partes de Turbo (Go: 1000)
+	if s := multipartmaxparts.Value(); s != "" {
 		if v, err := strconv.Atoi(s); err == nil && v >= 0 {
 			maxParts = v
+			multipartmaxparts.IncNonDefault()
 		}
-	}*/
-	/*defer func() {
+	}
+	maxHeaders := maxMIMEHeaders()
+
+	defer func() {
 		if file != nil {
 			if cerr := file.Close(); err == nil {
 				err = cerr
@@ -73,11 +76,10 @@ func (r *Reader) readForm(maxMemory int64) (_ *Form, err error) {
 		if err != nil {
 			form.RemoveAll()
 			if file != nil {
-				fmt.Println("okzgn remove", file.Name())
 				os.Remove(file.Name())
 			}
 		}
-	}()*/
+	}()
 
 	// maxFileMemoryBytes is the maximum bytes of file data we will store in memory.
 	// Data past this limit is written to disk.
@@ -85,29 +87,27 @@ func (r *Reader) readForm(maxMemory int64) (_ *Form, err error) {
 	// since metadata is always stored in memory, not disk.
 	//
 	// maxMemoryBytes is the maximum bytes we will store in memory, including file content,
-	// non-file part values, metdata, and map entry overhead.
+	// non-file part values, metadata, and map entry overhead.
 	//
 	// We reserve an additional 10 MB in maxMemoryBytes for non-file data.
 	//
 	// The relationship between these parameters, as well as the overly-large and
 	// unconfigurable 10 MB added on to maxMemory, is unfortunate but difficult to change
 	// within the constraints of the API as documented.
-
-	maxParts := YX
-	maxHeaders := YY
-	maxMemoryBytes := maxMemory //okzgn was: + int64(10<<20) (10Mb added)
-
-	if maxMemoryBytes <= 0 {
-		if maxMemory < 0 {
-			maxMemoryBytes = 0
-		} else {
-			maxMemoryBytes = math.MaxInt64
-		}
+	if maxMemory < 0 {
+		maxMemory = 0
 	}
-
+	maxFileMemoryBytes := maxMemory
+	if maxFileMemoryBytes == math.MaxInt64 {
+		maxFileMemoryBytes--
+	}
+	maxMemoryBytes := maxMemory // turbo:P10: todo el formulario cabe en maxMemory (Go: 10 MB más)
+	if maxMemoryBytes <= 0 {
+		maxMemoryBytes = math.MaxInt64
+	}
+	var copyBuf []byte
 	for {
 		p, err := r.nextPart(false, maxMemoryBytes, maxHeaders)
-
 		if err == io.EOF {
 			break
 		}
@@ -168,13 +168,14 @@ func (r *Reader) readForm(maxMemory int64) (_ *Form, err error) {
 			Filename: filename,
 			Header:   p.Header,
 		}
-		n, err := io.CopyN(&b, p, maxMemoryBytes+1)
+		n, err := io.CopyN(&b, p, maxFileMemoryBytes+1)
 		if err != nil && err != io.EOF {
 			return nil, err
 		}
-
-		/*if n > maxMemoryBytes {
-			var copyBuf []byte
+		if n > maxMemoryBytes { // turbo:P10: sin archivos temporales; lo que no cabe en memoria se rechaza
+			return nil, ErrMessageTooLarge
+		}
+		if n > maxFileMemoryBytes {
 			if file == nil {
 				file, err = os.CreateTemp(r.tempDir, "multipart-")
 				if err != nil {
@@ -204,16 +205,13 @@ func (r *Reader) readForm(maxMemory int64) (_ *Form, err error) {
 				}
 				file = nil
 			}
-		} else {*/
-		fh.content = b.Bytes()
-		fh.Size = int64(len(fh.content))
-		maxMemoryBytes -= n
-		//}
-		form.File[name] = append(form.File[name], fh)
-
-		if maxMemoryBytes < 0 {
-			return nil, ErrMessageTooLarge
+		} else {
+			fh.content = b.Bytes()
+			fh.Size = int64(len(fh.content))
+			maxFileMemoryBytes -= n
+			maxMemoryBytes -= n
 		}
+		form.File[name] = append(form.File[name], fh)
 	}
 
 	return form, nil
@@ -233,16 +231,16 @@ func mimeHeaderSize(h textproto.MIMEHeader) (size int64) {
 
 // Form is a parsed multipart form.
 // Its File parts are stored either in memory or on disk,
-// and are accessible via the *FileHeader's Open method.
+// and are accessible via the [*FileHeader]'s Open method.
 // Its Value parts are stored as strings.
 // Both are keyed by field name.
-type Form struct {
+type multipart_Form struct {
 	Value map[string][]string
 	File  map[string][]*FileHeader
 }
 
-// RemoveAll removes any temporary files associated with a Form.
-func (f *Form) RemoveAll() error {
+// RemoveAll removes any temporary files associated with a [Form].
+func (f *multipart_Form) RemoveAll() error {
 	var err error
 	for _, fhs := range f.File {
 		for _, fh := range fhs {
@@ -269,8 +267,8 @@ type FileHeader struct {
 	tmpshared bool
 }
 
-// Open opens and returns the FileHeader's associated File.
-func (fh *FileHeader) Open() (MimeFile, error) {
+// Open opens and returns the [FileHeader]'s associated File.
+func (fh *FileHeader) Open() (multipart_File, error) {
 	if b := fh.content; b != nil {
 		r := io.NewSectionReader(bytes.NewReader(b), 0, int64(len(b)))
 		return sectionReadCloser{r, nil}, nil
@@ -289,7 +287,7 @@ func (fh *FileHeader) Open() (MimeFile, error) {
 // File is an interface to access the file part of a multipart message.
 // Its contents may be either stored in memory or on disk.
 // If stored on disk, the File's underlying concrete type will be an *os.File.
-type MimeFile interface {
+type multipart_File interface {
 	io.Reader
 	io.ReaderAt
 	io.Seeker

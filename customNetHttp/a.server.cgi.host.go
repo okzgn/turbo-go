@@ -1,3 +1,5 @@
+// Origen: go1.26.10, src/net/http/cgi/host.go. Regenerado con customNetHttp/regenerar; parches en customNetHttp/PATCHES.md.
+
 // Copyright 2011 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
@@ -16,6 +18,7 @@ package customNetHttp
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -28,6 +31,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 )
 
 var trailingPort = regexp.MustCompile(`:([0-9]+)$`)
@@ -36,7 +40,7 @@ var osDefaultInheritEnv = func() []string {
 	switch runtime.GOOS {
 	case "darwin", "ios":
 		return []string{"DYLD_LIBRARY_PATH"}
-	case "linux", "freebsd", "netbsd", "openbsd":
+	case "android", "linux", "freebsd", "netbsd", "openbsd":
 		return []string{"LD_LIBRARY_PATH"}
 	case "hpux":
 		return []string{"LD_LIBRARY_PATH", "SHLIB_PATH"}
@@ -67,11 +71,15 @@ type CgiHandler struct {
 	Args       []string    // optional arguments to pass to child process
 	Stderr     io.Writer   // optional stderr for the child process; nil means os.Stderr
 
+	// Timeout ends the CGI process when it runs longer; zero means no limit.
+	// turbo:P12
+	Timeout time.Duration
+
 	// PathLocationHandler specifies the root http Handler that
 	// should handle internal redirects when the CGI process
 	// returns a Location header value starting with a "/", as
 	// specified in RFC 3875 § 6.3.2. This will likely be
-	// DefaultServeMux.
+	// http.DefaultServeMux.
 	//
 	// If nil, a CGI response with a local URI path is instead sent
 	// back to the client and not redirected internally.
@@ -112,30 +120,25 @@ func removeLeadingDuplicates(env []string) (ret []string) {
 }
 
 func (h *CgiHandler) ServeHTTP(rw ResponseWriter, req *Request) {
-	root := h.Root
-	if root == "" {
-		root = "/"
-	}
-
 	if len(req.TransferEncoding) > 0 && req.TransferEncoding[0] == "chunked" {
 		rw.WriteHeader(StatusBadRequest)
 		rw.Write([]byte("Chunked request bodies are not supported by CGI."))
 		return
 	}
 
-	pathInfo := req.URL.Path
-	if root != "/" && strings.HasPrefix(pathInfo, root) {
-		pathInfo = pathInfo[len(root):]
-	}
+	root := strings.TrimRight(h.Root, "/")
+	pathInfo := strings.TrimPrefix(req.URL.Path, root)
 
 	port := "80"
+	if req.TLS != nil {
+		port = "443"
+	}
 	if matches := trailingPort.FindStringSubmatch(req.Host); len(matches) != 0 {
 		port = matches[1]
 	}
 
 	env := []string{
 		"SERVER_SOFTWARE=go",
-		"SERVER_NAME=" + req.Host,
 		"SERVER_PROTOCOL=HTTP/1.1",
 		"HTTP_HOST=" + req.Host,
 		"GATEWAY_INTERFACE=CGI/1.1",
@@ -153,6 +156,12 @@ func (h *CgiHandler) ServeHTTP(rw ResponseWriter, req *Request) {
 	} else {
 		// could not parse ip:port, let's use whole RemoteAddr and leave REMOTE_PORT undefined
 		env = append(env, "REMOTE_ADDR="+req.RemoteAddr, "REMOTE_HOST="+req.RemoteAddr)
+	}
+
+	if hostDomain, _, err := net.SplitHostPort(req.Host); err == nil {
+		env = append(env, "SERVER_NAME="+hostDomain)
+	} else {
+		env = append(env, "SERVER_NAME="+req.Host)
 	}
 
 	if req.TLS != nil {
@@ -215,18 +224,24 @@ func (h *CgiHandler) ServeHTTP(rw ResponseWriter, req *Request) {
 	}
 
 	internalError := func(err error) {
-		/*rw.WriteHeader(StatusInternalServerError)
-		h.printf("CGI error: %v", err)*/
-		Error(rw, "CGI error: "+err.Error(), 500)
+		Error(rw, "", StatusInternalServerError) // turbo:P12: plantilla de Turbo; el detalle, solo en el log
+		h.printf("CGI error: %v", err)
 	}
 
-	cmd := &exec.Cmd{
-		Path:   path,
-		Args:   append([]string{h.Path}, h.Args...),
-		Dir:    cwd,
-		Env:    env,
-		Stderr: h.stderr(),
+	// turbo:P12: el proceso termina con la petición o al pasar Timeout.
+	ctx := req.Context()
+	if h.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, h.Timeout)
+		defer cancel()
 	}
+	cmd := exec.CommandContext(ctx, path)
+	cmd.Path, cmd.Err = path, nil // como exec.Cmd{Path: path}: sin buscar en PATH
+	cmd.Args = append([]string{h.Path}, h.Args...)
+	cmd.Dir = cwd
+	cmd.Env = env
+	cmd.Stderr = h.stderr()
+	cmd.WaitDelay = time.Second // no esperar a hijos que mantengan abiertas las tuberías
 	if req.ContentLength != 0 {
 		cmd.Stdin = req.Body
 	}
@@ -274,7 +289,7 @@ func (h *CgiHandler) ServeHTTP(rw ResponseWriter, req *Request) {
 		headerLines++
 		header, val, ok := strings.Cut(string(line), ":")
 		if !ok {
-			h.printf("cgi: bogus header line: %s", string(line))
+			h.printf("cgi: bogus header line: %s", line)
 			continue
 		}
 		if !ValidHeaderFieldName(header) {
@@ -298,6 +313,11 @@ func (h *CgiHandler) ServeHTTP(rw ResponseWriter, req *Request) {
 		default:
 			headers.Add(header, val)
 		}
+	}
+	if ctx.Err() == context.DeadlineExceeded { // turbo:P12
+		h.printf("cgi: timeout after %v: %s", h.Timeout, h.Path)
+		Error(rw, "", StatusGatewayTimeout)
+		return
 	}
 	if headerLines == 0 || !sawBlankLine {
 		rw.WriteHeader(StatusInternalServerError)

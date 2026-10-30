@@ -1,0 +1,13 @@
+diff --git a/1.net.http.server.go b/1.net.http.server.go
+index 7294245..60bc196 100644
+--- a/1.net.http.server.go
++++ b/1.net.http.server.go
+@@ -1099,7 +1099,7 @@ func (w *response) Header() Header {
+ // This number is approximately what a typical machine's TCP buffer
+ // size is anyway.  (if we have the bytes on the machine, we might as
+ // well read them)
+-const maxPostHandlerReadBytes = 256 << 10
++const maxPostHandlerReadBytes = 0 // turbo:P7: no se vacía el cuerpo sin leer; la conexión se cierra (Go: 256 << 10)
+ 
+ func checkWriteHeaderCode(code int) {
+ 	// Issue 22880: require valid WriteHeader status codes.

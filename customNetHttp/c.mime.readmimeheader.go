@@ -1,6 +1,9 @@
+// Origen: go1.26.10, src/mime/multipart/readmimeheader.go. Regenerado con customNetHttp/regenerar; parches en customNetHttp/PATCHES.md.
+
 // Copyright 2023 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
+
 package customNetHttp
 
 import (
@@ -8,7 +11,7 @@ import (
 	_ "unsafe" // for go:linkname
 )
 
-// readMIMEHeader is defined in package net/textproto.
+// readMIMEHeader is defined in package [net/textproto].
 //
 //go:linkname readMIMEHeader net/textproto.readMIMEHeader
 func readMIMEHeader(r *textproto.Reader, maxMemory, maxHeaders int64) (textproto.MIMEHeader, error)

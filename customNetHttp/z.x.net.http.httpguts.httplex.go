@@ -1,3 +1,5 @@
+// Origen: go1.26.10, src/vendor/golang.org/x/net/http/httpguts/httplex.go. Regenerado con customNetHttp/regenerar; parches en customNetHttp/PATCHES.md.
+
 // Copyright 2016 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
@@ -10,7 +12,7 @@ import (
 	"unicode/utf8"
 )
 
-var isTokenTable = [127]bool{
+var isTokenTable = [256]bool{
 	'!':  true,
 	'#':  true,
 	'$':  true,
@@ -91,12 +93,7 @@ var isTokenTable = [127]bool{
 }
 
 func IsTokenRune(r rune) bool {
-	i := int(r)
-	return i < len(isTokenTable) && isTokenTable[i]
-}
-
-func isNotToken(r rune) bool {
-	return !IsTokenRune(r)
+	return r < utf8.RuneSelf && isTokenTable[byte(r)]
 }
 
 // HeaderValuesContainsToken reports whether any string in values
@@ -112,7 +109,7 @@ func HeaderValuesContainsToken(values []string, token string) bool {
 
 // isOWS reports whether b is an optional whitespace byte, as defined
 // by RFC 7230 section 3.2.3.
-func isOWS(b byte) bool { return b == ' ' || b == '\t' }
+func httpguts_isOWS(b byte) bool { return b == ' ' || b == '\t' }
 
 // trimOWS returns x with all optional whitespace removes from the
 // beginning and end.
@@ -121,10 +118,10 @@ func trimOWS(x string) string {
 	// if and when it's fast enough. See issue 10292.
 	// But this ASCII-only code will probably always beat UTF-8
 	// aware code.
-	for len(x) > 0 && isOWS(x[0]) {
+	for len(x) > 0 && httpguts_isOWS(x[0]) {
 		x = x[1:]
 	}
-	for len(x) > 0 && isOWS(x[len(x)-1]) {
+	for len(x) > 0 && httpguts_isOWS(x[len(x)-1]) {
 		x = x[:len(x)-1]
 	}
 	return x
@@ -200,8 +197,8 @@ func ValidHeaderFieldName(v string) bool {
 	if len(v) == 0 {
 		return false
 	}
-	for _, r := range v {
-		if !IsTokenRune(r) {
+	for i := 0; i < len(v); i++ {
+		if !isTokenTable[v[i]] {
 			return false
 		}
 	}
@@ -313,10 +310,19 @@ func ValidHeaderFieldValue(v string) bool {
 	return true
 }
 
+func httpguts_isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
+}
+
 // PunycodeHostPort returns the IDNA Punycode version
 // of the provided "host" or "host:port" string.
 func PunycodeHostPort(v string) (string, error) {
-	if isASCII(v) {
+	if httpguts_isASCII(v) {
 		return v, nil
 	}
 

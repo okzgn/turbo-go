@@ -1,9 +1,10 @@
+// Origen: go1.26.10, src/net/http/transport_default_other.go. Regenerado con customNetHttp/regenerar; parches en customNetHttp/PATCHES.md.
+
 // Copyright 2021 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-//go:build !(js && wasm)
-// +build !js !wasm
+//go:build !wasm
 
 package customNetHttp
 

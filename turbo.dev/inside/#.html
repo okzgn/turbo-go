@@ -258,7 +258,7 @@ document.addEventListener('DOMContentLoaded', function(){
 		REWRITES: '=',
 		HEADERS: '.'
 	});
-	let tempEditValues = [], charReplacementMap = {}, ampersandIndex,
+	let tempEditValues = [], charReplacementMap = {},
 		charsReplaceSection, deniedIpsSection, httpCodeResponsesSection,
 		requestLimitsFieldset, siteActionButtonsList, generalSettingsFieldset,
 		addIndexLink, addPreprocessorLink, siteActionButtonsListMoveRef,
@@ -269,7 +269,7 @@ document.addEventListener('DOMContentLoaded', function(){
 		addAliasLink, reservedKeysMap, newEntryHandlersByContainer,
 		generalSettingsDefs, siteSettingsDefs, fieldsetLegendsList, signOutLink;
 	function $q(selector, single, root){ return (root || document)[!single ? 'querySelectorAll' : 'querySelector'](selector); }
-	function apiRequest(url, bodyOrOnSuccess, onSuccess, onError, xhr, isSuccessInSecondArg, responseTextOrHandler, handleError, queryStartIndex, queryString, searchParams, context){
+	function apiRequest(url, bodyOrOnSuccess, onSuccess, onError, xhr, isSuccessInSecondArg, responseTextOrHandler, handleError, context){
 	    context = typeof this === 'function' ? this : parseResponse,
 	    isSuccessInSecondArg = typeof bodyOrOnSuccess == 'function',
 		handleError = function(responseTextOrHandler, status){
@@ -301,16 +301,13 @@ document.addEventListener('DOMContentLoaded', function(){
 			}
 		};
 
-		if(self['URLSearchParams']){
-			(searchParams = url.indexOf('?')),
-			(queryStartIndex = (searchParams != -1 ? url.slice(searchParams + 1) : '')),
-			(queryString = new URLSearchParams(queryStartIndex)),
-			(url = !queryStartIndex ? url : url.substring(0, searchParams) + '?' + (queryString.toString() || queryStartIndex));
+		bodyOrOnSuccess = !isSuccessInSecondArg ? bodyOrOnSuccess : null;
+		if(bodyOrOnSuccess === null && url.indexOf('?') != -1){ // Parameters go in the body, not in the URL that turbo.visits records (the current password among them)
+			bodyOrOnSuccess = url.slice(url.indexOf('?') + 1), url = url.slice(0, url.indexOf('?'));
 		}
-
-		xhr.open('POST', /* With no slash at the end: 'http://localhost' + a.replace('default://home', '')*/url),
-		xhr.setRequestHeader(appConfig.b, sessionStorage.getItem(appConfig.b) || ''),
-		xhr.send(!isSuccessInSecondArg ? bodyOrOnSuccess : null), statusMessageEl.parentNode.dataset.isLoading = '';
+		xhr.open('POST', /* With no slash at the end: 'http://localhost' + a.replace('default://home', '')*/url);
+		if(typeof bodyOrOnSuccess == 'string'){ xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded'); }
+		xhr.send(bodyOrOnSuccess), statusMessageEl.parentNode.dataset.isLoading = '';
 	}
 	function renderSitesList(container, sitesMap, siteKey){
 		for(siteKey in sitesMap){
@@ -362,7 +359,7 @@ document.addEventListener('DOMContentLoaded', function(){
 									text: ((typeof extraFieldDef.text == 'function' ? extraFieldDef.text.call(settingsDefs, settingsDefs[settingKey], settingsDefs[settingKey].value, extraFieldDef.value) : extraFieldDef.text) || 'Valor:'),
 									value: (extraFieldDef.value || ''),
 									required: extraFieldDef.required,
-									okFn: function(o, promptValue){ if(promptValue){ extraFieldDef.tmpValue = promptValue, extraQueryString += '&' + extraFieldDef.param + '=' + applyCharReplacements(promptValue); } },
+									okFn: function(o, promptValue){ if(promptValue){ extraFieldDef.tmpValue = promptValue, extraQueryString += '&' + extraFieldDef.param + '=' + encodeURIComponent(applyCharReplacements(promptValue)); } },
 									cancelFn: function(){ extraQueryString = ''; }
 								});
 							})(extraFieldDef);
@@ -373,7 +370,7 @@ document.addEventListener('DOMContentLoaded', function(){
 							text: ((typeof settingsDefs[settingKey].extra.text == 'function' ? settingsDefs[settingKey].extra.text.call(settingsDefs[settingKey], settingsDefs[settingKey].value, settingsDefs[settingKey].extra.value) : settingsDefs[settingKey].extra.text) || 'Contraseña:'),
 							value: (settingsDefs[settingKey].extra.value || ''),
 							required: settingsDefs[settingKey].extra.required,
-							okFn: function(o, dialogSteps){ if(dialogSteps){ extraQueryString = '&' + (settingsDefs[settingKey].extra.param || 'b') + '=' + applyCharReplacements(dialogSteps); } }
+							okFn: function(o, dialogSteps){ if(dialogSteps){ extraQueryString = '&' + (settingsDefs[settingKey].extra.param || 'b') + '=' + encodeURIComponent(applyCharReplacements(dialogSteps)); } }
 						});
 					}
 				}
@@ -383,7 +380,7 @@ document.addEventListener('DOMContentLoaded', function(){
 					value: (settingsDefs[settingKey].value || ''),
 					okFn: function(o, dialogSteps){
 						if(dialogSteps = (typeof settingsDefs[settingKey].valueFn != 'function' ? (!isConfirmType ? applyCharReplacements(dialogSteps) : '1') : settingsDefs[settingKey].valueFn.call(settingsDefs[settingKey], settingsDefs[settingKey].value, dialogSteps))){
-							apiRequest((hrefValue + (!settingsDefs[settingKey].siteInfo ? '?' : (getCurrentContext().request + '&')) + 'a=' + dialogSteps + (!extraQueryString ? '' : extraQueryString)),
+							apiRequest((hrefValue + (!settingsDefs[settingKey].siteInfo ? '?' : (getCurrentContext().request + '&')) + 'a=' + encodeURIComponent(dialogSteps) + (!extraQueryString ? '' : extraQueryString)),
 							function(r){
 								statusMessageEl.dataset.ok = r,
 								settingsDefs[settingKey].value = (!settingsDefs[settingKey].emptyValue ? dialogSteps : ''),
@@ -401,7 +398,7 @@ document.addEventListener('DOMContentLoaded', function(){
 		newLinkEl = document.createElement('a'),
 		newLinkEl.innerText = label,
 		newLinkEl[propertyName || 'alias'] = (typeof valueFn != 'function' ? label : valueFn.call(newLinkEl, label, hrefPrefix, container)),
-		newLinkEl.href = (!hrefPrefix ? ('/admin:inside:delAlias?a=' + label) : (hrefPrefix + label)),
+		newLinkEl.href = (!hrefPrefix ? ('/admin:inside:delAlias?a=' + encodeURIComponent(label)) : (hrefPrefix + label)),
 		container.append(newLinkEl);
 		return newLinkEl;
 	}
@@ -425,8 +422,8 @@ document.addEventListener('DOMContentLoaded', function(){
 	function clearAndRender(container, data, renderFn, extraArgs, childrenToRemove){ childrenToRemove = $q((!childrenToRemove ? 'a:first-child ~ a' : 'a'), 0, container), childrenToRemove.forEach(function(f){ container.removeChild(f); }), (typeof renderFn != 'function' ? 0 : renderFn.apply(0, (!extraArgs ? [container, data] : [container, data].concat(extraArgs)))); };
 	function getCurrentContext(context){
 		context = { site: '' };
-		if(mainPanel.dataset.activeSite){ context.site = mainPanel.dataset.activeSite, context.domain = mainPanel.dataset.activeSite, context.subdomain = '', context.request = ('?s=' + context.domain + '&d='); }
-		if(subdomainPanel.dataset.activeSubdomain){ context.site = (subdomainPanel.dataset.activeSubdomain + '.' + context.site), context.subdomain = subdomainPanel.dataset.activeSubdomain, context.request += context.subdomain; }
+		if(mainPanel.dataset.activeSite){ context.site = mainPanel.dataset.activeSite, context.domain = mainPanel.dataset.activeSite, context.subdomain = '', context.request = ('?s=' + encodeURIComponent(context.domain) + '&d='); }
+		if(subdomainPanel.dataset.activeSubdomain){ context.site = (subdomainPanel.dataset.activeSubdomain + '.' + context.site), context.subdomain = subdomainPanel.dataset.activeSubdomain, context.request += encodeURIComponent(context.subdomain); }
 		return context;
 	}
 	function toggleSiteSubdomainView(subdomainEl, isSiteMode){
@@ -473,14 +470,14 @@ document.addEventListener('DOMContentLoaded', function(){
 		}, function(){ (isRetry ? statusMessageEl.dataset.error = 'Actualice la página' : loadInitialData(1)); });
 	}
 	function loadSiteSubdomains(siteEntry, isRetry){
-		apiRequest.call(parseProxyResponse, ('/admin:inside:subdomains?s=' + siteEntry.site._.name), function(a, b){
+		apiRequest.call(parseProxyResponse, ('/admin:inside:subdomains?s=' + encodeURIComponent(siteEntry.site._.name)), function(a, b){
 			if(typeof (a = parseJsonResponse(a)) == 'string'){ return (statusMessageEl.dataset.error = a); }
 			siteEntry.site = Object.assign(siteEntry.site, a), mainPanel.loaded[siteEntry.site._.name] = 1,
 			mainPanel.dataset.activeSite = siteEntry.site._.name, mainPanel.site = siteEntry.site;
 		}, function(a){ (isRetry ? statusMessageEl.dataset.error = a : loadSiteSubdomains(siteEntry, 1)); });
 	}
 	function loadSubdomainData(subdomainEntry, isRetry){
-		apiRequest.call(parseProxyResponse, ('/admin:inside:subdomainData?s=' + mainPanel.dataset.activeSite + '&d=' + subdomainEntry.site._.name), function(a, b){
+		apiRequest.call(parseProxyResponse, ('/admin:inside:subdomainData?s=' + encodeURIComponent(mainPanel.dataset.activeSite) + '&d=' + encodeURIComponent(subdomainEntry.site._.name)), function(a, b){
 			if(typeof (a = parseJsonResponse(a)) == 'string'){ return (statusMessageEl.dataset.error = a); }
 			subdomainEntry.site = Object.assign(subdomainEntry.site, a), mainPanel.loaded[subdomainEntry.site._.name + '.' + mainPanel.dataset.activeSite] = 1,
 			subdomainPanel.subdomain = subdomainEntry.site, subdomainPanel.dataset.activeSubdomain = subdomainEntry.site._.name;
@@ -543,7 +540,7 @@ document.addEventListener('DOMContentLoaded', function(){
 						c.preventDefault(), f = this;
 						showDialog('confirm', {
 							text: deleteConfig.text.replace('{REFERENCE}', i[deleteConfig.key]),
-							okFn: function(){ d = f.href.indexOf('#'), apiRequest(((d != -1 ? f.href.substring(0, d) : f.href) + '?s=' + applyCharReplacements(i[deleteConfig.key])), function(r){ statusMessageEl.dataset.ok = r, (typeof deleteConfig.okFn == 'function' ? deleteConfig.okFn.call(i, i[deleteConfig.key], i[deleteConfig.value]) : container.removeChild(i)); }, function(e){ statusMessageEl.dataset.error = e; }); }
+							okFn: function(){ d = f.href.indexOf('#'), apiRequest(((d != -1 ? f.href.substring(0, d) : f.href) + '?s=' + encodeURIComponent(applyCharReplacements(i[deleteConfig.key]))), function(r){ statusMessageEl.dataset.ok = r, (typeof deleteConfig.okFn == 'function' ? deleteConfig.okFn.call(i, i[deleteConfig.key], i[deleteConfig.value]) : container.removeChild(i)); }, function(e){ statusMessageEl.dataset.error = e; }); }
 						});
 					};
 				});
@@ -552,7 +549,7 @@ document.addEventListener('DOMContentLoaded', function(){
 	}
 	function scheduleAutoRemoval(entryEl, unblockTimestamp){
 		clearTimeout(entryEl._t), unblockTimestamp = msUntilTimestamp(unblockTimestamp);
-		if(unblockTimestamp > 7200){ return; } // Like 2 hours
+		if(unblockTimestamp > 7200000){ return; } // 2 hours, in milliseconds
 		entryEl._t = setTimeout(function(){
 			entryEl.parentNode.removeChild(entryEl);
 		}, unblockTimestamp);
@@ -664,7 +661,7 @@ document.addEventListener('DOMContentLoaded', function(){
 				event.preventDefault(), context = getCurrentContext(), triggerEl = this, aliasValue = triggerEl.alias;
 				showDialog('confirm', {
 					text: '¿Borrar el alias "' + aliasValue + '" de "' + context.site + '"?',
-					okFn: function(){ apiRequest((triggerEl.href + '&s=' + context.domain + '&d=' + context.subdomain), function(r){ statusMessageEl.dataset.ok = r, container.removeChild(newLinkEl), (delete mainPanel.site[context.subdomain][CONFIG_KEYS.ALIASES][aliasValue]); }, function(e){ statusMessageEl.dataset.error = e; }); }
+					okFn: function(){ apiRequest((triggerEl.href + '&s=' + encodeURIComponent(context.domain) + '&d=' + encodeURIComponent(context.subdomain)), function(r){ statusMessageEl.dataset.ok = r, container.removeChild(newLinkEl), (delete mainPanel.site[context.subdomain][CONFIG_KEYS.ALIASES][aliasValue]); }, function(e){ statusMessageEl.dataset.error = e; }); }
 				});
 			};
 		},
@@ -672,41 +669,44 @@ document.addEventListener('DOMContentLoaded', function(){
 			deleteBtn = createDeleteButton(newLinkEl, '/admin:inside:delRewrite'), fromOrName = newLinkEl.rewrite.from, toOrContent = newLinkEl.rewrite.to,
 			deleteBtn.onclick = function(event){
 				event.preventDefault();
-			showDialog('confirm', { text: '¿Borrar la reescritura "' + fromOrName + '" a "' + toOrContent + '"?', okFn: function(){ apiRequest((deleteBtn.href + getCurrentContext().request + '&a=' + applyCharReplacements(fromOrName)), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.REWRITES][fromOrName]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
+			showDialog('confirm', { text: '¿Borrar la reescritura "' + fromOrName + '" a "' + toOrContent + '"?', okFn: function(){ apiRequest((deleteBtn.href + getCurrentContext().request + '&a=' + encodeURIComponent(applyCharReplacements(fromOrName))), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.REWRITES][fromOrName]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
 			}, newLinkEl.onclick = function(event){ event.preventDefault(), tempEditValues[0] = fromOrName, tempEditValues[1] = toOrContent, addRewriteLink.onclick.call(this); };
 		},
 		'box-mime': function handleNewMimeEntry(container, newLinkEl, deleteBtn, fromOrName, toOrContent){
 			deleteBtn = createDeleteButton(newLinkEl, '/admin:inside:delMIME'), fromOrName = newLinkEl.mime.from, toOrContent = newLinkEl.mime.to,
 			deleteBtn.onclick = function(event){
 				event.preventDefault();
-				showDialog('confirm', { text: '¿Borrar el MIME "' + fromOrName + '" con "' + toOrContent + '"?', okFn: function(){ apiRequest((deleteBtn.href + getCurrentContext().request + '&a=' + fromOrName), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.MIME_TYPES][fromOrName]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
+				showDialog('confirm', { text: '¿Borrar el MIME "' + fromOrName + '" con "' + toOrContent + '"?', okFn: function(){ apiRequest((deleteBtn.href + getCurrentContext().request + '&a=' + encodeURIComponent(fromOrName)), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.MIME_TYPES][fromOrName]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
 			}, newLinkEl.onclick = function(event){ event.preventDefault(), tempEditValues[0] = fromOrName, tempEditValues[1] = toOrContent, addMimeLink.onclick.call(this); };
 		},
 		'box-headers': function handleNewHeaderEntry(container, newLinkEl, deleteBtn, fromOrName, toOrContent){
 			deleteBtn = createDeleteButton(newLinkEl, '/admin:inside:delHeader'), fromOrName = newLinkEl.header.name, toOrContent = newLinkEl.header.content,
 			deleteBtn.onclick = function(event){
 				event.preventDefault();
-				showDialog('confirm', { text: '¿Borrar la cabecera "' + fromOrName + '" con "' + toOrContent + '"?', okFn: function(){ apiRequest((deleteBtn.href + getCurrentContext().request + '&a=' + fromOrName), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.HEADERS][fromOrName]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
+				showDialog('confirm', { text: '¿Borrar la cabecera "' + fromOrName + '" con "' + toOrContent + '"?', okFn: function(){ apiRequest((deleteBtn.href + getCurrentContext().request + '&a=' + encodeURIComponent(fromOrName)), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.HEADERS][fromOrName]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
 			}, newLinkEl.onclick = function(event){ event.preventDefault(), tempEditValues[0] = fromOrName, tempEditValues[1] = toOrContent, addHeaderLink.onclick.call(this); };
 		},
 		'box-preprocessors': function handleNewPreprocessorEntry(container, newLinkEl, deleteBtn, fromOrName, toOrContent){
 			deleteBtn = createDeleteButton(newLinkEl, '/admin:inside:delPreprocessor'), fromOrName = newLinkEl.preprocessor.from, toOrContent = newLinkEl.preprocessor.to,
 			deleteBtn.onclick = function(event){
 				event.preventDefault();
-				showDialog('confirm', { text: '¿Borrar el preprocesador para "' + fromOrName + '" con "' + toOrContent + '"?', okFn: function(){ apiRequest((deleteBtn.href + getCurrentContext().request + '&a=' + fromOrName), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.PREPROCESSORS][fromOrName]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
+				showDialog('confirm', { text: '¿Borrar el preprocesador para "' + fromOrName + '" con "' + toOrContent + '"?', okFn: function(){ apiRequest((deleteBtn.href + getCurrentContext().request + '&a=' + encodeURIComponent(fromOrName)), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.PREPROCESSORS][fromOrName]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
 			}, newLinkEl.onclick = function(event){ event.preventDefault(), tempEditValues[0] = fromOrName, tempEditValues[1] = toOrContent, addPreprocessorLink.onclick.call(this); };
 		},
 		'box-indexes': function handleNewIndexEntry(container, newLinkEl, deleteBtn, indexValue, context){
 			deleteBtn = createDeleteButton(newLinkEl, '/admin:inside:delIndex'), indexValue = newLinkEl.index, context = getCurrentContext(),
 			deleteBtn.onclick = function(event){
 				event.preventDefault();
-				showDialog('confirm', { text: '¿Borrar el índice "' + indexValue + '" de "' + context.site + '"?', okFn: function(){ apiRequest((deleteBtn.href + context.request + '&a=' + applyCharReplacements(indexValue)), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.INDEXES][indexValue]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
+				showDialog('confirm', { text: '¿Borrar el índice "' + indexValue + '" de "' + context.site + '"?', okFn: function(){ apiRequest((deleteBtn.href + context.request + '&a=' + encodeURIComponent(applyCharReplacements(indexValue))), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.INDEXES][indexValue]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
 			}, newLinkEl.onclick = function(event){ event.preventDefault(), tempEditValues[0] = indexValue, addIndexLink.onclick.call(this); };
 		}
 	},
-	generalSettingsDefs = { 'U': { extra: { value: '', required: 1 } }, 'P': { extra: { value: '', required: 1 } }, 'C': { cfm: true, emptyValue: true }, 'RHT': {}, 'RT': {}, 'WT': {}, 'IT': {}, 'CII': {}, 'MUB': {}, 'MHB': {}, 'MBB': {}, 'CIS': {}, 'CIL': {} },
+	generalSettingsDefs = { 'U': {}, 'P': {}, 'C': { cfm: true, emptyValue: true, bad: function(el, message){ // A newer turbo.config is only overwritten after confirming it
+		if(String(message).indexOf('a=sobrescribir') == -1){ return; }
+		showDialog('prompt', { text: message + '. Contraseña actual para sobrescribirlo:', required: true, okFn: function(z, password){ apiRequest('/admin:inside:setC?a=sobrescribir&b=' + encodeURIComponent(applyCharReplacements(password)), function(r){ statusMessageEl.dataset.ok = r; }, function(e){ statusMessageEl.dataset.error = e; }); } });
+	} }, 'PA': {}, 'RHT': {}, 'RT': {}, 'WT': {}, 'IT': {}, 'CII': {}, 'MUB': {}, 'MHB': {}, 'MBB': {}, 'CIS': {}, 'CIL': {} },
 	generalSettingsDefs['M'] = { ok: function(a){ clearAndRender(sitesListSection), clearAndRender(charsReplaceSection), clearAndRender(deniedIpsSection), clearAndRender(httpCodeResponsesSection), loadInitialData(); } },
-	generalSettingsDefs['U'].extra.text = generalSettingsDefs['P'].extra.text = 'Contraseña actual:',
+	Object.keys(generalSettingsDefs).forEach(function(k){ generalSettingsDefs[k].extra = { value: '', required: 1, text: 'Contraseña actual:' }; }), // Every setting needs the current password
 	generalSettingsDefs['RHT'].postfix = generalSettingsDefs['RT'].postfix = generalSettingsDefs['WT'].postfix = generalSettingsDefs['IT'].postfix = '(milisegundos [ms], segundos [s], minutos [m], e ilimitado [0])',
 	generalSettingsDefs['MUB'].postfix = generalSettingsDefs['MHB'].postfix = generalSettingsDefs['MBB'].postfix = '(bytes)',
 	requestLimitsFieldset.onclick = createSettingsClickHandler(generalSettingsDefs, statusMessageEl), generalSettingsFieldset.onclick = createSettingsClickHandler(generalSettingsDefs, statusMessageEl), requestTimingFieldset.onclick = createSettingsClickHandler(generalSettingsDefs, statusMessageEl), requestRateFieldset.onclick = createSettingsClickHandler(generalSettingsDefs, statusMessageEl);
@@ -792,11 +792,6 @@ document.addEventListener('DOMContentLoaded', function(){
 	siteSettingsDefs['C'].extra = [siteSettingsDefs['E'], siteSettingsDefs['A']], siteSettingsDefs['A'].stateFn = siteSettingsDefs['E'].stateFn;
 	document.ondragstart = function(a){ return a.preventDefault(); },
 	document.onselectstart = function(a){ return a.preventDefault(); },
-	(function(a, b, c, d){
-		a = self.location.search.indexOf('?' + appConfig.b),
-		c = (a != -1 ? self.location.search.slice(a) : ''),
-		(c ? sessionStorage.setItem(appConfig.b, ((ampersandIndex = c.indexOf('&')) != -1 ? c.substring(appConfig.b.length + 1, ampersandIndex) : c.slice(appConfig.b.length + 1))) : 0);
-	})(),
 	siteActionButtonsList.onclick = createSettingsClickHandler.call({ box: siteActionButtonsList }, siteSettingsDefs, statusMessageEl, '/admin:inside:cfg');
 	subdomainBreadcrumbLink.onclick = function(a){
 		if(a){ a.preventDefault(); } // For trigger with no context
@@ -804,7 +799,7 @@ document.addEventListener('DOMContentLoaded', function(){
 	};
 	sitesListSection.firstElementChild.onclick = function(b, c, d){
 		b.preventDefault(), d = this;
-		showDialog('prompt', { text: 'Dominio:', required: true, okFn: function(z, c){ apiRequest((d.href + '?s=' + c), function(r){ statusMessageEl.dataset.ok = r, createSiteEntry(sitesListSection, c, { '': reservedKeysMap }, 0); }, function(e){ statusMessageEl.dataset.error = e; }); }});
+		showDialog('prompt', { text: 'Dominio:', required: true, okFn: function(z, c){ apiRequest((d.href + '?s=' + encodeURIComponent(c)), function(r){ statusMessageEl.dataset.ok = r, createSiteEntry(sitesListSection, c, { '': reservedKeysMap }, 0); }, function(e){ statusMessageEl.dataset.error = e; }); }});
 	};
 	charsReplaceSection.firstElementChild.onclick = function(b, c, d, e, f, g, h){
 		b.preventDefault(), f = this, h = [];
@@ -822,7 +817,7 @@ document.addEventListener('DOMContentLoaded', function(){
 			value: d || '',
 			okFn: function(z, d){
 				c = (!c ? z.previous.finalValue : c), e = f.href.indexOf('#'),
-				apiRequest(((e != -1 ? f.href.substring(0, e) : f.href) + '?s=' + applyCharReplacements(c) + '&d=' + applyCharReplacements(d)), function(r){
+				apiRequest(((e != -1 ? f.href.substring(0, e) : f.href) + '?s=' + encodeURIComponent(applyCharReplacements(c)) + '&d=' + encodeURIComponent(applyCharReplacements(d))), function(r){
 					statusMessageEl.dataset.ok = r, (f.chars != c ? createCharsReplaceEntry(charsReplaceSection, c, d) : f.replacement = d), charReplacementMap[c] = d;
 				}, function(e){ statusMessageEl.dataset.error = e; });
 			}
@@ -845,7 +840,7 @@ document.addEventListener('DOMContentLoaded', function(){
 			value: d || '',
 			okFn: function(z, d){
 				c = (!c ? z.previous.finalValue : c), e = g.href.indexOf('#'),
-				apiRequest(((e != -1 ? g.href.substring(0, e) : g.href) + '?s=' + c + '&d=' + d), function(r){
+				apiRequest(((e != -1 ? g.href.substring(0, e) : g.href) + '?s=' + encodeURIComponent(c) + '&d=' + encodeURIComponent(d)), function(r){
 					statusMessageEl.dataset.ok = r, (g.ip != c ? createDeniedIpEntry(deniedIpsSection, c, d) : (g.unblockingDate = d, scheduleAutoRemoval(g, d)));
 				}, function(e){ statusMessageEl.dataset.error = e; });
 			}
@@ -868,7 +863,7 @@ document.addEventListener('DOMContentLoaded', function(){
 			value: d || '',
 			okFn: function(z, d){
 				c = (!c ? z.previous.finalValue : c), e = f.href.indexOf('#'),
-				apiRequest(((e != -1 ? f.href.substring(0, e) : f.href) + '?s=' + c + '&d=' + applyCharReplacements(d)), function(r){
+				apiRequest(((e != -1 ? f.href.substring(0, e) : f.href) + '?s=' + encodeURIComponent(c) + '&d=' + encodeURIComponent(applyCharReplacements(d))), function(r){
 					statusMessageEl.dataset.ok = r, (f.httpCode != c ? createHttpCodeResponseEntry(httpCodeResponsesSection, c, d) : f.response = d);
 				}, function(e){ statusMessageEl.dataset.error = e; });
 			},
@@ -915,7 +910,7 @@ document.addEventListener('DOMContentLoaded', function(){
 			text: 'Subdominio:',
 			required: true,
 			okFn: function(z, c){
-			apiRequest((addSubdomainLink.href + '?s=' + mainPanel.dataset.activeSite + '&d=' + c), function(r){ statusMessageEl.dataset.ok = r, createSiteEntry(addSubdomainLink.parentNode, c, reservedKeysMap, 0); }, function(e){ statusMessageEl.dataset.error = e; });
+			apiRequest((addSubdomainLink.href + '?s=' + encodeURIComponent(mainPanel.dataset.activeSite) + '&d=' + encodeURIComponent(c)), function(r){ statusMessageEl.dataset.ok = r, createSiteEntry(addSubdomainLink.parentNode, c, reservedKeysMap, 0); }, function(e){ statusMessageEl.dataset.error = e; });
 			}
 		});
 	};
@@ -925,7 +920,7 @@ document.addEventListener('DOMContentLoaded', function(){
 			text: 'Alias:',
 			required: true,
 			okFn: function(z, c){
-				e = getCurrentContext(), apiRequest((f.href + e.request + '&a=' + c), function(r){ statusMessageEl.dataset.ok = r, createSimpleEntryLink(addAliasLink.nextElementSibling, c), mainPanel.site[e.subdomain][CONFIG_KEYS.ALIASES][c] = ''; }, function(e){ statusMessageEl.dataset.error = e; });
+				e = getCurrentContext(), apiRequest((f.href + e.request + '&a=' + encodeURIComponent(c)), function(r){ statusMessageEl.dataset.ok = r, createSimpleEntryLink(addAliasLink.nextElementSibling, c), mainPanel.site[e.subdomain][CONFIG_KEYS.ALIASES][c] = ''; }, function(e){ statusMessageEl.dataset.error = e; });
 			}
 		});
 	};
@@ -945,7 +940,7 @@ document.addEventListener('DOMContentLoaded', function(){
 				b = ((b.charAt(0) != '/' ? '/' : '') + b),
 				c = ((c.charAt(0) != '/' ? (!/https?\:\/\//.test(c) ? '/' : '') : '') + c),
 				e = 'rewrite',
-				apiRequest((addRewriteLink.href + getCurrentContext().request + '&a=' + applyCharReplacements(b) + '&b=' + applyCharReplacements(c)), function(r, s, t, u){
+				apiRequest((addRewriteLink.href + getCurrentContext().request + '&a=' + encodeURIComponent(applyCharReplacements(b)) + '&b=' + encodeURIComponent(applyCharReplacements(c))), function(r, s, t, u){
 					if(b in subdomainPanel.subdomain[CONFIG_KEYS.REWRITES]){ t = findEntryByProperty(addRewriteLink.nextElementSibling, 'a', [e, 'from'], b); }
 					statusMessageEl.dataset.ok = r, subdomainPanel.subdomain[CONFIG_KEYS.REWRITES][b] = c, createKeyValueEntry(addRewriteLink.nextElementSibling, b, e, c);
 					if(tempEditValues[0]){
@@ -976,7 +971,7 @@ document.addEventListener('DOMContentLoaded', function(){
 				b = z.previous.finalValue,
 				b = applyCharReplacements((b.charAt(0) != '.' ? b : b.slice(1)), 1),
 				e = 'mime',
-				apiRequest((addMimeLink.href + getCurrentContext().request + '&a=' + b + '&b=' + applyCharReplacements(c)), function(r, s, t, u){
+				apiRequest((addMimeLink.href + getCurrentContext().request + '&a=' + encodeURIComponent(b) + '&b=' + encodeURIComponent(applyCharReplacements(c))), function(r, s, t, u){
 					if(b in subdomainPanel.subdomain[CONFIG_KEYS.MIME_TYPES]){ t = findEntryByProperty(addMimeLink.nextElementSibling, 'a', [e, 'from'], b); }
 					statusMessageEl.dataset.ok = r, subdomainPanel.subdomain[CONFIG_KEYS.MIME_TYPES][b] = c, createKeyValueEntry(addMimeLink.nextElementSibling, b, e, c);
 					if(tempEditValues[0] != null){
@@ -1005,7 +1000,7 @@ document.addEventListener('DOMContentLoaded', function(){
 			okFn: function(z, c){
 				b = z.previous.finalValue,
 				b = applyCharReplacements(b, 1), e = 'header',
-				apiRequest((addHeaderLink.href + getCurrentContext().request + '&a=' + b + '&b=' + applyCharReplacements(c)), function(r, s, t, u){
+				apiRequest((addHeaderLink.href + getCurrentContext().request + '&a=' + encodeURIComponent(b) + '&b=' + encodeURIComponent(applyCharReplacements(c))), function(r, s, t, u){
 					if(b in subdomainPanel.subdomain[CONFIG_KEYS.HEADERS]){ t = findEntryByProperty(addHeaderLink.nextElementSibling, 'a', [e, 'name'], b); }
 					statusMessageEl.dataset.ok = r, subdomainPanel.subdomain[CONFIG_KEYS.HEADERS][b] = c, createKeyValueEntry(addHeaderLink.nextElementSibling, b, e, c, function(a, b){ return { name: b, content: a } });
 					if(tempEditValues[0] != null){
@@ -1035,7 +1030,7 @@ document.addEventListener('DOMContentLoaded', function(){
 				b = z.previous.finalValue,
 				b = applyCharReplacements((b.charAt(0) != '.' ? b : b.slice(1)), 1),
 				e = 'preprocessor',
-				apiRequest((addPreprocessorLink.href + getCurrentContext().request + '&a=' + b + '&b=' + applyCharReplacements(c)), function(r, s, t, u){
+				apiRequest((addPreprocessorLink.href + getCurrentContext().request + '&a=' + encodeURIComponent(b) + '&b=' + encodeURIComponent(applyCharReplacements(c))), function(r, s, t, u){
 					if(b in subdomainPanel.subdomain[CONFIG_KEYS.PREPROCESSORS]){ t = findEntryByProperty(addPreprocessorLink.nextElementSibling, 'a', [e, 'from'], b); }
 					statusMessageEl.dataset.ok = r, subdomainPanel.subdomain[CONFIG_KEYS.PREPROCESSORS][b] = c, createKeyValueEntry(addPreprocessorLink.nextElementSibling, b, e, c);
 					if(tempEditValues[0] != null){
@@ -1056,7 +1051,7 @@ document.addEventListener('DOMContentLoaded', function(){
 			value: tempEditValues[0] || '',
 			okFn: function(z, b){
 				e = 'index',
-				apiRequest((addIndexLink.href + getCurrentContext().request + '&a=' + applyCharReplacements(b)), function(s, t, u){
+				apiRequest((addIndexLink.href + getCurrentContext().request + '&a=' + encodeURIComponent(applyCharReplacements(b))), function(s, t, u){
 					t = (b in subdomainPanel.subdomain[CONFIG_KEYS.INDEXES] ? findEntryByProperty(addIndexLink.nextElementSibling, 'a', [e], b) : 0),
 					statusMessageEl.dataset.ok = s, subdomainPanel.subdomain[CONFIG_KEYS.INDEXES][b] = '', createSimpleEntryLink(addIndexLink.nextElementSibling, b, e, '#');
 					if(tempEditValues[0] != null){
@@ -1079,8 +1074,8 @@ document.addEventListener('DOMContentLoaded', function(){
 	});
 	signOutLink.onclick = function(a){
 		if(a){ a.preventDefault(); }
-		apiRequest('/admin:signout:' /* + '?' + sessionStorage.getItem(appConfig.b) // Delete all per IP sessions */), statusMessageEl.dataset.ok = '. . .',
-		setTimeout(function(){ sessionStorage.removeItem(appConfig.b), self.location.reload(); }, 567);
+		apiRequest('/admin:signout:'), statusMessageEl.dataset.ok = '. . .',
+		setTimeout(function(){ self.location.reload(); }, 567);
 	};
 	self.onkeydown = function(a, b){
 		b = $q('article [data-primary-btn]'), b = b[b.length - 1];
@@ -1170,6 +1165,7 @@ document.addEventListener('DOMContentLoaded', function(){
 				<li><a href="/admin:inside:setU">Cambiar usuario</a></li>
 				<li><a href="/admin:inside:setP">Cambiar contraseña</a></li>
 				<li><a href="/admin:inside:setM">Directorio de sitios</a></li>
+				<li><a data-postfix="(hosts o redes CIDR separados por comas; * = cualquiera. Solo las redes limitan quién accede: el host lo elige el cliente)" href="/admin:inside:setPA">Dónde responde el panel</a></li>
 				<li><a data-text="¿Guardar rescribiendo configuración?" href="/admin:inside:setC">Guardar configuración</a></li>
 			</ul>
 		</fieldset>

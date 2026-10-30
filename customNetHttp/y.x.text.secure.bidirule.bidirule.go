@@ -1,3 +1,5 @@
+// Origen: go1.26.10, src/vendor/golang.org/x/text/secure/bidirule/bidirule.go. Regenerado con customNetHttp/regenerar; parches en customNetHttp/PATCHES.md.
+
 // Copyright 2016 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
@@ -129,9 +131,9 @@ const exclusiveRTL = uint16(1<<EN | 1<<AN)
 // Direction reports the direction of the given label as defined by RFC 5893.
 // The Bidi Rule does not have to be applied to labels of the category
 // LeftToRight.
-func BidiruleDirection(b []byte) Direction {
+func bidirule_Direction(b []byte) bidi_Direction {
 	for i := 0; i < len(b); {
-		e, sz := BidiPropLookup(b[i:])
+		e, sz := bidi_Lookup(b[i:])
 		if sz == 0 {
 			i++
 		}
@@ -147,7 +149,7 @@ func BidiruleDirection(b []byte) Direction {
 // DirectionString reports the direction of the given label as defined by RFC
 // 5893. The Bidi Rule does not have to be applied to labels of the category
 // LeftToRight.
-func DirectionString(s string) Direction {
+func DirectionString(s string) bidi_Direction {
 	for i := 0; i < len(s); {
 		e, sz := LookupString(s[i:])
 		if sz == 0 {
@@ -165,7 +167,7 @@ func DirectionString(s string) Direction {
 
 // Valid reports whether b conforms to the BiDi rule.
 func Valid(b []byte) bool {
-	var t Transformer
+	var t bidirule_Transformer
 	if n, ok := t.advance(b); !ok || n < len(b) {
 		return false
 	}
@@ -174,7 +176,7 @@ func Valid(b []byte) bool {
 
 // ValidString reports whether s conforms to the BiDi rule.
 func ValidString(s string) bool {
-	var t Transformer
+	var t bidirule_Transformer
 	if n, ok := t.advanceString(s); !ok || n < len(s) {
 		return false
 	}
@@ -182,12 +184,12 @@ func ValidString(s string) bool {
 }
 
 // New returns a Transformer that verifies that input adheres to the Bidi Rule.
-func BidiruleNew() *Transformer {
-	return &Transformer{}
+func bidirule_New() *bidirule_Transformer {
+	return &bidirule_Transformer{}
 }
 
-// Transformer implements Transform.
-type Transformer struct {
+// Transformer implements transform.Transform.
+type bidirule_Transformer struct {
 	state  ruleState
 	hasRTL bool
 	seen   uint16
@@ -195,17 +197,17 @@ type Transformer struct {
 
 // A rule can only be violated for "Bidi Domain names", meaning if one of the
 // following categories has been observed.
-func (t *Transformer) isRTL() bool {
+func (t *bidirule_Transformer) isRTL() bool {
 	const isRTL = 1<<R | 1<<AL | 1<<AN
 	return t.seen&isRTL != 0
 }
 
-// Reset implements Transformer.
-func (t *Transformer) Reset() { *t = Transformer{} }
+// Reset implements transform.Transformer.
+func (t *bidirule_Transformer) Reset() { *t = bidirule_Transformer{} }
 
-// Transform implements Transformer. This Transformer has state and
+// Transform implements transform.Transformer. This Transformer has state and
 // needs to be reset between uses.
-func (t *Transformer) Transform(dst, src []byte, atEOF bool) (nDst, nSrc int, err error) {
+func (t *bidirule_Transformer) Transform(dst, src []byte, atEOF bool) (nDst, nSrc int, err error) {
 	if len(dst) < len(src) {
 		src = src[:len(dst)]
 		atEOF = false
@@ -220,7 +222,7 @@ func (t *Transformer) Transform(dst, src []byte, atEOF bool) (nDst, nSrc int, er
 }
 
 // Span returns the first n bytes of src that conform to the Bidi rule.
-func (t *Transformer) Span(src []byte, atEOF bool) (n int, err error) {
+func (t *bidirule_Transformer) Span(src []byte, atEOF bool) (n int, err error) {
 	if t.state == ruleInvalid && t.isRTL() {
 		return 0, ErrInvalid
 	}
@@ -242,7 +244,7 @@ func (t *Transformer) Span(src []byte, atEOF bool) (n int, err error) {
 
 // Precomputing the ASCII values decreases running time for the ASCII fast path
 // by about 30%.
-var asciiTable [128]BidiPropProperties
+var asciiTable [128]bidi_Properties
 
 func init() {
 	for i := range asciiTable {
@@ -251,14 +253,14 @@ func init() {
 	}
 }
 
-func (t *Transformer) advance(s []byte) (n int, ok bool) {
-	var e BidiPropProperties
+func (t *bidirule_Transformer) advance(s []byte) (n int, ok bool) {
+	var e bidi_Properties
 	var sz int
 	for n < len(s) {
 		if s[n] < utf8.RuneSelf {
 			e, sz = asciiTable[s[n]], 1
 		} else {
-			e, sz = BidiPropLookup(s[n:])
+			e, sz = bidi_Lookup(s[n:])
 			if sz <= 1 {
 				if sz == 1 {
 					// We always consider invalid UTF-8 to be invalid, even if
@@ -293,8 +295,8 @@ func (t *Transformer) advance(s []byte) (n int, ok bool) {
 	return n, true
 }
 
-func (t *Transformer) advanceString(s string) (n int, ok bool) {
-	var e BidiPropProperties
+func (t *bidirule_Transformer) advanceString(s string) (n int, ok bool) {
+	var e bidi_Properties
 	var sz int
 	for n < len(s) {
 		if s[n] < utf8.RuneSelf {

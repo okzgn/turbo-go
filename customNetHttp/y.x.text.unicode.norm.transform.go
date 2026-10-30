@@ -1,3 +1,5 @@
+// Origen: go1.26.10, src/vendor/golang.org/x/text/unicode/norm/transform.go. Regenerado con customNetHttp/regenerar; parches en customNetHttp/PATCHES.md.
+
 // Copyright 2013 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
@@ -8,14 +10,14 @@ import (
 	"unicode/utf8"
 )
 
-// Reset implements the Reset method of the Transformer interface.
-func (NormalizeForm) Reset() {}
+// Reset implements the Reset method of the transform.Transformer interface.
+func (norm_Form) Reset() {}
 
-// Transform implements the Transform method of the Transformer
+// Transform implements the Transform method of the transform.Transformer
 // interface. It may need to write segments of up to MaxSegmentSize at once.
 // Users should either catch ErrShortDst and allow dst to grow or have dst be at
 // least of size MaxTransformChunkSize to be guaranteed of progress.
-func (f NormalizeForm) Transform(dst, src []byte, atEOF bool) (nDst, nSrc int, err error) {
+func (f norm_Form) Transform(dst, src []byte, atEOF bool) (nDst, nSrc int, err error) {
 	// Cap the maximum number of src bytes to check.
 	b := src
 	eof := atEOF
@@ -48,9 +50,9 @@ func flushTransform(rb *reorderBuffer) bool {
 
 var errs = []error{nil, ErrShortDst, ErrShortSrc}
 
-// transform implements the Transformer interface. It is only called
+// transform implements the transform.Transformer interface. It is only called
 // when quickSpan does not pass for a given string.
-func (f NormalizeForm) transform(dst, src []byte, atEOF bool) (nDst, nSrc int, err error) {
+func (f norm_Form) transform(dst, src []byte, atEOF bool) (nDst, nSrc int, err error) {
 	// TODO: get rid of reorderBuffer. See CL 23460044.
 	rb := reorderBuffer{}
 	rb.init(f, src)

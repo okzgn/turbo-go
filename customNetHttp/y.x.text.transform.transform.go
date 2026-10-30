@@ -1,3 +1,5 @@
+// Origen: go1.26.10, src/vendor/golang.org/x/text/transform/transform.go. Regenerado con customNetHttp/regenerar; parches en customNetHttp/PATCHES.md.
+
 // Copyright 2013 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
@@ -38,7 +40,7 @@ var (
 )
 
 // Transformer transforms bytes.
-type Transformer_ interface {
+type transform_Transformer interface {
 	// Transform writes to dst the transformed bytes read from src, and
 	// returns the number of dst bytes written and src bytes read. The
 	// atEOF argument tells whether src represents the last bytes of the
@@ -67,7 +69,7 @@ type Transformer_ interface {
 // SpanningTransformer extends the Transformer interface with a Span method
 // that determines how much of the input already conforms to the Transformer.
 type SpanningTransformer interface {
-	Transformer_
+	transform_Transformer
 
 	// Span returns a position in src such that transforming src[:n] results in
 	// identical output src[:n] for these bytes. It does not necessarily return
@@ -107,9 +109,9 @@ type NopResetter struct{}
 func (NopResetter) Reset() {}
 
 // Reader wraps another io.Reader by transforming the bytes read.
-type Reader_ struct {
+type transform_Reader struct {
 	r   io.Reader
-	t   Transformer_
+	t   transform_Transformer
 	err error
 
 	// dst[dst0:dst1] contains bytes that have been transformed by t but
@@ -131,9 +133,9 @@ const defaultBufSize = 4096
 
 // NewReader returns a new Reader that wraps r by transforming the bytes read
 // via t. It calls Reset on t.
-func NewReader_(r io.Reader, t Transformer_) *Reader_ {
+func transform_NewReader(r io.Reader, t transform_Transformer) *transform_Reader {
 	t.Reset()
-	return &Reader_{
+	return &transform_Reader{
 		r:   r,
 		t:   t,
 		dst: make([]byte, defaultBufSize),
@@ -142,7 +144,7 @@ func NewReader_(r io.Reader, t Transformer_) *Reader_ {
 }
 
 // Read implements the io.Reader interface.
-func (r *Reader_) Read(p []byte) (int, error) {
+func (r *transform_Reader) Read(p []byte) (int, error) {
 	n, err := 0, error(nil)
 	for {
 		// Copy out any transformed bytes and return the final error if we are done.
@@ -206,9 +208,9 @@ func (r *Reader_) Read(p []byte) (int, error) {
 // Writer wraps another io.Writer by transforming the bytes read.
 // The user needs to call Close to flush unwritten bytes that may
 // be buffered.
-type Writer_ struct {
+type transform_Writer struct {
 	w   io.Writer
-	t   Transformer_
+	t   transform_Transformer
 	dst []byte
 
 	// src[:n] contains bytes that have not yet passed through t.
@@ -218,9 +220,9 @@ type Writer_ struct {
 
 // NewWriter returns a new Writer that wraps w by transforming the bytes written
 // via t. It calls Reset on t.
-func NewWriter_(w io.Writer, t Transformer_) *Writer_ {
+func transform_NewWriter(w io.Writer, t transform_Transformer) *transform_Writer {
 	t.Reset()
-	return &Writer_{
+	return &transform_Writer{
 		w:   w,
 		t:   t,
 		dst: make([]byte, defaultBufSize),
@@ -231,7 +233,7 @@ func NewWriter_(w io.Writer, t Transformer_) *Writer_ {
 // Write implements the io.Writer interface. If there are not enough
 // bytes available to complete a Transform, the bytes will be buffered
 // for the next write. Call Close to convert the remaining bytes.
-func (w *Writer_) Write(data []byte) (n int, err error) {
+func (w *transform_Writer) Write(data []byte) (n int, err error) {
 	src := data
 	if w.n > 0 {
 		// Append bytes from data to the last remainder.
@@ -293,7 +295,7 @@ func (w *Writer_) Write(data []byte) (n int, err error) {
 }
 
 // Close implements the io.Closer interface.
-func (w *Writer_) Close() error {
+func (w *transform_Writer) Close() error {
 	src := w.src[:w.n]
 	for {
 		nDst, nSrc, err := w.t.Transform(w.dst, src, true)
@@ -307,9 +309,9 @@ func (w *Writer_) Close() error {
 	}
 }
 
-type nop struct{ NopResetter }
+type transform_nop struct{ NopResetter }
 
-func (nop) Transform(dst, src []byte, atEOF bool) (nDst, nSrc int, err error) {
+func (transform_nop) Transform(dst, src []byte, atEOF bool) (nDst, nSrc int, err error) {
 	n := copy(dst, src)
 	if n < len(src) {
 		err = ErrShortDst
@@ -317,7 +319,7 @@ func (nop) Transform(dst, src []byte, atEOF bool) (nDst, nSrc int, err error) {
 	return n, n, err
 }
 
-func (nop) Span(src []byte, atEOF bool) (n int, err error) {
+func (transform_nop) Span(src []byte, atEOF bool) (n int, err error) {
 	return len(src), nil
 }
 
@@ -330,10 +332,10 @@ func (discard) Transform(dst, src []byte, atEOF bool) (nDst, nSrc int, err error
 var (
 	// Discard is a Transformer for which all Transform calls succeed
 	// by consuming all bytes and writing nothing.
-	Discard Transformer_ = discard{}
+	Discard transform_Transformer = discard{}
 
 	// Nop is a SpanningTransformer that copies src to dst.
-	Nop SpanningTransformer = nop{}
+	Nop SpanningTransformer = transform_nop{}
 )
 
 // chain is a sequence of links. A chain with N Transformers has N+1 links and
@@ -359,7 +361,7 @@ func (c *chain) fatalError(errIndex int, err error) {
 }
 
 type link struct {
-	t Transformer_
+	t transform_Transformer
 	// b[p:n] holds the bytes to be transformed by t.
 	b []byte
 	p int
@@ -375,9 +377,9 @@ func (l *link) dst() []byte {
 }
 
 // Chain returns a Transformer that applies t in sequence.
-func Chain(t ...Transformer_) Transformer_ {
+func Chain(t ...transform_Transformer) transform_Transformer {
 	if len(t) == 0 {
-		return nop{}
+		return transform_nop{}
 	}
 	c := &chain{link: make([]link, len(t)+1)}
 	for i, tt := range t {
@@ -494,7 +496,7 @@ func (c *chain) Transform(dst, src []byte, atEOF bool) (nDst, nSrc int, err erro
 }
 
 // Deprecated: Use runes.Remove instead.
-func RemoveFunc(f func(r rune) bool) Transformer_ {
+func RemoveFunc(f func(r rune) bool) transform_Transformer {
 	return removeF(f)
 }
 
@@ -565,7 +567,7 @@ const initialBufSize = 128
 
 // String returns a string with the result of converting s[:n] using t, where
 // n <= len(s). If err == nil, n will be len(s). It calls Reset on t.
-func String(t Transformer_, s string) (result string, n int, err error) {
+func String(t transform_Transformer, s string) (result string, n int, err error) {
 	t.Reset()
 	if s == "" {
 		// Fast path for the common case for empty input. Results in about a
@@ -674,22 +676,22 @@ func String(t Transformer_, s string) (result string, n int, err error) {
 
 // Bytes returns a new byte slice with the result of converting b[:n] using t,
 // where n <= len(b). If err == nil, n will be len(b). It calls Reset on t.
-func Bytes(t Transformer_, b []byte) (result []byte, n int, err error) {
-	return doAppend_(t, 0, make([]byte, len(b)), b)
+func Bytes(t transform_Transformer, b []byte) (result []byte, n int, err error) {
+	return transform_doAppend(t, 0, make([]byte, len(b)), b)
 }
 
 // Append appends the result of converting src[:n] using t to dst, where
 // n <= len(src), If err == nil, n will be len(src). It calls Reset on t.
-func Append(t Transformer_, dst, src []byte) (result []byte, n int, err error) {
+func Append(t transform_Transformer, dst, src []byte) (result []byte, n int, err error) {
 	if len(dst) == cap(dst) {
 		n := len(src) + len(dst) // It is okay for this to be 0.
 		b := make([]byte, n)
 		dst = b[:copy(b, dst)]
 	}
-	return doAppend_(t, len(dst), dst[:cap(dst)], src)
+	return transform_doAppend(t, len(dst), dst[:cap(dst)], src)
 }
 
-func doAppend_(t Transformer_, pDst int, dst, src []byte) (result []byte, n int, err error) {
+func transform_doAppend(t transform_Transformer, pDst int, dst, src []byte) (result []byte, n int, err error) {
 	t.Reset()
 	pSrc := 0
 	for {

@@ -1,0 +1,134 @@
+diff --git a/1.net.http.h2_bundle.go b/1.net.http.h2_bundle.go
+index 842f3e3..33dd121 100644
+--- a/1.net.http.h2_bundle.go
++++ b/1.net.http.h2_bundle.go
+@@ -4520,7 +4520,7 @@ func (s *http2Server) serveConn(c net.Conn, opts *http2ServeConnOpts, newf func(
+ 	// passes the connection off to us with the deadline already set.
+ 	// Write deadlines are set per stream in serverConn.newStream.
+ 	// Disarm the net.Conn write deadline here.
+-	if sc.hs.WriteTimeout > 0 {
++	if TurboTimeLimits.Load().WT > 0 { // turbo:P6
+ 		sc.conn.SetWriteDeadline(time.Time{})
+ 	}
+ 
+@@ -5018,10 +5018,14 @@ func (sc *http2serverConn) serve(conf http2http2Config) {
+ 	sc.setConnState(StateActive)
+ 	sc.setConnState(StateIdle)
+ 
+-	if sc.srv.IdleTimeout > 0 {
+-		sc.idleTimer = time.AfterFunc(sc.srv.IdleTimeout, sc.onIdleTimer)
+-		defer sc.idleTimer.Stop()
++	if it := TurboTimeLimits.Load().IT; it > 0 { // turbo:P6
++		sc.idleTimer = time.AfterFunc(it, sc.onIdleTimer)
+ 	}
++	defer func() { // turbo:P6: closeStream puede crear el temporizador más tarde
++		if sc.idleTimer != nil {
++			sc.idleTimer.Stop()
++		}
++	}()
+ 
+ 	if conf.SendPingTimeout > 0 {
+ 		sc.readIdleTimeout = conf.SendPingTimeout
+@@ -5807,8 +5811,12 @@ func (sc *http2serverConn) closeStream(st *http2stream, err error) {
+ 	delete(sc.streams, st.id)
+ 	if len(sc.streams) == 0 {
+ 		sc.setConnState(StateIdle)
+-		if sc.srv.IdleTimeout > 0 && sc.idleTimer != nil {
+-			sc.idleTimer.Reset(sc.srv.IdleTimeout)
++		if it := TurboTimeLimits.Load().IT; it > 0 { // turbo:P6: IT puede activarse con la conexión abierta
++			if sc.idleTimer == nil {
++				sc.idleTimer = time.AfterFunc(it, sc.onIdleTimer)
++			} else {
++				sc.idleTimer.Reset(it)
++			}
+ 		}
+ 		if http2h1ServerKeepAlivesDisabled(sc.hs) {
+ 			sc.startGracefulShutdownInternal()
+@@ -6181,9 +6189,9 @@ func (sc *http2serverConn) processHeaders(f *http2MetaHeadersFrame) error {
+ 	// similar to how the http1 server works. Here it's
+ 	// technically more like the http1 Server's ReadHeaderTimeout
+ 	// (in Go 1.8), though. That's a more sane option anyway.
+-	if sc.hs.ReadTimeout > 0 {
++	if rt := TurboTimeLimits.Load().RT; rt > 0 { // turbo:P6
+ 		sc.conn.SetReadDeadline(time.Time{})
+-		st.readDeadline = time.AfterFunc(sc.hs.ReadTimeout, st.onReadTimeout)
++		st.readDeadline = time.AfterFunc(rt, st.onReadTimeout)
+ 	}
+ 
+ 	return sc.scheduleHandler(st, rw, req, handler)
+@@ -6202,7 +6210,7 @@ func (sc *http2serverConn) upgradeRequest(req *Request) {
+ 
+ 	// Disable any read deadline set by the net/http package
+ 	// prior to the upgrade.
+-	if sc.hs.ReadTimeout > 0 {
++	if TurboTimeLimits.Load().RT > 0 { // turbo:P6
+ 		sc.conn.SetReadDeadline(time.Time{})
+ 	}
+ 
+@@ -6279,8 +6287,8 @@ func (sc *http2serverConn) newStream(id, pusherID uint32, state http2streamState
+ 	st.cw.Init()
+ 	st.flow.conn = &sc.flow // link to conn-level counter
+ 	st.inflow.init(sc.initialStreamRecvWindowSize)
+-	if sc.hs.WriteTimeout > 0 {
+-		st.writeDeadline = time.AfterFunc(sc.hs.WriteTimeout, st.onWriteTimeout)
++	if wt := TurboTimeLimits.Load().WT; wt > 0 { // turbo:P6
++		st.writeDeadline = time.AfterFunc(wt, st.onWriteTimeout)
+ 	}
+ 
+ 	sc.streams[id] = st
+diff --git a/1.net.http.server.go b/1.net.http.server.go
+index 6b555e2..7294245 100644
+--- a/1.net.http.server.go
++++ b/1.net.http.server.go
+@@ -910,10 +910,11 @@ func (s *Server) initialReadLimitSize() int64 {
+ // ReadTimeout, or WriteTimeout.
+ func (s *Server) tlsHandshakeTimeout() time.Duration {
+ 	var ret time.Duration
++	t := TurboTimeLimits.Load() // turbo:P6: los timeouts de Turbo, leídos en cada conexión
+ 	for _, v := range [...]time.Duration{
+-		s.ReadHeaderTimeout,
+-		s.ReadTimeout,
+-		s.WriteTimeout,
++		t.RHT,
++		t.RT,
++		t.WT,
+ 	} {
+ 		if v <= 0 {
+ 			continue
+@@ -978,10 +979,11 @@ func (c *conn) readRequest(ctx context.Context) (w *response, err error) {
+ 
+ 	t0 := time.Now()
+ 	var wholeReqDeadline time.Time // or zero if none
+-	if d := c.server.ReadTimeout; d > 0 {
++	// turbo:P6
++	if d := TurboTimeLimits.Load().RT; d > 0 {
+ 		wholeReqDeadline = t0.Add(d)
+ 	}
+-	if d := c.server.WriteTimeout; d > 0 {
++	if d := TurboTimeLimits.Load().WT; d > 0 { // turbo:P6
+ 		defer func() {
+ 			c.rwc.SetWriteDeadline(time.Now().Add(d))
+ 		}()
+@@ -3624,18 +3626,14 @@ func (s *Server) trackConn(c *conn, add bool) {
+ 	}
+ }
+ 
++// turbo:P6: los timeouts de Turbo (IT y RHT), leídos en cada uso; 0 es sin
++// límite, sin recurrir a ReadTimeout.
+ func (s *Server) idleTimeout() time.Duration {
+-	if s.IdleTimeout != 0 {
+-		return s.IdleTimeout
+-	}
+-	return s.ReadTimeout
++	return TurboTimeLimits.Load().IT
+ }
+ 
+ func (s *Server) readHeaderTimeout() time.Duration {
+-	if s.ReadHeaderTimeout != 0 {
+-		return s.ReadHeaderTimeout
+-	}
+-	return s.ReadTimeout
++	return TurboTimeLimits.Load().RHT
+ }
+ 
+ func (s *Server) doKeepAlives() bool {

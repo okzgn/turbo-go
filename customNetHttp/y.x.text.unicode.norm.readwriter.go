@@ -1,3 +1,5 @@
+// Origen: go1.26.10, src/vendor/golang.org/x/text/unicode/norm/readwriter.go. Regenerado con customNetHttp/regenerar; parches en customNetHttp/PATCHES.md.
+
 // Copyright 2011 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
@@ -27,7 +29,7 @@ func (w *normWriter) Write(data []byte) (n int, err error) {
 		}
 		w.rb.src = inputBytes(data[:m])
 		w.rb.nsrc = m
-		w.buf = doAppend(&w.rb, w.buf, 0)
+		w.buf = norm_doAppend(&w.rb, w.buf, 0)
 		data = data[m:]
 		n += m
 
@@ -63,7 +65,7 @@ func (w *normWriter) Close() error {
 // by writing f(b) to w. The returned writer may use an
 // internal buffer to maintain state across Write calls.
 // Calling its Close method writes any buffered data to w.
-func (f NormalizeForm) Writer(w io.Writer) io.WriteCloser {
+func (f norm_Form) Writer(w io.Writer) io.WriteCloser {
 	wr := &normWriter{rb: reorderBuffer{}, w: w}
 	wr.rb.init(f, nil)
 	return wr
@@ -101,7 +103,7 @@ func (r *normReader) Read(p []byte) (int, error) {
 		r.rb.src = inputBytes(r.inbuf[0:n])
 		r.rb.nsrc, r.err = n, err
 		if n > 0 {
-			r.outbuf = doAppend(&r.rb, r.outbuf, 0)
+			r.outbuf = norm_doAppend(&r.rb, r.outbuf, 0)
 		}
 		if err == io.EOF {
 			r.lastBoundary = len(r.outbuf)
@@ -116,7 +118,7 @@ func (r *normReader) Read(p []byte) (int, error) {
 
 // Reader returns a new reader that implements Read
 // by reading data from r and returning f(data).
-func (f NormalizeForm) Reader(r io.Reader) io.Reader {
+func (f norm_Form) Reader(r io.Reader) io.Reader {
 	const chunk = 4000
 	buf := make([]byte, chunk)
 	rr := &normReader{rb: reorderBuffer{}, r: r, inbuf: buf}

@@ -1,0 +1,40 @@
+# Unidad systemd de referencia para Turbo.
+#
+# Instalación (ejemplo con el binario y los sitios en /home/server/):
+#   sudo useradd --system --home-dir /home/server --shell /usr/sbin/nologin turbo
+#   sudo chown -R turbo:turbo /home/server
+#   sudo cp turbo.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now turbo
+#   journalctl -u turbo -f     # mensajes de Turbo (stdout) con nivel y hora
+#
+# Turbo corre sin privilegios: CAP_NET_BIND_SERVICE le deja abrir los puertos
+# 80 y 443. Los CGI y Certbot se ejecutan como el usuario turbo. Certbot
+# trabaja en turbo.certificates/ dentro del directorio de sitios; si se usa
+# otra configuración de Certbot que escriba en /etc/letsencrypt, añádala a
+# ReadWritePaths.
+#
+# Detrás de un proxy, Turbo puede escuchar en otra dirección, por ejemplo:
+#   Environment=TURBO_HTTP_ADDR=127.0.0.1:8080
+# (y entonces no necesita CAP_NET_BIND_SERVICE).
+
+[Unit]
+Description=Turbo
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=turbo
+Group=turbo
+WorkingDirectory=/home/server/
+ExecStart=/home/server/turbo
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/home/server/
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

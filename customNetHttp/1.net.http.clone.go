@@ -1,3 +1,5 @@
+// Origen: go1.26.10, src/net/http/clone.go. Regenerado con customNetHttp/regenerar; parches en customNetHttp/PATCHES.md.
+
 // Copyright 2019 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
@@ -7,8 +9,18 @@ package customNetHttp
 import (
 	"net/textproto"
 	"net/url"
+	_ "unsafe" // for linkname
 )
 
+// cloneURLValues should be an internal detail,
+// but widely used packages access it using linkname.
+// Notable members of the hall of shame include:
+//   - github.com/searKing/golang
+//
+// Do not remove or change the type signature.
+// See go.dev/issue/67401.
+//
+//go:linkname cloneURLValues
 func cloneURLValues(v url.Values) url.Values {
 	if v == nil {
 		return nil
@@ -18,6 +30,15 @@ func cloneURLValues(v url.Values) url.Values {
 	return url.Values(Header(v).Clone())
 }
 
+// cloneURL should be an internal detail,
+// but widely used packages access it using linkname.
+// Notable members of the hall of shame include:
+//   - github.com/searKing/golang
+//
+// Do not remove or change the type signature.
+// See go.dev/issue/67401.
+//
+//go:linkname cloneURL
 func cloneURL(u *url.URL) *url.URL {
 	if u == nil {
 		return nil
@@ -31,15 +52,24 @@ func cloneURL(u *url.URL) *url.URL {
 	return u2
 }
 
-func cloneMultipartForm(f *Form) *Form {
+// cloneMultipartForm should be an internal detail,
+// but widely used packages access it using linkname.
+// Notable members of the hall of shame include:
+//   - github.com/searKing/golang
+//
+// Do not remove or change the type signature.
+// See go.dev/issue/67401.
+//
+//go:linkname cloneMultipartForm
+func cloneMultipartForm(f *multipart_Form) *multipart_Form {
 	if f == nil {
 		return nil
 	}
-	f2 := &Form{
+	f2 := &multipart_Form{
 		Value: (map[string][]string)(Header(f.Value).Clone()),
 	}
 	if f.File != nil {
-		m := make(map[string][]*FileHeader)
+		m := make(map[string][]*FileHeader, len(f.File))
 		for k, vv := range f.File {
 			vv2 := make([]*FileHeader, len(vv))
 			for i, v := range vv {
@@ -52,6 +82,15 @@ func cloneMultipartForm(f *Form) *Form {
 	return f2
 }
 
+// cloneMultipartFileHeader should be an internal detail,
+// but widely used packages access it using linkname.
+// Notable members of the hall of shame include:
+//   - github.com/searKing/golang
+//
+// Do not remove or change the type signature.
+// See go.dev/issue/67401.
+//
+//go:linkname cloneMultipartFileHeader
 func cloneMultipartFileHeader(fh *FileHeader) *FileHeader {
 	if fh == nil {
 		return nil
@@ -64,6 +103,16 @@ func cloneMultipartFileHeader(fh *FileHeader) *FileHeader {
 
 // cloneOrMakeHeader invokes Header.Clone but if the
 // result is nil, it'll instead make and return a non-nil Header.
+//
+// cloneOrMakeHeader should be an internal detail,
+// but widely used packages access it using linkname.
+// Notable members of the hall of shame include:
+//   - github.com/searKing/golang
+//
+// Do not remove or change the type signature.
+// See go.dev/issue/67401.
+//
+//go:linkname cloneOrMakeHeader
 func cloneOrMakeHeader(hdr Header) Header {
 	clone := hdr.Clone()
 	if clone == nil {
