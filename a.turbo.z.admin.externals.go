@@ -25,12 +25,16 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/url"
 	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // configSchema is the turbo.config schema this version writes, as "^": {"v": "<schema>"}. A file without
@@ -145,48 +149,112 @@ func indexOrder(configBytes []byte) map[string][]string {
 		}
 		return nil
 	}
-	walk(nil)
+	_ = walk(nil) // configBytes was already read as valid JSON
 	return order
 }
 
-// saveDefaultConfig writes turbo.config. The first time a migrated file is saved, the original is copied to
-// turbo.config.v<schema>.bak. Callers hold the global lock.
+// saveDefaultConfig writes turbo.config, replacing it atomically. A file on disk that isn't valid JSON is
+// first copied to turbo.config.invalido.<date>.bak, and the first time a migrated file is saved, the original
+// is copied to turbo.config.v<schema>.bak. Callers hold the global lock.
 func saveDefaultConfig() bool {
 	configPath := sitesDir.Get() + configFileName
-	if configSchemaRead < configSchema {
-		backupPath := configPath + ".v" + strconv.Itoa(configSchemaRead) + ".bak"
-		if original, err := os.ReadFile(configPath); err == nil && !fileExists(backupPath) { // #nosec G304 -- path under the sites directory chosen by the administrator (TURBO_DIR or M)
-			if err = os.WriteFile(backupPath, original, 0600); err != nil { // #nosec G703 -- turbo.config backup next to the original, path under the sites directory chosen by the administrator (TURBO_DIR or M)
-				slog.Error("No se puede guardar la copia de turbo.config", "archivo", backupPath, "error", err)
-				return false
-			}
-		}
+	if !backupBeforeSave(configPath, configSchemaRead) {
+		return false
 	}
 	config := createDefaultConfig(true, false, true)
-	err := os.WriteFile(configPath, []byte("{\"^\":{\"v\":\""+strconv.Itoa(configSchema)+"\"},"+config[1:]), 0600)
-	if err != nil {
+	if err := writeFileAtomic(configPath, []byte("{\"^\":{\"v\":\""+strconv.Itoa(configSchema)+"\"},"+config[1:])); err != nil {
 		slog.Error("No se puede guardar turbo.config", "archivo", configPath, "error", err)
 		return false
 	}
 	configSchemaRead = configSchema
 	if dir := sitesDir.Get(); dir != startDir { // Turbo starts reading startDir: leave there where the sites are
 		pointerPath := startDir + configFileName
-		if original, err := os.ReadFile(pointerPath); err == nil && !isSitesDirPointer(original) {
-			backupPath := pointerPath + ".v" + strconv.Itoa(configSchemaOf(original)) + ".bak"
-			if !fileExists(backupPath) {
-				if err = os.WriteFile(backupPath, original, 0600); err != nil { // #nosec G703 -- turbo.config backup next to the original, path under the sites directory chosen by the administrator (TURBO_DIR or M)
-					slog.Error("No se puede guardar la copia de turbo.config", "archivo", backupPath, "error", err)
-					return false
-				}
-			}
+		if original, err := os.ReadFile(pointerPath); err == nil && !isSitesDirPointer(original) && !backupBeforeSave(pointerPath, configSchemaOf(original)) { // #nosec G304 -- turbo.config of the start directory
+			return false
 		}
-		pointer := "{\"^\":{\"v\":\"" + strconv.Itoa(configSchema) + "\"},\".\":{\"M\":\"" + changeChars(true, dir, charEscapeLists['J']) + "\"}}"
-		if err = os.WriteFile(pointerPath, []byte(pointer), 0600); err != nil {
+		pointer := "{\"^\":{\"v\":\"" + strconv.Itoa(configSchema) + "\"},\".\":{\"M\":" + jsonString(dir) + "}}"
+		if err := writeFileAtomic(pointerPath, []byte(pointer)); err != nil {
 			slog.Error("No se puede guardar turbo.config", "archivo", pointerPath, "error", err)
 			return false
 		}
 	}
 	return true
+}
+
+// backupBeforeSave copies the turbo.config at configPath before it is overwritten: to
+// turbo.config.invalido.<date>.bak if it isn't valid JSON, or to turbo.config.v<schema>.bak (once) if its
+// schema is older than the current one. It reports false if a needed copy couldn't be written.
+func backupBeforeSave(configPath string, schema int) bool {
+	original, err := os.ReadFile(configPath) // #nosec G304 -- path under the sites directory chosen by the administrator (TURBO_DIR or M)
+	if err != nil {
+		return true // Nothing to keep
+	}
+	var backupPath string
+	switch {
+	case !json.Valid(original):
+		backupPath = configPath + ".invalido." + time.Now().Format("20060102-150405") + ".bak"
+		slog.Warn("turbo.config no es JSON válido: se copia antes de guardar", "copia", backupPath)
+	case schema < configSchema:
+		backupPath = configPath + ".v" + strconv.Itoa(schema) + ".bak"
+		if fileExists(backupPath) {
+			return true
+		}
+	default:
+		return true
+	}
+	if err = os.WriteFile(backupPath, original, 0600); err != nil { // #nosec G703 -- turbo.config backup next to the original, path under the sites directory chosen by the administrator (TURBO_DIR or M)
+		slog.Error("No se puede guardar la copia de turbo.config", "archivo", backupPath, "error", err)
+		return false
+	}
+	return true
+}
+
+// writeFileAtomic replaces path with data (permissions 0600): it writes a temporary file next to it, syncs it
+// and renames it over path, so a failure or a power cut leaves either the old file or the new one. If path is a
+// symbolic link, its target is replaced and the link stays (H62).
+func writeFileAtomic(path string, data []byte) error {
+	if target, err := filepath.EvalSymlinks(path); err == nil {
+		path = target
+	}
+	tempPath := path + ".tmp"
+	file, err := os.OpenFile(tempPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600) // #nosec G304 -- next to turbo.config, under the sites directory chosen by the administrator
+	if err != nil {
+		return err
+	}
+	_, err = file.Write(data)
+	if syncErr := file.Sync(); err == nil {
+		err = syncErr
+	}
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = os.Rename(tempPath, path)
+	}
+	if err != nil {
+		os.Remove(tempPath) // #nosec G104 -- best effort: the error that matters is err
+	}
+	return err
+}
+
+// jsonString returns s as a JSON string, quotes included. Unlike json.Marshal, it leaves <, > and & as they
+// are, so turbo.config stays readable.
+func jsonString(s string) string {
+	plain := true
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c < 0x20 || c == '"' || c == '\\' || c >= 0x7f {
+			plain = false
+			break
+		}
+	}
+	if plain {
+		return "\"" + s + "\""
+	}
+	var builder strings.Builder
+	encoder := json.NewEncoder(&builder)
+	encoder.SetEscapeHTML(false)
+	encoder.Encode(s) // #nosec G104 -- a string always encodes
+	return strings.TrimSuffix(builder.String(), "\n")
 }
 
 func createDefaultConfig(excludeSubdomains bool, includeFixedKeys bool, includeCredentials bool) string {
@@ -195,73 +263,73 @@ func createDefaultConfig(excludeSubdomains bool, includeFixedKeys bool, includeC
 	// c: to include the username and the password hash (only when saving)
 	credentials := ""
 	if includeCredentials {
-		credentials = ",\"U\":\"" + changeChars(true, panelUser.Get(), charEscapeLists['J']) + "\",\"PH\":\"" + panelPasswordHash.Get() + "\""
+		credentials = ",\"U\":" + jsonString(panelUser.Get()) + ",\"PH\":" + jsonString(panelPasswordHash.Get())
 	}
-	jsonBuilder := ""
-	delimiter := "\""
+	var jsonBuilder strings.Builder
+	delimiter := ""
 	for siteKey := range sitesMap {
-		jsonBuilder += delimiter + siteKey + "\":"
+		jsonBuilder.WriteString(delimiter + jsonString(siteKey) + ":")
 		if !excludeSubdomains {
-			jsonBuilder += "{" + createSiteSettingsList(siteKey) + "}"
+			jsonBuilder.WriteString("{" + createSiteSettingsList(siteKey) + "}")
 		} else {
-			jsonBuilder += createSubdomainsList(true, siteKey)
+			jsonBuilder.WriteString(createSubdomainsList(true, siteKey))
 		}
-		delimiter = ",\""
+		delimiter = ","
 	}
 
-	jsonBuilder += delimiter + "_\":{" // Chars to encode list
-	delimiter = "\""
+	jsonBuilder.WriteString(delimiter + "\"_\":{") // Chars to encode list
+	delimiter = ""
 	for mapKey, replacement := range charReplacements {
-		jsonBuilder += delimiter + changeChars(true, mapKey, charEscapeLists['J']) + "\":"
+		jsonBuilder.WriteString(delimiter + jsonString(mapKey) + ":")
 		if _, fixed := fixedCharReplacements[mapKey]; fixed && includeFixedKeys {
-			jsonBuilder += "{\"f\":\"" + changeChars(true, replacement, charEscapeLists['J']) + "\"}"
+			jsonBuilder.WriteString("{\"f\":" + jsonString(replacement) + "}")
 		} else {
-			jsonBuilder += "\"" + changeChars(true, replacement, charEscapeLists['J']) + "\""
+			jsonBuilder.WriteString(jsonString(replacement))
 		}
-		delimiter = ",\""
+		delimiter = ","
 	}
 
-	jsonBuilder += "},\"@\":{" // Denied IPs list
-	delimiter = "\""
+	jsonBuilder.WriteString("},\"@\":{") // Denied IPs list
+	delimiter = ""
 	for mapKey, until := range deniedIPList() {
-		jsonBuilder += delimiter + changeChars(true, mapKey, charEscapeLists['J']) + "\":\"" + changeChars(true, strconv.FormatInt(until, 10), charEscapeLists['J']) + "\""
-		delimiter = ",\""
+		jsonBuilder.WriteString(delimiter + jsonString(mapKey) + ":\"" + strconv.FormatInt(until, 10) + "\"")
+		delimiter = ","
 	}
 
-	jsonBuilder += "},\"#\":{" // Http codes responses list
-	delimiter = "\""
+	jsonBuilder.WriteString("},\"#\":{") // Http codes responses list
+	delimiter = ""
 	for mapKey, template := range *httpResponses.Load() {
-		jsonBuilder += delimiter + changeChars(true, strconv.Itoa(mapKey), charEscapeLists['J']) + "\":"
+		jsonBuilder.WriteString(delimiter + "\"" + strconv.Itoa(mapKey) + "\":")
 		if _, fixed := fixedHTTPResponses[mapKey]; fixed && includeFixedKeys {
-			jsonBuilder += "{\"f\":\"" + changeChars(true, template, charEscapeLists['J']) + "\"}"
+			jsonBuilder.WriteString("{\"f\":" + jsonString(template) + "}")
 		} else {
-			jsonBuilder += "\"" + changeChars(true, template, charEscapeLists['J']) + "\""
+			jsonBuilder.WriteString(jsonString(template))
 		}
-		delimiter = ",\""
+		delimiter = ","
 	}
 
-	return "{" + jsonBuilder + "},\".\":{\"M\":\"" + changeChars(true, sitesDir.Get(), charEscapeLists['J']) + "\",\"PA\":\"" + changeChars(true, panelAccess.Load().setting, charEscapeLists['J']) + "\",\"RT\":\"" + serverTimeLimits.Load().RT.String() + "\",\"RHT\":\"" + serverTimeLimits.Load().RHT.String() + "\",\"WT\":\"" + serverTimeLimits.Load().WT.String() + "\",\"IT\":\"" + serverTimeLimits.Load().IT.String() + "\",\"MUB\":\"" + strconv.FormatInt(maxURILength.Load(), 10) + "\",\"MHB\":\"" + strconv.FormatInt(maxHeaderBytes.Load(), 10) + "\",\"MBB\":\"" + strconv.FormatInt(maxBodySize.Load(), 10) + "\",\"CIL\":\"" + strconv.FormatInt(serverRequestLimits[0]/int64(time.Millisecond), 10) + "\",\"CIS\":\"" + strconv.FormatInt(serverRequestLimits[1]/int64(time.Millisecond), 10) + "\",\"CII\":\"" + strconv.FormatInt(serverRequestLimits[2], 10) + "\"" + credentials + "}}"
+	return "{" + jsonBuilder.String() + "},\".\":{\"M\":" + jsonString(sitesDir.Get()) + ",\"PA\":" + jsonString(panelAccess.Load().setting) + ",\"RT\":\"" + serverTimeLimits.Load().RT.String() + "\",\"RHT\":\"" + serverTimeLimits.Load().RHT.String() + "\",\"WT\":\"" + serverTimeLimits.Load().WT.String() + "\",\"IT\":\"" + serverTimeLimits.Load().IT.String() + "\",\"MUB\":\"" + strconv.FormatInt(maxURILength.Load(), 10) + "\",\"MHB\":\"" + strconv.FormatInt(maxHeaderBytes.Load(), 10) + "\",\"MBB\":\"" + strconv.FormatInt(maxBodySize.Load(), 10) + "\",\"CIL\":\"" + strconv.FormatInt(serverRequestLimits[0]/int64(time.Millisecond), 10) + "\",\"CIS\":\"" + strconv.FormatInt(serverRequestLimits[1]/int64(time.Millisecond), 10) + "\",\"CII\":\"" + strconv.FormatInt(serverRequestLimits[2], 10) + "\",\"CGL\":\"" + strconv.FormatInt(globalRequestLimit.Load(), 10) + "\"" + credentials + "}}"
 }
 
 func createSubdomainsList(excludeSettings bool, domain string) string {
-	jsonBuilder := ""
-	delimiter := "\""
+	var jsonBuilder strings.Builder
+	delimiter := ""
 	for subdomain := range sitesMap[domain] {
-		jsonBuilder += delimiter + subdomain + "\":"
+		jsonBuilder.WriteString(delimiter + jsonString(subdomain) + ":")
 		if !excludeSettings {
 			if subdomain != "" {
 				subdomain += "." + domain
-				jsonBuilder += "{" + createSiteSettingsList(subdomain) + "}" // All subdomains & domains in the frontend need to show if SSL is on
+				jsonBuilder.WriteString("{" + createSiteSettingsList(subdomain) + "}") // All subdomains & domains in the frontend need to show if SSL is on
 			} else {
 				subdomain = domain
-				jsonBuilder += "{" + createSiteAliasList(subdomain) + "," + createSiteSettingsList(subdomain) + "}"
+				jsonBuilder.WriteString("{" + createSiteAliasList(subdomain) + "," + createSiteSettingsList(subdomain) + "}")
 			}
 		} else {
-			jsonBuilder += createSubdomainData(domain, subdomain)
+			jsonBuilder.WriteString(createSubdomainData(domain, subdomain))
 		}
-		delimiter = ",\""
+		delimiter = ","
 	}
-	return "{" + jsonBuilder + "}"
+	return "{" + jsonBuilder.String() + "}"
 }
 
 func createSubdomainData(domain string, subdomain string) string {
@@ -275,8 +343,9 @@ func createSubdomainData(domain string, subdomain string) string {
 		siteKey = domain
 	}
 
-	jsonBuilder := "\"=\":{"
-	delimiter = "\""
+	var jsonBuilder strings.Builder
+	jsonBuilder.WriteString("\"=\":{")
+	delimiter = ""
 	for routeKey = range sitesMap[domain][subdomain] {
 		switch sitesMap[domain][subdomain][routeKey][0] {
 		case 'H':
@@ -286,55 +355,57 @@ func createSubdomainData(domain string, subdomain string) string {
 		default:
 			extKey = ""
 		}
-		jsonBuilder += delimiter + changeChars(true, routeKey, charEscapeLists['J']) + "\":\"" + extKey + changeChars(true, sitesMap[domain][subdomain][routeKey][1:], charEscapeLists['J']) + "\""
-		delimiter = ",\""
+		jsonBuilder.WriteString(delimiter + jsonString(routeKey) + ":" + jsonString(extKey+sitesMap[domain][subdomain][routeKey][1:]))
+		delimiter = ","
 	}
 
-	jsonBuilder += "},\"$\":{"
-	delimiter = "\""
+	jsonBuilder.WriteString("},\"$\":{")
+	delimiter = ""
 	for extKey = range mimeTypes[siteKey] {
-		jsonBuilder += delimiter + extKey + "\":\"" + changeChars(true, mimeTypes[siteKey][extKey], charEscapeLists['J']) + "\""
-		delimiter = ",\""
+		jsonBuilder.WriteString(delimiter + jsonString(extKey) + ":" + jsonString(mimeTypes[siteKey][extKey]))
+		delimiter = ","
 	}
-	jsonBuilder += "},\".\":{"
-	delimiter = "\""
+	jsonBuilder.WriteString("},\".\":{")
+	delimiter = ""
 	for extKey = range customHeaders[siteKey] {
-		jsonBuilder += delimiter + extKey + "\":\"" + changeChars(true, customHeaders[siteKey][extKey], charEscapeLists['J']) + "\""
-		delimiter = ",\""
+		jsonBuilder.WriteString(delimiter + jsonString(extKey) + ":" + jsonString(customHeaders[siteKey][extKey]))
+		delimiter = ","
 	}
-	jsonBuilder += "},\"?\":{"
-	delimiter = "\""
+	jsonBuilder.WriteString("},\"?\":{")
+	delimiter = ""
 	for extKey = range preprocessors[siteKey] {
-		jsonBuilder += delimiter + extKey + "\":\"" + changeChars(true, preprocessors[siteKey][extKey], charEscapeLists['J']) + "\""
-		delimiter = ",\""
+		jsonBuilder.WriteString(delimiter + jsonString(extKey) + ":" + jsonString(preprocessors[siteKey][extKey]))
+		delimiter = ","
 	}
-	jsonBuilder += "},\"-\":{"
-	delimiter = "\""
+	jsonBuilder.WriteString("},\"-\":{")
+	delimiter = ""
 	for position, indexName := range orderedIndexes(siteKey) {
-		jsonBuilder += delimiter + changeChars(true, indexName, charEscapeLists['J']) + "\":\"" + strconv.Itoa(position+1) + "\""
-		delimiter = ",\""
+		jsonBuilder.WriteString(delimiter + jsonString(indexName) + ":\"" + strconv.Itoa(position+1) + "\"")
+		delimiter = ","
 	}
-	jsonBuilder += "}," + createSiteAliasList(siteKey)
-	jsonBuilder += "," + createSiteSettingsList(siteKey)
-	return "{" + jsonBuilder + "}"
+	jsonBuilder.WriteString("}," + createSiteAliasList(siteKey))
+	jsonBuilder.WriteString("," + createSiteSettingsList(siteKey))
+	return "{" + jsonBuilder.String() + "}"
 }
 
 func createSiteAliasList(siteKey string) string {
-	jsonBuilder := "{"
-	delimiter := "\""
+	var jsonBuilder strings.Builder
+	jsonBuilder.WriteString("{")
+	delimiter := ""
 	for aliasName, mappedSite := range domainAliases {
 		if siteKey == mappedSite {
-			jsonBuilder += delimiter + aliasName + "\":\"\""
-			delimiter = ",\""
+			jsonBuilder.WriteString(delimiter + jsonString(aliasName) + ":\"\"")
+			delimiter = ","
 		}
 	}
-	jsonBuilder += "}"
-	return "\"&\":" + jsonBuilder
+	jsonBuilder.WriteString("}")
+	return "\"&\":" + jsonBuilder.String()
 }
 
 func createSiteSettingsList(siteKey string) string {
-	jsonBuilder := "{"
-	delimiter := "\""
+	var jsonBuilder strings.Builder
+	jsonBuilder.WriteString("{")
+	delimiter := ""
 	//var settingName string
 	var encodedValue string
 	for settingName, settingVal := range siteSSLConfig[siteKey] {
@@ -357,9 +428,251 @@ func createSiteSettingsList(siteKey string) string {
 				encodedValue = "0"
 			}
 		}
-		jsonBuilder += delimiter + settingName + "\":\"" + encodedValue + "\""
-		delimiter = ",\""
+		jsonBuilder.WriteString(delimiter + jsonString(settingName) + ":" + jsonString(encodedValue))
+		delimiter = ","
 	}
-	jsonBuilder += "}"
-	return "\"!\":" + jsonBuilder
+	jsonBuilder.WriteString("}")
+	return "\"!\":" + jsonBuilder.String()
+}
+
+// configFileError is a turbo.config that can't be read (data is nil) or isn't valid JSON. It is never applied:
+// Turbo doesn't start with it, and a reload keeps the configuration in use (D11).
+type configFileError struct {
+	path string
+	data []byte
+	err  error
+}
+
+func (e *configFileError) Error() string { return describeConfigError(e.path, e.data, e.err) }
+
+// configErrorMessage is the message for an error of updateSettings, with a first line that says what Turbo
+// does about it: not start (starting), or keep the configuration in use.
+func configErrorMessage(err error, starting bool) string {
+	var fileErr *configFileError
+	if !errors.As(err, &fileErr) {
+		return err.Error()
+	}
+	headline := "turbo.config no es JSON válido"
+	if fileErr.data == nil {
+		headline = "No se puede leer turbo.config"
+	}
+	if starting {
+		headline += " y Turbo no arranca para no perder la configuración."
+	} else {
+		headline += ": se mantiene la configuración en uso hasta que se corrija."
+	}
+	return headline + "\n" + err.Error()
+}
+
+// logConfigError logs an error of a periodic updateSettings, if any.
+func logConfigError(err error) {
+	if err != nil {
+		slog.Error(configErrorMessage(err, false))
+	}
+}
+
+// parseConfig decodes turbo.config into raw. Anything but an object of objects at the top level is an error, as
+// a section that couldn't be read would get its defaults (the password among them).
+func parseConfig(configBytes []byte, raw *map[string]map[string]interface{}) error {
+	*raw = make(map[string]map[string]interface{})
+	return json.Unmarshal(configBytes, raw)
+}
+
+// configFileProblem returns the error of the turbo.config in dir, if there is one that can't be read or isn't
+// valid JSON.
+func configFileProblem(dir string) error {
+	configPath := dir + configFileName
+	if !fileExists(configPath) {
+		return nil
+	}
+	configBytes, err := os.ReadFile(configPath) // #nosec G304 -- turbo.config of a sites directory chosen by the administrator
+	if err != nil {
+		return &configFileError{path: configPath, err: err}
+	}
+	var raw map[string]map[string]interface{}
+	if err = parseConfig(configBytes, &raw); err != nil {
+		return &configFileError{path: configPath, data: configBytes, err: err}
+	}
+	return nil
+}
+
+// dropControlChars removes from a turbo.config read from disk the keys and values with control characters or
+// invalid UTF-8 (H4), which the panel doesn't accept, logging where they were. Response templates ("#") may
+// have tabs and line breaks.
+func dropControlChars(raw map[string]map[string]interface{}) {
+	var walk func(values map[string]interface{}, where string, whitespace bool)
+	walk = func(values map[string]interface{}, where string, whitespace bool) {
+		for key, value := range values {
+			text, isString := value.(string)
+			if !textAllowed(key, false) || (isString && !textAllowed(text, whitespace)) {
+				slog.Warn("Valor de turbo.config descartado: caracteres de control o UTF-8 incorrecto", "dónde", strconv.Quote(where+key))
+				delete(values, key)
+				continue
+			}
+			if nested, isMap := value.(map[string]interface{}); isMap {
+				walk(nested, where+key+" > ", whitespace)
+			}
+		}
+	}
+	for section, values := range raw {
+		if !textAllowed(section, false) {
+			slog.Warn("Sección de turbo.config descartada: caracteres de control o UTF-8 incorrecto", "dónde", strconv.Quote(section))
+			delete(raw, section)
+			continue
+		}
+		walk(values, section+" > ", section == "#")
+	}
+}
+
+// describeConfigError explains where a turbo.config is wrong, so that it can be fixed by hand: the path, the
+// line and column of the error with that line and a mark under the column, the cause, and the backups next to
+// it (newest first). data is nil if the file couldn't be read.
+func describeConfigError(path string, data []byte, err error) string {
+	var message strings.Builder
+	message.WriteString("  Archivo: " + path + "\n")
+	if data == nil {
+		message.WriteString("  Error: " + err.Error() + "\n  Compruebe que Turbo tiene permiso para leer el archivo.\n")
+		return message.String()
+	}
+	offset, cause := int64(len(data)), "JSON incorrecto ("+err.Error()+")"
+	var syntaxErr *json.SyntaxError
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(err, &syntaxErr) {
+		offset, cause = syntaxErr.Offset, jsonSyntaxCause(syntaxErr.Error())
+	} else if errors.As(err, &typeErr) {
+		offset, cause = typeErr.Offset, "se esperaba un objeto {...} y hay un valor de tipo "+typeErr.Value
+	}
+	position := max(0, min(int(offset)-1, len(data)-1)) // The offset counts the byte that failed
+	lineStart := bytes.LastIndexByte(data[:position], '\n') + 1
+	lineEnd := len(data)
+	if next := bytes.IndexByte(data[position:], '\n'); next != -1 {
+		lineEnd = position + next
+	}
+	line := data[lineStart:lineEnd]
+	if position < lineEnd-1 {
+		line = bytes.TrimSuffix(line, []byte("\r"))
+	}
+	lineNumber := bytes.Count(data[:lineStart], []byte("\n")) + 1
+	fragment, mark := configLineFragment(line, position-lineStart)
+	message.WriteString("  Línea " + strconv.Itoa(lineNumber) + ", columna " + strconv.Itoa(position-lineStart+1) + ": " + cause + "\n")
+	message.WriteString("    " + fragment + "\n    " + strings.Repeat(" ", mark) + "^\n")
+	backups := configBackups(path)
+	if len(backups) == 0 {
+		message.WriteString("  Corrija el archivo.\n")
+		return message.String()
+	}
+	message.WriteString("  Corrija el archivo o restaure una copia:\n")
+	for _, backup := range backups {
+		message.WriteString("    " + backup + "\n")
+	}
+	return message.String()
+}
+
+// configLineFragment returns the line of a turbo.config error with control characters and invalid UTF-8
+// escaped, cut to about 120 characters around column (a byte index), and where the mark goes under it.
+func configLineFragment(line []byte, column int) (fragment string, mark int) {
+	const width = 120
+	var pieces []string // One per character of the line, escaped
+	errorPiece := -1
+	for i := 0; i < len(line); {
+		if i >= column && errorPiece == -1 {
+			errorPiece = len(pieces)
+		}
+		r, size := utf8.DecodeRune(line[i:])
+		switch {
+		case r == '\t':
+			pieces = append(pieces, `\t`)
+		case r == utf8.RuneError && size == 1, r < 0x20, r == 0x7f:
+			pieces = append(pieces, `\x`+strconv.FormatUint(uint64(line[i])|0x100, 16)[1:])
+		default:
+			pieces = append(pieces, string(r))
+		}
+		i += size
+	}
+	if errorPiece == -1 { // After the last character
+		errorPiece = len(pieces)
+	}
+	length := 0
+	for _, piece := range pieces {
+		length += utf8.RuneCountInString(piece)
+	}
+	first, last := 0, len(pieces)
+	if length > width { // Keep the error near the middle
+		first = errorPiece
+		for shown := 0; first > 0 && shown < width/2; first-- {
+			shown += utf8.RuneCountInString(pieces[first-1])
+		}
+		last = first
+		for shown := 0; last < len(pieces) && shown < width; last++ {
+			shown += utf8.RuneCountInString(pieces[last])
+		}
+	}
+	var builder strings.Builder
+	if first > 0 {
+		builder.WriteString("...")
+		mark = 3
+	}
+	for i := first; i < last; i++ {
+		if i < errorPiece {
+			mark += utf8.RuneCountInString(pieces[i])
+		}
+		builder.WriteString(pieces[i])
+	}
+	if last < len(pieces) {
+		builder.WriteString("...")
+	}
+	return builder.String(), mark
+}
+
+// jsonSyntaxCause translates the cause of a JSON syntax error.
+func jsonSyntaxCause(message string) string {
+	if message == "unexpected end of JSON input" {
+		return `el archivo termina antes de cerrar el JSON (falta '}', ']' o '"')`
+	}
+	causes := []struct{ suffix, cause string }{
+		{" in string literal", "carácter no válido %s dentro de una cadena"},
+		{" in string escape code", "secuencia de escape no válida (%s) dentro de una cadena"},
+		{" looking for beginning of value", "carácter no válido %s donde se esperaba un valor"},
+		{" looking for beginning of object key string", "carácter no válido %s donde se esperaba una clave entre comillas"},
+		{" after object key:value pair", "carácter no válido %s después de un valor (falta ',' o '}')"},
+		{" after object key", "carácter no válido %s después de una clave (falta ':')"},
+		{" after array element", "carácter no válido %s después de un elemento (falta ',' o ']')"},
+		{" after top-level value", "contenido sobrante (%s) después del final del JSON"},
+	}
+	if character, found := strings.CutPrefix(message, "invalid character "); found {
+		for _, known := range causes {
+			if quoted, isKnown := strings.CutSuffix(character, known.suffix); isKnown {
+				return strings.Replace(known.cause, "%s", quoted, 1)
+			}
+		}
+	}
+	return "JSON incorrecto (" + message + ")"
+}
+
+// configBackups lists the turbo.config*.bak next to configPath, newest first, with their date.
+func configBackups(configPath string) []string {
+	dir, name := filepath.Split(configPath)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	type backup struct {
+		path     string
+		modified time.Time
+	}
+	var found []backup
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), name) || !strings.HasSuffix(entry.Name(), ".bak") {
+			continue
+		}
+		if info, err := entry.Info(); err == nil {
+			found = append(found, backup{dir + entry.Name(), info.ModTime()})
+		}
+	}
+	sort.Slice(found, func(i, j int) bool { return found[i].modified.After(found[j].modified) })
+	list := make([]string, len(found))
+	for i, b := range found {
+		list[i] = b.path + " (" + b.modified.Format("2006-01-02 15:04") + ")"
+	}
+	return list
 }

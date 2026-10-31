@@ -69,7 +69,7 @@ func FuzzShortcutWords(f *testing.F) {
 			return
 		}
 		req := &customNetHttp.Request{RequestURI: uri, Header: customNetHttp.Header{}}
-		shortcutWords(req, target, "example.com", "*", "foo.example.com", "foo", "", "", "/")
+		shortcutWords(req, target, "example.com", "*", "foo.example.com", "foo", "", "", "/", "/")
 	})
 }
 

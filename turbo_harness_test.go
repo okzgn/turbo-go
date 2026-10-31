@@ -88,23 +88,16 @@ func resetTestState(dir string) {
 	charReplacements["#"] = "-,-"
 	charReplacements["&"] = "-_-"
 	fixedCharReplacements = map[string]bool{";": true, "#": true, "&": true}
-	charEscapeLists['J'] = []string{
-		"\\", "\"", "\t", "\r", "\n", "\f", "\b",
-		`\\`, `\\"`, `\\t`, `\\r`, `\\n`, `\\f`, `\\b`,
-	}
 	for k := range signedInTokens {
 		delete(signedInTokens, k)
-	}
-	for k := range persistentIPs {
-		delete(persistentIPs, k)
 	}
 	deniedIPs.Store(&map[string]int64{})
 	configFileModTime = 0
 	globalMutex.Unlock()
 
 	ipReferences.Clear()
-	lastRequestTimeNano = time.Now().UnixNano()
-	requestCountInWindow = 0
+	globalRequestLimit.Store(0)
+	globalRequestWindow.Store(0)
 }
 
 // initForTest crea un directorio de sitios temporal con el sitio localhost

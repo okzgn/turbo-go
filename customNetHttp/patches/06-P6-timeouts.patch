@@ -1,5 +1,5 @@
 diff --git a/1.net.http.h2_bundle.go b/1.net.http.h2_bundle.go
-index 842f3e3..33dd121 100644
+index 842f3e3..a7cc871 100644
 --- a/1.net.http.h2_bundle.go
 +++ b/1.net.http.h2_bundle.go
 @@ -4520,7 +4520,7 @@ func (s *http2Server) serveConn(c net.Conn, opts *http2ServeConnOpts, newf func(
@@ -18,7 +18,7 @@ index 842f3e3..33dd121 100644
 -	if sc.srv.IdleTimeout > 0 {
 -		sc.idleTimer = time.AfterFunc(sc.srv.IdleTimeout, sc.onIdleTimer)
 -		defer sc.idleTimer.Stop()
-+	if it := TurboTimeLimits.Load().IT; it > 0 { // turbo:P6
++	if it := turboIdleTimeout(); it > 0 { // turbo:P6
 +		sc.idleTimer = time.AfterFunc(it, sc.onIdleTimer)
  	}
 +	defer func() { // turbo:P6: closeStream puede crear el temporizador más tarde
@@ -35,7 +35,7 @@ index 842f3e3..33dd121 100644
  		sc.setConnState(StateIdle)
 -		if sc.srv.IdleTimeout > 0 && sc.idleTimer != nil {
 -			sc.idleTimer.Reset(sc.srv.IdleTimeout)
-+		if it := TurboTimeLimits.Load().IT; it > 0 { // turbo:P6: IT puede activarse con la conexión abierta
++		if it := turboIdleTimeout(); it > 0 { // turbo:P6: IT puede activarse con la conexión abierta
 +			if sc.idleTimer == nil {
 +				sc.idleTimer = time.AfterFunc(it, sc.onIdleTimer)
 +			} else {
@@ -77,7 +77,7 @@ index 842f3e3..33dd121 100644
  
  	sc.streams[id] = st
 diff --git a/1.net.http.server.go b/1.net.http.server.go
-index 6b555e2..7294245 100644
+index 6b555e2..783bf28 100644
 --- a/1.net.http.server.go
 +++ b/1.net.http.server.go
 @@ -910,10 +910,11 @@ func (s *Server) initialReadLimitSize() int64 {
@@ -109,26 +109,29 @@ index 6b555e2..7294245 100644
  		defer func() {
  			c.rwc.SetWriteDeadline(time.Now().Add(d))
  		}()
-@@ -3624,18 +3626,14 @@ func (s *Server) trackConn(c *conn, add bool) {
+@@ -3624,18 +3626,18 @@ func (s *Server) trackConn(c *conn, add bool) {
  	}
  }
  
-+// turbo:P6: los timeouts de Turbo (IT y RHT), leídos en cada uso; 0 es sin
-+// límite, sin recurrir a ReadTimeout.
++// turbo:P6: los timeouts de Turbo (IT y RHT), leídos en cada uso; con 0 se
++// usa RT, como Go con ReadTimeout.
  func (s *Server) idleTimeout() time.Duration {
 -	if s.IdleTimeout != 0 {
 -		return s.IdleTimeout
 -	}
 -	return s.ReadTimeout
-+	return TurboTimeLimits.Load().IT
++	return turboIdleTimeout()
  }
  
  func (s *Server) readHeaderTimeout() time.Duration {
 -	if s.ReadHeaderTimeout != 0 {
 -		return s.ReadHeaderTimeout
--	}
++	t := TurboTimeLimits.Load()
++	if t.RHT != 0 {
++		return t.RHT
+ 	}
 -	return s.ReadTimeout
-+	return TurboTimeLimits.Load().RHT
++	return t.RT
  }
  
  func (s *Server) doKeepAlives() bool {

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Compila los binarios de una release de Turbo y sus SHA256SUMS en dist/<versión>/.
 #
-# Uso: ./release.sh v2.3.rc4
+# Uso: ./release.sh v2.4
 #
 # - Usa el Go del PATH, que debe ser el último parche de la versión de go.mod.
 # - Binarios estáticos (CGO_ENABLED=0), sin rutas locales (-trimpath) ni símbolos.
@@ -11,7 +11,7 @@
 # - Si govulncheck está instalado, revisa cada binario.
 set -euo pipefail
 
-VERSION="${1:?Uso: $0 <versión, por ejemplo v2.3.rc4>}"
+VERSION="${1:?Uso: $0 <versión, por ejemplo v2.4>}"
 cd "$(dirname "$0")"
 
 if [ -n "$(git status --porcelain)" ]; then # también archivos sin seguimiento: Go marcaría vcs.modified

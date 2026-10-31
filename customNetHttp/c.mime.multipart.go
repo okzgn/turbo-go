@@ -342,6 +342,12 @@ type multipart_Reader struct {
 	nlDashBoundary   []byte // nl + "--boundary"
 	dashBoundaryDash []byte // "--boundary--"
 	dashBoundary     []byte // "--boundary"
+
+	// turbo:P10: máximos de partes y de cabeceras de readForm para esta
+	// petición (TurboWithFormLimits); 0 usa TurboMaxFormParts y
+	// TurboMaxFormHeaders.
+	turboMaxParts   int
+	turboMaxHeaders int64
 }
 
 // maxMIMEHeaderSize is the maximum size of a MIME header we will parse,

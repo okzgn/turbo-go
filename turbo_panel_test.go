@@ -64,7 +64,7 @@ func TestW_SessionLifetime(t *testing.T) {
 	base := startServer(t)
 	tok := login(t, base)
 	globalMutex.RLock()
-	exp := signedInTokens["127.0.0.1"+tok]
+	exp := signedInTokens[sessionKey("127.0.0.1", tok)]
 	globalMutex.RUnlock()
 	if d := exp - time.Now().Unix(); d < 595 || d > 600 {
 		t.Errorf("expiración = ahora + %d s; se esperaban 600", d)
@@ -463,7 +463,14 @@ func TestW_PanelAccessHosts(t *testing.T) {
 			t.Errorf("PA %q aceptado", bad)
 		}
 	}
+	// A7 (D3): with hosts and networks, a request needs both.
 	if ok, msg := defaultSettingValidators["."]["PA"]("admin.test, 192.0.2.0/24", "Admin"); !ok {
+		t.Fatalf("PA: %q", msg)
+	}
+	if c := adminCode("admin.test"); c != 404 {
+		t.Errorf("/admin: en admin.test desde fuera de 192.0.2.0/24 -> %d; se esperaba 404", c)
+	}
+	if ok, msg := defaultSettingValidators["."]["PA"]("admin.test, 127.0.0.0/8", "Admin"); !ok {
 		t.Fatalf("PA: %q", msg)
 	}
 	if c := adminCode("admin.test"); c != 200 {

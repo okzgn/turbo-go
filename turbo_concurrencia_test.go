@@ -86,6 +86,8 @@ func TestR_RealisticRace(t *testing.T) {
 	tok := login(t, base)
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
+	// A6: altas y bajas de sitios, subdominios y reemplazos
+	panelLoops(base, tok, stop, &wg)
 	for i := 0; i < 8; i++ { // visitantes
 		wg.Add(1)
 		go func() {
@@ -158,7 +160,6 @@ func TestR_RealisticRace(t *testing.T) {
 			case <-time.After(50 * time.Millisecond):
 				updateSettings(true)
 				cleanOldValues(&signedInTokens)
-				cleanOldValues(&persistentIPs)
 			}
 		}
 	}()

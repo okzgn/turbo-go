@@ -40,6 +40,9 @@ var (
 )
 
 func (r *multipart_Reader) readForm(maxMemory int64) (_ *multipart_Form, err error) {
+	if maxMemory <= 0 { // turbo:P10: sin límite no; con 0 o menos, MBB (Go: archivos temporales)
+		maxMemory = TurboMaxBodySize.Load()
+	}
 	form := &multipart_Form{make(map[string][]string), make(map[string][]*FileHeader)}
 	var (
 		file    *os.File
@@ -59,6 +62,12 @@ func (r *multipart_Reader) readForm(maxMemory int64) (_ *multipart_Form, err err
 		}
 	}
 	maxHeaders := maxMIMEHeaders()
+	if r.turboMaxParts > 0 { // turbo:P10: límites propios de la petición (TurboWithFormLimits)
+		maxParts = r.turboMaxParts
+	}
+	if r.turboMaxHeaders > 0 {
+		maxHeaders = r.turboMaxHeaders
+	}
 
 	defer func() {
 		if file != nil {

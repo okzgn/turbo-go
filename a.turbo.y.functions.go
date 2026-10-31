@@ -30,22 +30,34 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+	"net/netip"
+	"net/url"
 	"os"
 	"os/exec"
 	pathpkg "path"
+	"runtime"
 	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
+
 	"turbo/customNetHttp"
 )
 
+// ipAddr returns the IP of a "host:port" address, or of an IP alone, in its canonical form: an IPv4 also when
+// it comes inside IPv6 (::ffff:1.2.3.4), and an IPv6 compressed, in lower case and without zone. A client has
+// the same key in the limiter, the denied IPs and the sessions however its address is written (H23). Anything
+// else is returned without the port.
 func ipAddr(address string) string {
-	if address[0] == '[' {
-		return cutAt(address[1:], ']')
+	if addrPort, err := netip.ParseAddrPort(address); err == nil {
+		return addrPort.Addr().Unmap().WithZone("").String()
 	}
-	if strings.IndexByte(address, '.') != -1 {
-		return cutAt(address, ':')
+	if addr, err := netip.ParseAddr(strings.TrimSuffix(strings.TrimPrefix(address, "["), "]")); err == nil {
+		return addr.Unmap().WithZone("").String()
+	}
+	if hostName, _, err := net.SplitHostPort(address); err == nil {
+		return hostName
 	}
 	return address
 }
@@ -299,29 +311,84 @@ func existWildcards(pattern string, domain string) bool {
 	return false
 }
 
-func changeChars(reverse bool, input string, pairs []string) string {
-	totalLen := len(pairs)
-	halfLen := totalLen / 2
-
-	step := 1
-	currIdx := 0
-	stopIdx := halfLen
-	offset := halfLen
-	if !reverse {
-		step = -1
-		currIdx = totalLen - 1
-		stopIdx = halfLen - 1
-		offset = halfLen * step
+// cleanRequestPath decodes a request path (D5) and cleans it into an absolute path without "." or ".."
+// segments, which can't leave the site's directory. It rejects (false): an invalid escape, an encoded "/" or
+// "\\" (which doesn't separate folders, B2), a "..", a "\\", control characters (NUL among them) or invalid
+// UTF-8, and the segments that pathSegmentAllowed rejects (H1, H3, H47). Rejected paths are answered with 404.
+func cleanRequestPath(raw string) (string, bool) {
+	if raw == "" || raw[0] != '/' {
+		return "", false
 	}
-	for {
-		if currIdx == stopIdx {
-			break
+	if lower := strings.ToLower(raw); strings.Contains(lower, "%2f") || strings.Contains(lower, "%5c") {
+		return "", false
+	}
+	decoded, err := url.PathUnescape(raw)
+	if err != nil || strings.IndexByte(decoded, '\\') != -1 || !textAllowed(decoded, false) {
+		return "", false
+	}
+	for _, segment := range strings.Split(decoded[1:], "/") {
+		if segment == ".." || !pathSegmentAllowed(segment, runtime.GOOS == "windows") {
+			return "", false
 		}
-		input = strings.ReplaceAll(input, pairs[currIdx], pairs[currIdx+offset])
-		currIdx += step
 	}
-	return input
+	clean := pathpkg.Clean(decoded)
+	if strings.HasSuffix(decoded, "/") && clean != "/" {
+		clean += "/"
+	}
+	return clean, true
 }
+
+// pathSegmentAllowed reports whether a segment of a path can name a file of a site: not ending in "." or " "
+// (Windows drops them, so "x.php." would open "x.php" without its preprocessor) and, with windowsNames (always
+// on Windows), without ":" (alternate data streams), a reserved device name (CON, NUL, COM1...) nor "~" and a
+// digit (an 8.3 short name: "INDEX~1.PHT" opens "index.phtml" with another extension).
+func pathSegmentAllowed(segment string, windowsNames bool) bool {
+	if segment == "" || segment == "." { // Removed by cleaning
+		return true
+	}
+	if last := segment[len(segment)-1]; last == '.' || last == ' ' {
+		return false
+	}
+	return !windowsNames || (strings.IndexByte(segment, ':') == -1 && !windowsReservedName(segment) && !shortNameMarker(segment))
+}
+
+// shortNameMarker reports whether a name has "~" followed by a digit, as the 8.3 short names of Windows do.
+func shortNameMarker(name string) bool {
+	for i := 0; i+1 < len(name); i++ {
+		if name[i] == '~' && name[i+1] >= '0' && name[i+1] <= '9' {
+			return true
+		}
+	}
+	return false
+}
+
+// windowsReservedName reports whether Windows treats a file name as a device: CON, PRN, AUX, NUL, COM1-9 and
+// LPT1-9, in any case and with any extension.
+func windowsReservedName(name string) bool {
+	base, _, _ := strings.Cut(name, ".")
+	base = strings.ToUpper(strings.TrimRight(base, " "))
+	switch base {
+	case "CON", "PRN", "AUX", "NUL":
+		return true
+	}
+	return len(base) == 4 && (strings.HasPrefix(base, "COM") || strings.HasPrefix(base, "LPT")) && base[3] >= '1' && base[3] <= '9'
+}
+
+// textProblem says why a text value can't be saved, or "" if it can: control characters (below 0x20 and
+// 0x7f; tab, CR and LF only if whitespace is true) or invalid UTF-8, which turbo.config couldn't keep as is.
+func textProblem(value string, whitespace bool) string {
+	for i := 0; i < len(value); i++ {
+		if c := value[i]; (c < 0x20 || c == 0x7f) && !(whitespace && (c == '\t' || c == '\n' || c == '\r')) {
+			return "Caracteres de control no admitidos"
+		}
+	}
+	if !utf8.ValidString(value) {
+		return "Texto UTF-8 incorrecto"
+	}
+	return ""
+}
+
+func textAllowed(value string, whitespace bool) bool { return textProblem(value, whitespace) == "" }
 
 func putSlash(path string) string {
 	length := len(path)
@@ -351,13 +418,21 @@ func reqMsg(responseWriter customNetHttp.ResponseWriter, request *customNetHttp.
 	customNetHttp.Error(responseWriter, "", statusCode)
 }
 
-func badReq(responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request, message string) {
-	responseWriter.WriteHeader(400)
-	responseWriter.Write([]byte(message))
+// respond writes text as the body of a response. An error means the client has gone away and there is no one
+// left to tell, so it is not handled.
+func respond(responseWriter customNetHttp.ResponseWriter, text string) {
+	_, _ = responseWriter.Write([]byte(text))
 }
 
+func badReq(responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request, message string) {
+	responseWriter.WriteHeader(400)
+	respond(responseWriter, message)
+}
+
+// ext returns the extension of a path in lower case (preprocessors and MIME types are saved in lower case: a
+// ".PHP" is also run, never served, H3).
 func ext(path string) string {
-	path = pathpkg.Ext(path)
+	path = strings.ToLower(pathpkg.Ext(path))
 	if path == "." {
 		path = ""
 	}
@@ -545,6 +620,33 @@ func certificateExpiry(path string) (time.Time, error) {
 }
 
 // requestHostname returns the host of a request without its port.
+// servingSite returns the key of the site that serves hostname, as resolveRequest and serve find it (aliases and
+// wildcards included), or "" if no site does. Callers hold the global lock.
+func servingSite(hostname string) string {
+	valid, wildcardDomain, subdomain, domain := host(strings.ToLower(hostname))
+	fullHost := domain
+	if subdomain != "" {
+		fullHost = subdomain + "." + domain
+	}
+	if target, isAlias := domainAliases[fullHost]; isAlias {
+		valid, wildcardDomain, subdomain, domain = host(target)
+	}
+	if !valid {
+		return ""
+	}
+	if wildcardDomain != "" {
+		domain = wildcardDomain
+	}
+	matched, _, _, subdomainKey := detectWildcards(subdomain, domain)
+	if !matched {
+		return ""
+	}
+	if subdomain == "" {
+		return domain
+	}
+	return subdomainKey + "." + domain
+}
+
 func requestHostname(request *customNetHttp.Request) string {
 	if hostname, _, err := net.SplitHostPort(request.Host); err == nil {
 		return hostname
@@ -560,7 +662,7 @@ func httpsRedirect(siteKey string, responseWriter customNetHttp.ResponseWriter, 
 	if !httpsEnabled(siteKey) || certificateFor(hostname) == nil {
 		return false
 	}
-	customNetHttp.Redirect(responseWriter, request, "https://"+hostname+request.RequestURI, 301)
+	customNetHttp.Redirect(responseWriter, request, "https://"+hostname+httpsPortSuffix()+request.RequestURI, 301)
 	return true
 }
 
@@ -741,12 +843,15 @@ func obtainCertificate(domain string, certDir string, siteDir string) {
 		return
 	}
 
-	if currentCertDomain == domain {
+	// One attempt per site at a time: the one running or a single retry waiting (H25). The delay doesn't grow.
+	if currentCertDomain == domain || certPending[domain] {
 		return
-	} // To prevent new certificate attempts from the same site
-
-	certRetryDelay += 100 * time.Millisecond
+	}
+	certPending[domain] = true
 	time.AfterFunc(certRetryDelay, func() {
-		withGlobalLock(func() { obtainCertificate(domain, certDir, siteDir) })
+		withGlobalLock(func() {
+			delete(certPending, domain)
+			obtainCertificate(domain, certDir, siteDir)
+		})
 	})
 }

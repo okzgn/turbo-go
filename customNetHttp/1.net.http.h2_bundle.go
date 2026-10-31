@@ -3213,15 +3213,16 @@ func (fr *http2Framer) readMetaFrame(hf *http2HeadersFrame) (http2Frame, error) 
 		http2HeadersFrame: hf,
 	}
 	// turbo:P5: la lista de cabeceras y cada campo HPACK se limitan a TurboMaxHeaderBytes
-	// (ajuste MHB), leído en cada bloque de cabeceras.
-	var headersRemainSize = uint32(TurboMaxHeaderBytes.Load())
-	var trailersRemainSize = uint32(TurboMaxHeaderBytes.Load())
+	// (ajuste MHB), leído una vez por bloque de cabeceras: el mismo límite que anuncia el servidor.
+	maxHeaderBytes := http2turboMaxHeaderBytes()
+	var headersRemainSize = maxHeaderBytes
+	var trailersRemainSize = maxHeaderBytes
 	var sawRegular bool
 
 	var invalid error // pseudo header field errors
 	hdec := fr.ReadMetaHeaders
 	hdec.SetEmitEnabled(true)
-	hdec.SetMaxStringLength(int(TurboMaxHeaderBytes.Load())) // turbo:P5
+	hdec.SetMaxStringLength(int(maxHeaderBytes)) // turbo:P5
 	hdec.SetEmitFunc(func(hf HeaderField) {
 		if http2VerboseLogs && fr.logReads {
 			fr.debugReadLoggerf("http2: decoded hpack field %+v", hf)
@@ -3260,7 +3261,7 @@ func (fr *http2Framer) readMetaFrame(hf *http2HeadersFrame) (http2Frame, error) 
 			size = uint32(len(hf.Value)-fieldCount+1) + uint32(fieldCount)*HeaderField{}.Size()
 		} else {
 			remainSize = &headersRemainSize
-			size = uint32(len(hf.Name) + len(hf.Value)) // turbo:P5: bytes exactos, como en HTTP/1
+			size = hf.Size()
 		}
 		if size > *remainSize {
 			hdec.SetEmitEnabled(false)
@@ -4707,11 +4708,17 @@ type http2serverConn struct {
 }
 
 func (sc *http2serverConn) maxHeaderListSize() uint32 {
-	n := int(TurboMaxHeaderBytes.Load()) // turbo:P5: SETTINGS_MAX_HEADER_LIST_SIZE anuncia TurboMaxHeaderBytes
+	return http2turboMaxHeaderBytes() // turbo:P5: SETTINGS_MAX_HEADER_LIST_SIZE anuncia el límite que aplica readMetaFrame
+}
+
+// http2turboMaxHeaderBytes es el límite de la lista de cabeceras (turbo:P5): TurboMaxHeaderBytes (MHB), en las
+// unidades de HTTP/2 (nombre y valor más 32 bytes por campo), sin el margen de http2adjustHTTP1MaxHeaderSize.
+func http2turboMaxHeaderBytes() uint32 {
+	n := TurboMaxHeaderBytes.Load()
 	if n <= 0 {
 		n = DefaultMaxHeaderBytes
 	}
-	return uint32(http2adjustHTTP1MaxHeaderSize(int64(n)))
+	return uint32(n)
 }
 
 func (sc *http2serverConn) curOpenStreams() uint32 {
@@ -5020,7 +5027,7 @@ func (sc *http2serverConn) serve(conf http2http2Config) {
 	sc.setConnState(StateActive)
 	sc.setConnState(StateIdle)
 
-	if it := TurboTimeLimits.Load().IT; it > 0 { // turbo:P6
+	if it := turboIdleTimeout(); it > 0 { // turbo:P6
 		sc.idleTimer = time.AfterFunc(it, sc.onIdleTimer)
 	}
 	defer func() { // turbo:P6: closeStream puede crear el temporizador más tarde
@@ -5818,7 +5825,7 @@ func (sc *http2serverConn) closeStream(st *http2stream, err error) {
 	delete(sc.streams, st.id)
 	if len(sc.streams) == 0 {
 		sc.setConnState(StateIdle)
-		if it := TurboTimeLimits.Load().IT; it > 0 { // turbo:P6: IT puede activarse con la conexión abierta
+		if it := turboIdleTimeout(); it > 0 { // turbo:P6: IT puede activarse con la conexión abierta
 			if sc.idleTimer == nil {
 				sc.idleTimer = time.AfterFunc(it, sc.onIdleTimer)
 			} else {
@@ -11129,7 +11136,12 @@ func (w *http2writeResHeaders) writeFrame(ctx http2writeContext) error {
 		http2encKV(enc, ":status", http2httpCodeString(w.httpResCode))
 	}
 
-	http2encodeHeaders(enc, w.h, w.trailers)
+	h := w.h
+	if _, set := h["Server"]; set && w.httpResCode != 0 { // turbo:P8: una sola cabecera Server, la de Turbo
+		h = h.Clone()
+		delete(h, "Server")
+	}
+	http2encodeHeaders(enc, h, w.trailers)
 
 	if w.contentType != "" {
 		http2encKV(enc, "content-type", w.contentType)
@@ -11139,7 +11151,9 @@ func (w *http2writeResHeaders) writeFrame(ctx http2writeContext) error {
 	}
 	if w.date != "" {
 		http2encKV(enc, "date", w.date)
-		http2encKV(enc, "server", TurboServerName) // turbo:P8
+	}
+	if w.httpResCode != 0 { // turbo:P8: en toda respuesta (no en los trailers), aunque el manejador fije Date
+		http2encKV(enc, "server", TurboServerName)
 	}
 
 	headerBlock := buf.Bytes()

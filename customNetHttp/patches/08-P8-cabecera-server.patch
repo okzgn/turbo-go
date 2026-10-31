@@ -1,25 +1,49 @@
 diff --git a/1.net.http.h2_bundle.go b/1.net.http.h2_bundle.go
-index 33dd121..af3038c 100644
+index a7cc871..0aa9415 100644
 --- a/1.net.http.h2_bundle.go
 +++ b/1.net.http.h2_bundle.go
-@@ -11132,6 +11132,7 @@ func (w *http2writeResHeaders) writeFrame(ctx http2writeContext) error {
- 	}
- 	if w.date != "" {
- 		http2encKV(enc, "date", w.date)
-+		http2encKV(enc, "server", TurboServerName) // turbo:P8
+@@ -11122,7 +11122,12 @@ func (w *http2writeResHeaders) writeFrame(ctx http2writeContext) error {
+ 		http2encKV(enc, ":status", http2httpCodeString(w.httpResCode))
  	}
  
+-	http2encodeHeaders(enc, w.h, w.trailers)
++	h := w.h
++	if _, set := h["Server"]; set && w.httpResCode != 0 { // turbo:P8: una sola cabecera Server, la de Turbo
++		h = h.Clone()
++		delete(h, "Server")
++	}
++	http2encodeHeaders(enc, h, w.trailers)
+ 
+ 	if w.contentType != "" {
+ 		http2encKV(enc, "content-type", w.contentType)
+@@ -11133,6 +11138,9 @@ func (w *http2writeResHeaders) writeFrame(ctx http2writeContext) error {
+ 	if w.date != "" {
+ 		http2encKV(enc, "date", w.date)
+ 	}
++	if w.httpResCode != 0 { // turbo:P8: en toda respuesta (no en los trailers), aunque el manejador fije Date
++		http2encKV(enc, "server", TurboServerName)
++	}
+ 
  	headerBlock := buf.Bytes()
+ 	if len(headerBlock) == 0 && w.trailers == nil {
 diff --git a/1.net.http.server.go b/1.net.http.server.go
-index 60bc196..d0b222c 100644
+index e31dc56..1bca195 100644
 --- a/1.net.http.server.go
 +++ b/1.net.http.server.go
-@@ -1221,6 +1221,8 @@ func (h extraHeader) Write(w *bufio.Writer) {
- 		w.Write(headerDate)
+@@ -1222,6 +1222,8 @@ func (h extraHeader) Write(w *bufio.Writer) {
  		w.Write(h.date)
  		w.Write(crlf)
-+		w.WriteString("Server: " + TurboServerName) // turbo:P8
-+		w.Write(crlf)
  	}
++	w.WriteString("Server: " + TurboServerName) // turbo:P8: siempre, aunque el manejador fije Date
++	w.Write(crlf)
  	if h.contentLength != nil {
  		w.Write(headerContentLength)
+ 		w.Write(h.contentLength)
+@@ -1463,6 +1465,7 @@ func (cw *chunkWriter) writeHeader(p []byte) {
+ 	if !header.has("Date") {
+ 		setHeader.date = time.Now().UTC().AppendFormat(cw.res.dateBuf[:0], TimeFormat)
+ 	}
++	delHeader("Server") // turbo:P8: una sola cabecera Server, la de Turbo (extraHeader)
+ 
+ 	if hasCL && hasTE && te != "identity" {
+ 		// TODO: return an error if WriteHeader gets a return parameter

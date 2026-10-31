@@ -27,18 +27,53 @@ package customNetHttp
 // parches se limiten a llamarlas.
 
 import (
+	"context"
 	"errors"
+	"html"
 	"io"
 	"strconv"
 	"strings"
 	"time"
 )
 
+type turboFormLimitsKey struct{}
+
+type turboFormLimitValues struct {
+	parts   int
+	headers int64
+}
+
+// TurboWithFormLimits devuelve r con sus propios máximos de partes y de
+// cabeceras para ParseMultipartForm, en lugar de TurboMaxFormParts y
+// TurboMaxFormHeaders: para una subida de muchos archivos ya autenticada
+// (D10). turbo:P10
+func TurboWithFormLimits(r *Request, parts int, headers int64) *Request {
+	return r.WithContext(context.WithValue(r.Context(), turboFormLimitsKey{}, turboFormLimitValues{parts, headers}))
+}
+
+// turboFormLimits devuelve los máximos que fijó TurboWithFormLimits, o 0, 0.
+// turbo:P10
+func turboFormLimits(r *Request) (parts int, headers int64) {
+	limits, _ := r.Context().Value(turboFormLimitsKey{}).(turboFormLimitValues)
+	return limits.parts, limits.headers
+}
+
+// turboIdleTimeout es el tiempo que una conexión inactiva puede seguir
+// abierta: IT, o RT si IT es 0, como Go con IdleTimeout y ReadTimeout. turbo:P6
+func turboIdleTimeout() time.Duration {
+	t := TurboTimeLimits.Load()
+	if t.IT != 0 {
+		return t.IT
+	}
+	return t.RT
+}
+
 // turboPlantillaError devuelve el Content-Type y el cuerpo de una respuesta de
 // error con la plantilla de Turbo para el código (Y; la 0 si no hay una
 // propia): {TURBO_RESPONSE_CODE} se sustituye por el código, una plantilla que
 // empieza por '<' se sirve como HTML y en las de texto `\n` es un salto de
-// línea. El detalle va en la línea siguiente. turbo:P1 turbo:P9
+// línea. El detalle va en la línea siguiente, escapado en las HTML (puede
+// traer texto del cliente). turbo:P1 turbo:P9
 func turboPlantillaError(code int, detalle string) (contentType, cuerpo string) {
 	plantillas := *TurboErrorTemplates.Load()
 	v, ok := plantillas[code]
@@ -48,6 +83,7 @@ func turboPlantillaError(code int, detalle string) (contentType, cuerpo string) 
 	tipo := "plain"
 	if strings.HasPrefix(v, "<") {
 		tipo = "html"
+		detalle = html.EscapeString(detalle)
 	} else {
 		v = strings.ReplaceAll(v, `\n`, "\n")
 	}

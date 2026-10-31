@@ -269,7 +269,7 @@ document.addEventListener('DOMContentLoaded', function(){
 		addAliasLink, reservedKeysMap, newEntryHandlersByContainer,
 		generalSettingsDefs, siteSettingsDefs, fieldsetLegendsList, signOutLink;
 	function $q(selector, single, root){ return (root || document)[!single ? 'querySelectorAll' : 'querySelector'](selector); }
-	function apiRequest(url, bodyOrOnSuccess, onSuccess, onError, xhr, isSuccessInSecondArg, responseTextOrHandler, handleError, context){
+	function apiRequest(url, bodyOrOnSuccess, onSuccess, onError, xhr, isSuccessInSecondArg, responseTextOrHandler, handleError, context, requestBody){
 	    context = typeof this === 'function' ? this : parseResponse,
 	    isSuccessInSecondArg = typeof bodyOrOnSuccess == 'function',
 		handleError = function(responseTextOrHandler, status){
@@ -301,13 +301,13 @@ document.addEventListener('DOMContentLoaded', function(){
 			}
 		};
 
-		bodyOrOnSuccess = !isSuccessInSecondArg ? bodyOrOnSuccess : null;
-		if(bodyOrOnSuccess === null && url.indexOf('?') != -1){ // Parameters go in the body, not in the URL that turbo.visits records (the current password among them)
-			bodyOrOnSuccess = url.slice(url.indexOf('?') + 1), url = url.slice(0, url.indexOf('?'));
+		requestBody = !isSuccessInSecondArg ? bodyOrOnSuccess : null; // bodyOrOnSuccess may be the success callback, which onload still calls
+		if(requestBody == null && url.indexOf('?') != -1){ // Parameters go in the body, not in the URL that turbo.visits records (the current password among them)
+			requestBody = url.slice(url.indexOf('?') + 1), url = url.slice(0, url.indexOf('?'));
 		}
 		xhr.open('POST', /* With no slash at the end: 'http://localhost' + a.replace('default://home', '')*/url);
-		if(typeof bodyOrOnSuccess == 'string'){ xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded'); }
-		xhr.send(bodyOrOnSuccess), statusMessageEl.parentNode.dataset.isLoading = '';
+		if(typeof requestBody == 'string'){ xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded'); }
+		xhr.send(requestBody), statusMessageEl.parentNode.dataset.isLoading = '';
 	}
 	function renderSitesList(container, sitesMap, siteKey){
 		for(siteKey in sitesMap){
@@ -386,7 +386,7 @@ document.addEventListener('DOMContentLoaded', function(){
 								settingsDefs[settingKey].value = (!settingsDefs[settingKey].emptyValue ? dialogSteps : ''),
 								(typeof settingsDefs[settingKey].ok != 'function' ? void(0) : settingsDefs[settingKey].ok.call(settingsDefs[settingKey], clickEvent.target, hrefValue));
 							},
-							function(hrefValue, httpStatus){ statusMessageEl.dataset.error = hrefValue, (typeof settingsDefs[settingKey].bad != 'function' ? void(0) : settingsDefs[settingKey].bad.call(settingsDefs[settingKey], clickEvent.target, hrefValue, httpStatus)); });
+							function(hrefValue, httpStatus){ statusMessageEl.dataset[httpStatus === 'WAIT' ? 'ok' : 'error'] = hrefValue /* WAIT (202): in progress, not an error */, (typeof settingsDefs[settingKey].bad != 'function' ? void(0) : settingsDefs[settingKey].bad.call(settingsDefs[settingKey], clickEvent.target, hrefValue, httpStatus)); });
 						}
 					}
 				});
@@ -432,6 +432,7 @@ document.addEventListener('DOMContentLoaded', function(){
 			if(subdomainEl.dataset.activeSubdomain){ deleteSiteOrSubdomainLink.innerText = deleteSiteOrSubdomainLink.dataset.subdomainText; }
 		}
 		else { mainPanel.prepend(siteActionButtonsListMoveRef), mainPanel.prepend(siteBreadcrumbLink), deleteSiteOrSubdomainLink.innerText = deleteSiteOrSubdomainLink.dataset.siteText; }
+		$q('[href="/admin:inside:cfgW"], [href="/admin:inside:cfgR"]').forEach(function(link){ link.parentNode.hidden = !isSiteMode; }); // www <-> root redirections are set at the site's root (D7)
 	}
 	function createKeyValueEntry(container, keyValue, propertyName, contentValue, valueFn, linkEl, labelSpan, contentItalic){
 		linkEl = document.createElement('a'), linkEl.href = ('#' + keyValue), linkEl[propertyName] = (typeof valueFn != 'function' ? function(j, k){ return { from: k, to: j } } : valueFn).call(linkEl, contentValue, keyValue),
@@ -449,11 +450,18 @@ document.addEventListener('DOMContentLoaded', function(){
 		for(key in sourceObj){ if(sourceObj[key] && typeof sourceObj[key] == 'object'){ sourceObj[key] = Object.assign({}, sourceObj[key]); } }
 		return sourceObj
 	}
+	function panelHasOwnHost(value){ // A host entry in PA: neither empty, * nor a network
+		return String(value || '').split(',').some(function(entry){ entry = entry.trim(); return entry && entry != '*' && entry.indexOf('/') == -1; });
+	}
+	function updatePanelAccessWarning(link){
+		link = $q('[href="/admin:inside:setPA"]', 1), link.innerText = 'Dónde responde el panel' + (panelHasOwnHost(generalSettingsDefs['PA'].value) ? '' : ' (aviso: sin un host propio)');
+	}
 	function loadInitialData(isRetry){
 		(delete mainPanel.loaded), apiRequest.call(parseProxyResponse, '/admin:inside:sites', function(a, b, isRetry, d){
 			if(typeof (a = parseJsonResponse(a)) == 'string'){ return (statusMessageEl.dataset.error = a); }
 			renderSitesList(sitesListSection, a), charReplacementMap = {};
 			for(b in a[CONFIG_KEYS.GENERAL_CONFIG]){ if(b in generalSettingsDefs && typeof generalSettingsDefs[b].value == 'undefined'){ generalSettingsDefs[b].value = a[CONFIG_KEYS.GENERAL_CONFIG][b]; } }
+			updatePanelAccessWarning();
 			for(b in a[CONFIG_KEYS.CHARS_REPLACE]){
 				isRetry = a[CONFIG_KEYS.CHARS_REPLACE][b], d = 0;
 				switch(typeof isRetry){
@@ -704,11 +712,16 @@ document.addEventListener('DOMContentLoaded', function(){
 	generalSettingsDefs = { 'U': {}, 'P': {}, 'C': { cfm: true, emptyValue: true, bad: function(el, message){ // A newer turbo.config is only overwritten after confirming it
 		if(String(message).indexOf('a=sobrescribir') == -1){ return; }
 		showDialog('prompt', { text: message + '. Contraseña actual para sobrescribirlo:', required: true, okFn: function(z, password){ apiRequest('/admin:inside:setC?a=sobrescribir&b=' + encodeURIComponent(applyCharReplacements(password)), function(r){ statusMessageEl.dataset.ok = r; }, function(e){ statusMessageEl.dataset.error = e; }); } });
-	} }, 'PA': {}, 'RHT': {}, 'RT': {}, 'WT': {}, 'IT': {}, 'CII': {}, 'MUB': {}, 'MHB': {}, 'MBB': {}, 'CIS': {}, 'CIL': {} },
+	} }, 'PA': {}, 'RHT': {}, 'RT': {}, 'WT': {}, 'IT': {}, 'CII': {}, 'MUB': {}, 'MHB': {}, 'MBB': {}, 'CIS': {}, 'CIL': {}, 'CGL': {} },
 	generalSettingsDefs['M'] = { ok: function(a){ clearAndRender(sitesListSection), clearAndRender(charsReplaceSection), clearAndRender(deniedIpsSection), clearAndRender(httpCodeResponsesSection), loadInitialData(); } },
 	Object.keys(generalSettingsDefs).forEach(function(k){ generalSettingsDefs[k].extra = { value: '', required: 1, text: 'Contraseña actual:' }; }), // Every setting needs the current password
-	generalSettingsDefs['RHT'].postfix = generalSettingsDefs['RT'].postfix = generalSettingsDefs['WT'].postfix = generalSettingsDefs['IT'].postfix = '(milisegundos [ms], segundos [s], minutos [m], e ilimitado [0])',
+	generalSettingsDefs['RT'].postfix = generalSettingsDefs['WT'].postfix = '(milisegundos [ms], segundos [s], minutos [m], e ilimitado [0])',
+	generalSettingsDefs['RHT'].postfix = generalSettingsDefs['IT'].postfix = '(milisegundos [ms], segundos [s], minutos [m]; 0 usa el de lectura total de petición)',
 	generalSettingsDefs['MUB'].postfix = generalSettingsDefs['MHB'].postfix = generalSettingsDefs['MBB'].postfix = '(bytes)',
+	generalSettingsDefs['PA'].text = function(value){ // D3: warn while the panel has no host of its own
+		return 'Dónde responde el panel (hosts o redes CIDR separados por comas; * = cualquiera. Recomendado: un host propio para el panel que no sirva ningún sitio; las redes limitan quién accede)' + (panelHasOwnHost(value) ? '' : '. Aviso: sin un host propio, el panel comparte origen con los sitios y una página servida por Turbo podría usar su sesión') + ':';
+	},
+	generalSettingsDefs['PA'].ok = updatePanelAccessWarning,
 	requestLimitsFieldset.onclick = createSettingsClickHandler(generalSettingsDefs, statusMessageEl), generalSettingsFieldset.onclick = createSettingsClickHandler(generalSettingsDefs, statusMessageEl), requestTimingFieldset.onclick = createSettingsClickHandler(generalSettingsDefs, statusMessageEl), requestRateFieldset.onclick = createSettingsClickHandler(generalSettingsDefs, statusMessageEl);
 	siteSettingsDefs = {
 		'S': {
@@ -1165,7 +1178,7 @@ document.addEventListener('DOMContentLoaded', function(){
 				<li><a href="/admin:inside:setU">Cambiar usuario</a></li>
 				<li><a href="/admin:inside:setP">Cambiar contraseña</a></li>
 				<li><a href="/admin:inside:setM">Directorio de sitios</a></li>
-				<li><a data-postfix="(hosts o redes CIDR separados por comas; * = cualquiera. Solo las redes limitan quién accede: el host lo elige el cliente)" href="/admin:inside:setPA">Dónde responde el panel</a></li>
+				<li><a href="/admin:inside:setPA">Dónde responde el panel</a></li>
 				<li><a data-text="¿Guardar rescribiendo configuración?" href="/admin:inside:setC">Guardar configuración</a></li>
 			</ul>
 		</fieldset>
@@ -1175,6 +1188,7 @@ document.addEventListener('DOMContentLoaded', function(){
 				<li><a data-postfix="(milisegundos [ms])" href="/admin:inside:setCIS">Contador de peticiones por intervalo</a></li>
 				<li><a href="/admin:inside:setCII">Peticiones máximas por intervalo</a></li>
 				<li><a data-postfix="(milisegundos [ms])" href="/admin:inside:setCIL">Tiempo de reinicio de contador</a></li>
+				<li><a data-postfix="(por segundo, entre todos los clientes; 0 = sin límite)" href="/admin:inside:setCGL">Límite global de peticiones</a></li>
 			</ul>
 		</fieldset>
 		<fieldset id="sec-request-timing">

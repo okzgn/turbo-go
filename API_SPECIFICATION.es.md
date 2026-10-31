@@ -15,7 +15,7 @@ El backend de Turbo proporciona una API de estilo **RPC/REST sobre HTTP POST**. 
 * **Manejo de Sesión:** Tras un login correcto, el servidor fija la cookie de sesión `turbo_session` (`Path=/; HttpOnly; SameSite=Strict`, más `Secure` cuando la petición llega por HTTPS), que el navegador envía por sí solo. Los clientes de la API pueden enviar en su lugar el token en la cabecera `ok: <token>`. Si llegan ambas, se usa la cookie. El token **no** se acepta como parámetro en la URL. La cookie `turbo_session` se quita de la cabecera `Cookie` que se pasa a los preprocesadores CGI.
 * **Mismo Origen:** Un `POST` a `/admin:inside:` autenticado con la cookie debe venir del propio origen del panel: el navegador debe enviar `Sec-Fetch-Site: same-origin` (o `none`) o, sin `Sec-Fetch-Site`, una cabecera `Origin` igual a `<esquema>://<Host>`. Si no, el servidor responde `403`. Las peticiones autenticadas con la cabecera `ok` no lo necesitan.
 * **Cabeceras de las Respuestas del Panel:** Las respuestas bajo `/admin:` llevan `X-Frame-Options: DENY`, `Content-Security-Policy: frame-ancestors 'none'` y `Cache-Control: no-store`.
-* **Dónde Responde el Panel:** El ajuste global `PA` (ver `setPA`, §5) puede limitar `/admin:` a una lista de hosts o redes CIDR. Fuera de la lista, `/admin:` responde `404`. Vacío (por defecto) significa sin restricción.
+* **Dónde Responde el Panel:** El ajuste global `PA` (ver `setPA`, §5) puede limitar `/admin:` a una lista de hosts y/o redes CIDR: el `Host` de la petición tiene que ser uno de los hosts (si los hay) y la IP del cliente tiene que estar en una de las redes (si las hay). Si no, `/admin:` responde `404`. Vacío (por defecto) significa sin restricción, y entonces el panel comparte el origen de todos los sitios que sirve Turbo: la configuración recomendada es un host propio para el panel, que no sirva ningún sitio. Se rechaza un host de `PA` que sirva un sitio (§5), y también un sitio, subdominio o alias nuevo que serviría un host de `PA` (`400` con el motivo).
 * **CORS (Intercambio de Origen Cruzado):**
   * `Access-Control-Allow-Origin: default://home`
   * `Access-Control-Allow-Headers: ok`
@@ -38,6 +38,9 @@ Cualquier parámetro de formulario (como `a`, `b`, `s`, `d`) es procesado en el 
 
 *Nota: Los administradores pueden añadir reemplazos de caracteres adicionales dinámicamente mediante el endpoint `addCharsReplace`.*
 
+### 2.2. Caracteres no admitidos
+Ningún parámetro puede contener caracteres de control (bytes por debajo de `0x20` y `0x7f`) ni UTF-8 inválido: el servidor responde HTTP 400 `"Caracteres de control no admitidos"` o `"Texto UTF-8 incorrecto"`. La única excepción es la plantilla de respuesta de `addHttpCodeResponse` (§7.2), que puede contener tabuladores y saltos de línea.
+
 ---
 
 ## 3. API de Autenticación y Control de Sesión
@@ -45,9 +48,9 @@ Cualquier parámetro de formulario (como `a`, `b`, `s`, `d`) es procesado en el 
 ### 3.1. Iniciar Sesión (Login)
 Valida las credenciales del usuario y genera un token único enlazado a la dirección IP del cliente. *Nota: Puede ser frágil detrás de NAT/proxies compartidos, donde varios usuarios comparten una IP pública.*
 
-* **Endpoint:** `POST /admin:`
-* **Formato del Cuerpo:** `multipart/form-data`
-* **Parámetros Requeridos:**
+* **Endpoint:** `POST /admin:` (solo esta ruta y este método; un `GET` sirve la página de login)
+* **Formato del Cuerpo:** `multipart/form-data` o `application/x-www-form-urlencoded`, de 4 KiB como máximo (si es mayor: HTTP 413).
+* **Parámetros Requeridos**, en el cuerpo (los de la URL se ignoran):
   * `u`: Nombre de usuario.
   * `p`: Contraseña.
 * **Respuesta Exitosa (HTTP 200 OK):**
@@ -56,11 +59,13 @@ Valida las credenciales del usuario y genera un token único enlazado a la direc
   ok<token>
   ```
 * **Credenciales Incorrectas:** HTTP 403 con el cuerpo vacío.
+* **Demasiados Logins Fallidos:** tras 5 fallos desde la misma IP en 10 minutos, todo login desde esa IP (también con las credenciales correctas) recibe HTTP 429 con `Retry-After` en segundos, sin comprobar la contraseña: 1 minuto la primera vez, después 2, 4, 8 y como máximo 15 minutos. Los logins que se están comprobando cuentan para esos 5: los simultáneos que los superan reciben 429 con `Retry-After: 2`. Un login correcto pone la cuenta a cero.
+* **Servidor Ocupado:** si la contraseña no se puede comprobar en 2 segundos porque hay demasiadas comprobaciones en curso, HTTP 503 con `Retry-After: 2`. Lo mismo vale para la contraseña actual (`b`) de los `set<KEY>` (§5).
 
 ### 3.2. Cerrar Sesión (Logout)
 Invalida el token actual en la memoria RAM (las demás sesiones de la misma IP siguen activas) y caduca la cookie `turbo_session` (`Max-Age=0`).
 
-* **Endpoint:** `POST /admin:signout:`
+* **Endpoint:** `POST /admin:signout:` (un `GET` no cierra la sesión: sirve la página de login)
 * **Autenticación:** La cookie de sesión o la cabecera `ok`.
 * **Respuesta Exitosa (HTTP 200 OK):** 
   Devuelve un string HTML forzando la redirección del navegador.
@@ -116,7 +121,8 @@ Devuelve la configuración general, mapas de sitios raíz, IPs denegadas, respue
       "MBB": "1048576",
       "CIL": "10000",
       "CIS": "1000",
-      "CII": "100"
+      "CII": "100",
+      "CGL": "0"
     }
   }
   ```
@@ -129,10 +135,10 @@ Devuelve un objeto JSON con todos los subdominios que pertenecen a un dominio ra
 * **Parámetros de Formulario:**
   * `s`: Dominio principal (ej: `ejemplo.com`).
 * **Respuesta Exitosa (JSON):**
-  La respuesta incluye siempre el subdominio raíz (bajo el nombre del dominio) y los demás subdominios anidados. El bloque `!` contiene el estado de la configuración (1 = Activado, 0 = Desactivado).
+  La respuesta incluye siempre el subdominio raíz, bajo la clave vacía `""`, y los demás subdominios anidados. El bloque `!` contiene el estado de la configuración (1 = Activado, 0 = Desactivado).
   ```json
   {
-    "ejemplo.com": {
+    "": {
       "&": {},
       "!": {
         "S": "1",
@@ -201,22 +207,23 @@ Modifica los parámetros globales del servidor y sus límites operativos. Varias
 |---|---|---|---|
 | `setU` | Nuevo Usuario | Contraseña Actual | Cambia el nombre de usuario (1-24 chars). |
 | `setP` | Nueva Contraseña | Contraseña Actual | Cambia la contraseña (1-24 chars). |
-| `setM` | Ruta Directorio | Contraseña Actual | Cambia el directorio base de sitios (debe existir) y recarga la configuración. |
+| `setM` | Ruta Directorio | Contraseña Actual | Cambia el directorio base de sitios (debe existir) y recarga la configuración. Si ese directorio tiene un `turbo.config` que no es JSON válido, responde 400 con dónde está el error. |
 | `setC` | (Ignorado; `sobrescribir` para confirmar, ver abajo) | Contraseña Actual | Vuelca la configuración RAM actual al disco (`turbo.config`), incluidos el usuario y el hash de la contraseña (nunca la contraseña en claro). |
-| `setPA` | Hosts / redes CIDR | Contraseña Actual | Dónde responde el panel: nombres de host y/o redes CIDR separados por comas (como máximo 32 entradas y 1,024 chars). Vacío o `*` = sin restricción. |
+| `setPA` | Hosts / redes CIDR | Contraseña Actual | Dónde responde el panel: nombres de host y/o redes CIDR separados por comas (como máximo 32 entradas y 1,024 chars); con los dos tipos, una petición necesita los dos. Vacío o `*` = sin restricción. Un host que sirve un sitio (directamente, por un wildcard o como alias) se rechaza con 400 `"El host del panel <host> sirve el sitio <sitio>: …"`. |
 | `setMUB` | Valor entero | Contraseña Actual | Ajusta la longitud máxima de URI (40 - 10,240 bytes). |
 | `setMHB` | Valor entero | Contraseña Actual | Ajusta la longitud máx. de cabeceras (600 - 20,480 bytes). |
 | `setMBB` | Valor entero | Contraseña Actual | Ajusta tamaño máx. de cuerpo (1B - 100MB). |
 | `setCIL` | Valor ms | Contraseña Actual | Reinicio de contador (1,000 - 800,000 ms). |
 | `setCIS` | Valor ms | Contraseña Actual | Ventana de conteo (10 - 50,000 ms). |
 | `setCII` | Valor entero | Contraseña Actual | Límite de peticiones por intervalo: de 1 hasta el valor de `CIS` en ms, y `CIS`/`CII` ≤ 66. |
+| `setCGL` | Valor entero | Contraseña Actual | Peticiones por segundo para todo el servidor, entre todos los clientes (10 - 1.000.000; `0` = sin límite, el valor por defecto). Las que lo superan reciben `503` con `Retry-After: 1`; no se bloquea ninguna IP. |
 | `setRT` | Tiempo (`5s`, `0s`) | Contraseña Actual | Read Timeout total de petición (100 ms - 15 min; `0s` lo desactiva). |
-| `setRHT` | Tiempo (`1s`, `0s`) | Contraseña Actual | Read Header Timeout (50 ms - 7.5 min y como máximo la mitad de `RT`; `0s` lo desactiva). |
+| `setRHT` | Tiempo (`1s`, `0s`) | Contraseña Actual | Read Header Timeout (50 ms - 7.5 min y, si `RT` no es `0s`, como máximo la mitad de `RT`; `0s` usa `RT`). |
 | `setWT` | Tiempo (`10s`, `0s`) | Contraseña Actual | Write Timeout para respuestas (100 ms - 30 min; `0s` lo desactiva). |
-| `setIT` | Tiempo (`2s`, `0s`) | Contraseña Actual | Idle Timeout para *Keep-Alive* (100 ms - 5 min; `0s` lo desactiva). |
+| `setIT` | Tiempo (`2s`, `0s`) | Contraseña Actual | Idle Timeout para *Keep-Alive* (100 ms - 5 min; `0s` usa `RT`). |
 
 *Notas:*
-* *`setPA`: Las entradas de host se comparan con la cabecera `Host` de la petición, que elige el cliente: mantienen el panel fuera de otros dominios, pero no limitan quién puede acceder. Lo que limita el acceso son las redes CIDR, que se comparan con la IP del cliente.*
+* *`setPA`: Las entradas de host se comparan con la cabecera `Host` de la petición, que elige el cliente: dan al panel un origen propio, aparte de los sitios, pero no limitan quién puede acceder. Lo que limita el acceso son las redes CIDR, que se comparan con la IP del cliente. Un `turbo.config` cuyo host de `PA` sirve un sitio se carga igual, con un aviso en el log.*
 * *`setC`: Si `turbo.config` lo escribió una versión posterior de Turbo (un esquema posterior), guardar perdería sus ajustes nuevos, así que el servidor responde HTTP 400 con una explicación; para confirmar y sobrescribirlo, envíe `a=sobrescribir`. La primera vez que se guarda un archivo de un esquema anterior, el original se conserva como `turbo.config.v<esquema>.bak`. Si el directorio de sitios no es el directorio de arranque, en este se escribe además un `turbo.config` mínimo que apunta a aquel.*
 
 ---
@@ -240,7 +247,7 @@ El backend maneja las creaciones de carpetas en disco y modificaciones en los ma
 | `addAlias` | Dominio Web | Subdominio | Dominio Alias | - |
 
 *Notas:*
-* *`addRewrite`: La reescritura debe empezar por `/` (ruta interna), `http://` o `https://`. Los destinos con `http://` o `https://` se responden con una redirección `302`: al destino exacto si tiene ruta o consulta, o al dominio de destino seguido del URI original si es solo un dominio.*
+* *`addRewrite`: La reescritura debe empezar por `/` (ruta interna), `http://` o `https://`. Los destinos con `http://` o `https://` se responden con una redirección `302`: al destino exacto si tiene ruta o consulta, o al dominio de destino seguido del URI original si es solo un dominio. El origen (`a`) se compara con la ruta pedida ya decodificada (`/a b` coincide con `/a%20b`), y un destino interno también es una ruta URL: se decodifica y tiene que quedar dentro del sitio (un destino con un segmento `..`, aunque quede dentro, o con `\`, una `/` o `\` codificada, `%00`, caracteres de control, UTF-8 inválido o un segmento que acaba en `.` o en espacio, se responde con 404).*
 * *`addPreprocessor`: La ruta del ejecutable (como máximo 128 caracteres) debe existir; el prefijo `cgi>` es opcional y cualquier otro prefijo se rechaza.*
 * *`addIndex`: El índice se añade al final del orden; los índices se prueban en el orden en que se añadieron. Los sitios y subdominios nuevos empiezan con `index.html`.*
 
@@ -298,13 +305,13 @@ Gestiona la habilitación de HTTPS, redirecciones en la capa de aplicación y la
 |---|---|---|---|---|
 | **`cfgC`** | `"1"` = Ejecutar Certbot<br>`"0"` = Eliminar del disco | Dominio Web | Subdominio o Vacío (`""`) | `z`: E-mail de registro.<br>`y`: Adaptador Certbot (`dns-<proveedor>`, ej: `dns-route53`). |
 | **`cfgS`** | `"1"` = Activar HTTPS<br>`"0"` = Desactivar HTTPS | Dominio Web | Subdominio o Vacío (`""`) | - |
-| **`cfgR`** | `"1"` = Activar<br>`"0"` = Desactivar | Dominio Web | Subdominio o Vacío (`""`) | *Solo aplica al subdominio `www`.* Activa redirección a la Raíz. |
-| **`cfgW`** | `"1"` = Activar<br>`"0"` = Desactivar | Dominio Web | Subdominio o Vacío (`""`) | *Solo aplica al subdominio Raíz.* Activa redirección a `www`. |
+| **`cfgR`** | `"1"` = Activar<br>`"0"` = Desactivar | Dominio Web | Solo vacío (`""`): se configura en la raíz del sitio | Redirige `www.<sitio>` a `<sitio>` (301). Con un subdominio, HTTP 400. |
+| **`cfgW`** | `"1"` = Activar<br>`"0"` = Desactivar | Dominio Web | Solo vacío (`""`): se configura en la raíz del sitio | Redirige `<sitio>` a `www.<sitio>` (301). Con un subdominio, HTTP 400. |
 | **`cfgE`** | E-mail a registrar | Dominio Web | Subdominio o Vacío (`""`) | Modifica silenciosamente el E-mail para futuras renovaciones de Certbot. |
 | **`cfgA`** | Nombre del Adaptador (`dns-<proveedor>`, o vacío para webroot) | Dominio Web | Subdominio o Vacío (`""`) | Modifica silenciosamente el flag del Adaptador para Certbot. |
 
 ### 8.1. Detalle Operativo: Emisión de Certificados (`cfgC`)
-Certbot solo se ejecuta cuando se pide con `a="1"`, y requiere un e-mail (guardado con `cfgE` o enviado en `z`); sin él, la API responde HTTP 400 `"E-mail obligatorio para crear el certificado"`. Si el sitio ya tiene un certificado de menos de 75 días, la API responde `"Certificado SSL activo"` sin ejecutar Certbot. Con `a="0"` y sin certificado en disco, no se borra nada y la API responde HTTP 400 `"Sin certificado"`.
+Certbot solo se ejecuta cuando se pide con `a="1"`, y requiere un e-mail (guardado con `cfgE` o enviado en `z`); sin él, la API responde HTTP 400 `"E-mail obligatorio para crear el certificado"`. Si el sitio ya tiene un certificado de menos de 75 días, la API responde `"Certificado SSL activo"` sin ejecutar Certbot. Con `a="0"`, los archivos del certificado se borran tengan la antigüedad que tengan y la API responde `"Certificado SSL borrado"`; sin certificado en disco, no se borra nada y la API responde HTTP 400 `"Sin certificado"`.
 
 La emisión o renovación de certificados no bloquea el servidor. Al enviar `a="1"`, la API delega el trabajo a una Goroutine separada que se encarga de:
 1. Ejecutar el binario de Certbot en modo webroot o mediante el adaptador especificado, con su carpeta de trabajo en `turbo.certificates/<sitio>`.
@@ -314,7 +321,7 @@ La emisión o renovación de certificados no bloquea el servidor. Al enviar `a="
 **Renovación Automática:** Al arrancar y cada 24 horas, Turbo renueva los certificados que emitió él (sitios con e-mail y carpeta en `turbo.certificates`) cuando caducan en menos de 30 días, y los carga sin reiniciar. Los certificados puestos a mano no se renuevan.
 
 **Flujo de Polling HTTP para el Frontend:**
-Como la operación es asíncrona, el frontend debe realizar peticiones continuas (Polling) al endpoint `cfgC` evaluando la respuesta JSON:
+Como la operación es asíncrona, el frontend debe realizar peticiones continuas (Polling) al endpoint `cfgC` evaluando la respuesta JSON. Mientras la emisión está en curso, la API responde **HTTP 202** con uno de estos cuerpos:
 * `{"message":"Espere, certificado en proceso","status":"WAIT"}`: La Goroutine acaba de iniciarse.
 * `{"message":"Espere, certificado procesándose","status":"WAIT"}`: Certbot está trabajando.
 * `{"message":"Espere, certificado ocupado en <dominio>","status":"WAIT"}`: Certbot está ocupado emitiendo un certificado para otro sitio.
@@ -346,11 +353,11 @@ Utilizado para sustituir masivamente todos los archivos públicos asociados a un
 
   `s` y `d` se aceptan tanto en la URL como en el cuerpo *multipart*.
 * **Manejo de Directorios Anidados:** 
-  El backend analiza el parámetro `filename` dentro del encabezado HTTP `Content-Disposition` de cada bloque *multipart*. Se descarta el primer segmento de cada ruta (la carpeta elegida en el navegador), y `\` cuenta como separador. Si el resto del nombre contiene rutas relativas (ej: `sitio/assets/img/logo.png` → `assets/img/logo.png`), Turbo creará la estructura de carpetas. Los nombres que saldrían de `@` (con `..`, absolutos o con `:`) se descartan.
+  El backend analiza el parámetro `filename` dentro del encabezado HTTP `Content-Disposition` de cada bloque *multipart*. Se descarta el primer segmento de cada ruta (la carpeta elegida en el navegador), y `\` cuenta como separador. Si el resto del nombre contiene rutas relativas (ej: `sitio/assets/img/logo.png` → `assets/img/logo.png`), Turbo creará la estructura de carpetas. Los nombres que saldrían de `@` (con `..`, absolutos o con `:`) se descartan, y también, en todos los sistemas, los que Windows trata de forma especial: acabados en `.` o en espacio, un nombre de dispositivo reservado (`CON`, `NUL`, `COM1`…) o `~` seguido de un dígito (nombres cortos 8.3).
 * **Respuesta Exitosa (HTTP 200 OK):**
   Devuelve la cadena `"Datos volcados"`. Si se descartó algún archivo, la respuesta los enumera: `"Datos volcados. Descartados: <nombre>, <nombre>"`.
 * **Manejo de Errores Específicos:**
-  * Si el peso de la subida supera el límite global `MBB` (Max Body Bytes), la API corta la lectura y retorna HTTP 400 con el mensaje `"Longitud máxima de contenidos excedida"`.
+  * Si el peso de la subida supera el límite global `MBB` (Max Body Bytes), o lleva más de 10 000 archivos, la API corta la lectura y retorna HTTP 400 con el mensaje `"Longitud máxima de contenidos excedida"`. (Los demás formularios multipart admiten como mucho 1 000 partes.)
 
 ---
 
@@ -359,10 +366,13 @@ Utilizado para sustituir masivamente todos los archivos públicos asociados a un
 | Código HTTP | Significado Funcional | Causa y Cuerpo de la Petición |
 |---|---|---|
 | **`200 OK`** | Operación Procesada | La orden se ejecutó en memoria y/o disco. Devuelve un texto plano de confirmación (ej: `"Subdominio agregado"`). |
+| **`202 Accepted`** | En Proceso | Solo `cfgC` mientras se emite un certificado: un cuerpo JSON con `"status":"WAIT"` (§8.1). Siga consultando. |
 | **`400 Bad Request`** | Fallo de Validación / Lógica | Parámetros nulos, formato inválido, recurso inexistente, contraseñas erróneas o restricciones de límites sobrepasadas. El Body contiene el string del error literal que debe mostrarse al usuario. |
 | **`403 Forbidden`** | Bloqueo de Acceso | Login con credenciales incorrectas (Body vacío), o un `POST` autenticado con la cookie de sesión que no viene del mismo origen (§1.2). |
 | **`404 Not Found`** | URL Incorrecta | Se ha consultado una URI (`RequestURI`) dentro del prefijo `/admin:` que no corresponde a ningún endpoint listado, o el panel no responde en ese host o red (`PA`). |
-| **`429 Too Many Requests`** | *Rate Limiter* Activado | La IP del cliente superó los límites estipulados por el control del servidor (CIL/CIS/CII), por IP o en global, o la IP está denegada (§7.1). Cada petición cuenta una vez. La respuesta lleva `Retry-After` con los segundos de espera, y las conexiones nuevas de una IP bloqueada se cierran. |
+| **`413 Payload Too Large`** | Parámetros demasiado grandes | Los parámetros de una acción (o el cuerpo del login, §3.1) superan lo permitido: `MBB`, y como mucho 10 MiB en un cuerpo `application/x-www-form-urlencoded`. Una subida de archivos demasiado grande recibe `400` (§9). Los parámetros que no se pueden decodificar (por ejemplo, un escape `%` mal formado) reciben `400` `"Parámetros incorrectos"`. |
+| **`429 Too Many Requests`** | *Rate Limiter* Activado | La IP del cliente superó sus límites (CIL/CIS/CII), la IP está denegada (§7.1), o sus logins están bloqueados tras intentos fallidos (§3.1). Cada petición cuenta una vez. La respuesta lleva `Retry-After` con los segundos de espera, y las conexiones nuevas de una IP bloqueada se cierran. |
+| **`503 Service Unavailable`** | Límite global alcanzado | El servidor en conjunto recibió más de `CGL` peticiones en el segundo actual (`Retry-After: 1`), o la contraseña de un login o la contraseña actual (`b`) de un `set<KEY>` no se pudo comprobar en 2 segundos (`Retry-After: 2`, §3.1). |
 | **`500 Internal Server Error`** | Fallo Interno | Un error inesperado al procesar la acción. |
 
 ---

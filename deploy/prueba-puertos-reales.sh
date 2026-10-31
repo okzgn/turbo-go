@@ -49,6 +49,12 @@ sudo -n setcap cap_net_bind_service=+ep "$BIN" || { echo "sudo -n setcap no est�
 
 mkdir -p "$RUN/localhost/@"
 echo "hola-real" >"$RUN/localhost/@/index.html"
+echo "fuera-de-@" >"$RUN/localhost/fuera.txt"
+ln -s ../fuera.txt "$RUN/localhost/@/enlace.txt"
+echo "nombre-especial" >"$RUN/localhost/@/punto."
+echo "codigo-fuente" >"$RUN/localhost/@/prueba.CGI"
+printf '#!/bin/sh\nprintf "Content-Type: text/plain\\r\\n\\r\\ncgi-ejecutado\\n"\n' >"$TMPD/cgi.sh"
+chmod +x "$TMPD/cgi.sh"
 openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=localhost -addext subjectAltName=DNS:localhost \
 	-keyout "$RUN/localhost/privkey.pem" -out "$RUN/localhost/fullchain.pem" >/dev/null 2>&1
 (cd "$RUN" && exec "$BIN" >"$TMPD/stdout.txt" 2>&1) &
@@ -68,9 +74,29 @@ comprobar "GET /admin:" "$(curl -s -o /dev/null -w '%{http_code}' http://localho
 comprobar "URI de 1200 bytes" "$(curl -s -o /dev/null -w '%{http_code}' "http://localhost/$(head -c 1200 /dev/zero | tr '\0' a)")" "414"
 comprobar "Cabecera de 6000 bytes" "$(curl -s -o /dev/null -w '%{http_code}' -H "X-Relleno: $(head -c 6000 /dev/zero | tr '\0' r)" http://localhost/)" "431"
 
-echo "== Panel: índice y HTTPS"
+echo "== Panel: login"
+comprobar "Login por GET con credenciales en la URL" "$(curl -s 'http://localhost/admin:?u=Turbo&p=Admin' | head -c 2)" "([^o].|o[^k])"
+comprobar "Login por POST con credenciales en la URL" "$(curl -s -X POST 'http://localhost/admin:?u=Turbo&p=Admin' | head -c 2)" "(|[^o].|o[^k])"
+comprobar "Login con un cuerpo de 1 MB" "$(head -c 1048576 /dev/zero | tr '\0' a | curl -s -o /dev/null -w '%{http_code}' --data-binary @- -H 'Content-Type: application/x-www-form-urlencoded' http://localhost/admin:)" "413"
 TOKEN="$(curl -s -F u=Turbo -F p=Admin http://localhost/admin: | sed 's/^ok//')"
 comprobar "Login" "${#TOKEN}" "64"
+
+echo "== Rutas fuera de @"
+ruta() { curl -s --path-as-is -o /dev/null -w '%{http_code}' "http://localhost$1"; }
+comprobar "/../fuera.txt" "$(ruta /../fuera.txt)" "404"
+comprobar "/%2e%2e/fuera.txt" "$(ruta /%2e%2e/fuera.txt)" "404"
+comprobar "/..%2ffuera.txt" "$(ruta /..%2ffuera.txt)" "404"
+comprobar "/..%5cfuera.txt" "$(ruta /..%5cfuera.txt)" "404"
+comprobar "/../privkey.pem" "$(ruta /../privkey.pem)" "404"
+comprobar "/index.html%00" "$(ruta /index.html%00)" "404"
+comprobar "Enlace simbólico fuera de @" "$(ruta /enlace.txt)" "404"
+comprobar "Nombre acabado en punto" "$(ruta /punto.)" "404"
+
+echo "== Preprocesador con la extensión en mayúsculas"
+comprobar "addPreprocessor cgi" "$(curl -s -X POST -H "ok: $TOKEN" --data-urlencode s=localhost --data-urlencode d= --data-urlencode a=cgi --data-urlencode "b=$TMPD/cgi.sh" 'http://localhost/admin:inside:addPreprocessor')" "Preprocesador.*"
+comprobar "GET /prueba.CGI se ejecuta" "$(curl -s http://localhost/prueba.CGI)" "cgi-ejecutado"
+
+echo "== Panel: índice y HTTPS"
 comprobar "addIndex" "$(curl -s -X POST -H "ok: $TOKEN" -d 'a=index.html&s=localhost&d=' 'http://localhost/admin:inside:addIndex')" "Índice (asignado|sin cambios)"
 comprobar "cfgS a=1" "$(curl -s -X POST -H "ok: $TOKEN" -d 'a=1&s=localhost&d=' 'http://localhost/admin:inside:cfgS')" "Redirección a HTTPS activada"
 for _ in $(seq 30); do ss -ltn | grep -q ':443 ' && break; sleep 0.1; done
@@ -99,9 +125,19 @@ comprobar "TLS 1.3" "$(tls tls1_3)" "TLSv1.3"
 comprobar "Sin SNI (acceso por IP)" "$(echo | timeout 5 openssl s_client -connect 127.0.0.1:443 -noservername 2>&1 | grep -c 'BEGIN CERTIFICATE')" "0"
 comprobar "SNI desconocido" "$(echo | timeout 5 openssl s_client -connect localhost:443 -servername otro.test 2>&1 | grep -c 'BEGIN CERTIFICATE')" "0"
 
+echo "== Panel en un host propio (PA)"
+comprobar "setPA con el host de un sitio" "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "ok: $TOKEN" -d 'a=localhost&b=Admin' 'http://localhost/admin:inside:setPA')" "400"
+comprobar "setPA panel.test" "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "ok: $TOKEN" -d 'a=panel.test&b=Admin' 'http://localhost/admin:inside:setPA')" "200"
+comprobar "Panel en localhost" "$(curl -s -o /dev/null -w '%{http_code}' http://localhost/admin:)" "404"
+comprobar "Panel en panel.test" "$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: panel.test' http://localhost/admin:)" "200"
+# Por localhost, como el login: la sesión va ligada a la IP del cliente (127.0.0.1 o ::1).
+comprobar "addSite panel.test" "$(curl -s -w ' %{http_code}' -X POST -H "ok: $TOKEN" -H 'Host: panel.test' -d 's=panel.test' 'http://localhost/admin:inside:addSite')" "El sitio serviría el host del panel.* 400"
+
 echo "== Mensajes en stdout"
 comprobar "Inicio con nivel y hora" "$(grep -c '^time=.* level=INFO msg=Inicio' "$TMPD/stdout.txt")" "1"
 comprobar "HTTPS activado" "$(grep -c 'msg="HTTPS activado"' "$TMPD/stdout.txt")" "1"
+comprobar "Aviso de credenciales por defecto" "$(grep -c 'level=WARN msg="Se usan las credenciales por defecto' "$TMPD/stdout.txt")" "[1-9]"
+comprobar "Aviso de panel sin host propio" "$(grep -c 'level=WARN msg="El panel responde en los mismos hosts' "$TMPD/stdout.txt")" "[1-9]"
 
 echo "== Segunda instancia con el puerto 80 ocupado"
 (cd "$RUN" && timeout 15 "$BIN" >"$TMPD/stdout2.txt" 2>&1)

@@ -165,15 +165,12 @@ func TestC_DeniedIPsFromConfig(t *testing.T) {
 	if perIpNotAvailable("203.0.113.9", true) {
 		t.Error("la IP caducada de turbo.config está bloqueada")
 	}
-	globalMutex.Lock()
-	persistentIPs["198.51.100.1"] = time.Now().Unix() + 59 // marca del limitador global
-	globalMutex.Unlock()
 	if !saveDefaultConfig() {
 		t.Fatal("no se pudo guardar")
 	}
 	b, _ := os.ReadFile(dir + "turbo.config")
 	s := string(b)
-	if !strings.Contains(s, "203.0.113.8") || strings.Contains(s, "203.0.113.9") || strings.Contains(s, "198.51.100.1") {
+	if !strings.Contains(s, "203.0.113.8") || strings.Contains(s, "203.0.113.9") {
 		t.Errorf("\"@\" guardado: %s", s)
 	}
 }

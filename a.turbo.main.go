@@ -25,11 +25,12 @@ package main
 import (
 	"crypto/tls"
 	"errors"
+	"fmt"
+	"io/fs"
 	"log/slog"
 	"maps"
 	"net"
 	"os"
-	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -37,14 +38,17 @@ import (
 	"sync/atomic"
 	"time"
 	"turbo/customNetHttp"
-
-	"encoding/json"
 )
 
+// Locks: globalMutex guards the maps of this block (signedInTokens, charReplacements, fixedCharReplacements,
+// sitesMap, siteSSLConfig, mimeTypes, customHeaders, preprocessors, indexFiles, domainAliases), together with
+// siteCertificates, fixedHTTPResponses, currentCertDomain and configFileModTime: read them with RLock and change
+// them with Lock (lockedCheck, withGlobalLock), never outside, as a concurrent map read and write ends the
+// process. Values read on every request without it are atomic or published copies (atomicString,
+// atomic.Pointer, sync.Map, atomic counters), and logMutex guards the log files.
 var (
 	servers               = make([]*customNetHttp.Server, 2) // Current servers
 	signedInTokens        = make(map[string]int64)           // Signed-in tokens
-	persistentIPs         = make(map[string]int64)           // IPs marked by the global rate limiter (not saved)
 	deniedIPs             atomic.Pointer[map[string]int64]   // IPs denied by the administrator until a UNIX date (saved as "@"; published copy, see setDeniedIPs)
 	panelUser             atomicString                       // Panel username
 	panelPasswordHash     atomicString                       // Panel password hash, saved as "PH" (see setPanelPassword)
@@ -69,18 +73,18 @@ var (
 	maxHeaderBytes      = &customNetHttp.TurboMaxHeaderBytes    // Maximum header bytes to read (MHB)
 	maxURILength        = &customNetHttp.TurboMaxURILength      // Maximum URI length (MUB)
 
-	lastRequestTimeNano  int64 // Reference time between requests
-	requestCountInWindow int64 // Request count within the time window
+	globalRequestLimit  atomic.Int64  // CGL: requests per second for the whole server; 0 = no limit (D4)
+	globalRequestWindow atomic.Uint64 // Unix second (high 32 bits) and the requests counted in it (low 32 bits)
 
 	configCheckTicker = time.NewTicker(30 * time.Second)
 	cleanupTicker     = time.NewTicker(60 * time.Second)
 
 	tlsConfig = &tls.Config{NextProtos: []string{"h2", "http/1.1"}, Certificates: []tls.Certificate{}, MinVersion: tls.VersionTLS12}
 
-	currentCertDomain string                    // Certificate domain currently being processed
-	certRetryDelay    = 30 * time.Second        // Delay between certificate attempts, increasing by 100 ms per attempt
-	configFileModTime int64                     // Config file modification time reference
-	charEscapeLists   = make(map[rune][]string) // Character escape lists
+	currentCertDomain string              // Certificate domain currently being processed
+	certRetryDelay    = 30 * time.Second  // Delay before retrying a certificate while another one is being issued
+	certPending       = map[string]bool{} // Sites with a certificate retry waiting (one each); guarded by globalMutex
+	configFileModTime int64               // Config file modification time reference
 
 	httpResponses      = &customNetHttp.TurboErrorTemplates // HTTP responses (published copy, see setHTTPResponses)
 	fixedHTTPResponses = make(map[int]bool)                 // Fixed HTTP response codes
@@ -116,9 +120,6 @@ const (
 
 func main() {
 	// Compile and compress with: go build -ldflags "-s -w"
-
-	startTimeNano := time.Now().UnixNano()
-	lastRequestTimeNano = startTimeNano
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, nil))) // Levels and timestamps; systemd keeps stdout in the journal
 	slog.Info("Inicio", "servidor", serverName)
@@ -162,17 +163,16 @@ func main() {
 	setHTTPResponses(func(responses map[int]string) { responses[0] = serverName + `\n{TURBO_RESPONSE_CODE}` })
 	fixedHTTPResponses = map[int]bool{0: true}
 
-	charReplacements[";"] = "-.-" // This group cannot be part of charEscapeLists because it must be transferred to the frontend
+	charReplacements[";"] = "-.-" // Fixed replacements, also sent to the panel
 	charReplacements["#"] = "-,-"
 	charReplacements["&"] = "-_-"
 	fixedCharReplacements = map[string]bool{";": true, "#": true, "&": true}
 
-	charEscapeLists['J'] = []string{
-		"\\", "\"", "\t", "\r", "\n", "\f", "\b",
-		`\\`, `\\"`, `\\t`, `\\r`, `\\n`, `\\f`, `\\b`,
+	if err := updateSettings(false); err != nil { // D11: applying defaults would lose the configuration
+		fmt.Fprintln(os.Stderr, configErrorMessage(err, true))
+		os.Exit(1)
 	}
-
-	updateSettings(false)
+	warnDefaultCredentials()
 	servers[0] = createSafeServer(tlsConfig)
 	servers[1] = createHttpServer()
 	runRecovering("renewCertificates", renewCertificates)
@@ -182,12 +182,12 @@ func main() {
 		case <-renewTicker.C:
 			runRecovering("renewCertificates", renewCertificates)
 		case <-configCheckTicker.C:
-			runRecovering("updateSettings", func() { updateSettings(true) })
+			runRecovering("updateSettings", func() { logConfigError(updateSettings(true)) })
 		case <-cleanupTicker.C:
 			runRecovering("cleanOldValues", func() {
 				cleanOldValues(&signedInTokens)
-				cleanOldValues(&persistentIPs)
 				withGlobalLock(cleanDeniedIPs)
+				cleanLoginFailures()
 				cleanIPReferences()
 			})
 		}
@@ -305,7 +305,7 @@ func safeServerStart(server *customNetHttp.Server, tlsConfig *tls.Config) *custo
 	go func() {
 		if err = server.Serve(listener); err != nil {
 			slog.Error("Servidor HTTPS detenido", "error", err)
-			listener.Close()
+			_ = listener.Close() // After a failure: the error that matters is the one logged
 			return
 		}
 	}()
@@ -369,7 +369,7 @@ func httpServerStart(server *customNetHttp.Server) *customNetHttp.Server {
 	go func() {
 		if err = server.Serve(listener); err != nil {
 			slog.Error("Servidor HTTP detenido", "error", err)
-			listener.Close()
+			_ = listener.Close() // After a failure: the error that matters is the one logged
 			return
 		}
 	}()
@@ -387,7 +387,7 @@ func serverSetLogState(logType string, logFile *os.File) {
 			return
 		}
 		if visitsLogFile != nil {
-			visitsLogFile.Close()
+			closeLog(visitsLogFile)
 		}
 		visitsLogFile = logFile
 	case denialsLogName:
@@ -395,9 +395,16 @@ func serverSetLogState(logType string, logFile *os.File) {
 			return
 		}
 		if denialsLogFile != nil {
-			denialsLogFile.Close()
+			closeLog(denialsLogFile)
 		}
 		denialsLogFile = logFile
+	}
+}
+
+// closeLog closes a log file, saying so if it fails (the last lines may be lost).
+func closeLog(logFile *os.File) {
+	if err := logFile.Close(); err != nil {
+		slog.Warn("No se puede cerrar el log", "archivo", logFile.Name(), "error", err)
 	}
 }
 
@@ -445,7 +452,7 @@ func serverWriteLogs(logType string, request *customNetHttp.Request, timestamp i
 		logFile = denialsLogFile
 	}
 	if logFile != nil {
-		logFile.WriteString(line)
+		_, _ = logFile.WriteString(line) // A log that can't be written has nowhere to report it per request
 	}
 }
 
@@ -456,9 +463,9 @@ func serverHandlerFn(serverType string) func(w customNetHttp.ResponseWriter, r *
 		/* New deny method */
 		clientIP := ipAddr(r.RemoteAddr)
 
-		if limited, retryAfter := rateLimited(clientIP); limited {
+		if status, retryAfter := rateLimited(clientIP); status != 0 {
 			w.Header().Set("Retry-After", strconv.FormatInt(retryAfter, 10))
-			reqMsg(w, r, 429)
+			reqMsg(w, r, status)
 			return
 		}
 		/* End new deny method */
@@ -559,7 +566,7 @@ func resetSettings() {
 	logMutex.Lock()
 	for _, logFile := range []*os.File{visitsLogFile, denialsLogFile} {
 		if logFile != nil {
-			logFile.Close()
+			closeLog(logFile)
 		}
 	}
 	visitsLogFile = nil
@@ -567,13 +574,16 @@ func resetSettings() {
 	logMutex.Unlock()
 }
 
-func updateSettings(checkSitesFlag bool) {
-	updateSettingsFollowing(checkSitesFlag, 0)
+// updateSettings reads turbo.config if it changed and activates the site folders found on disk. If turbo.config
+// can't be read or isn't valid JSON, the configuration in use is kept and the error (a *configFileError) is
+// returned; it isn't read again until the file changes.
+func updateSettings(checkSitesFlag bool) error {
+	return updateSettingsFollowing(checkSitesFlag, 0)
 }
 
 // updateSettingsFollowing is updateSettings counting how many times "M" moved it to another sites directory,
 // to stop if two configs point at each other.
-func updateSettingsFollowing(checkSitesFlag bool, redirects int) {
+func updateSettingsFollowing(checkSitesFlag bool, redirects int) error {
 	if checkSitesFlag {
 		checkSites()
 	}
@@ -590,7 +600,7 @@ func updateSettingsFollowing(checkSitesFlag bool, redirects int) {
 	dirEntries, err := os.ReadDir(baseDir)
 	if err != nil {
 		slog.Error("No se puede leer el directorio de sitios", "directorio", baseDir, "error", err)
-		return
+		return nil
 	}
 
 	configFileInfo, err := os.Stat(baseDir + configFileName)
@@ -601,22 +611,25 @@ func updateSettingsFollowing(checkSitesFlag bool, redirects int) {
 		configModTime = configFileInfo.ModTime().UnixNano()
 	}
 
+	var configErr error
+	configRead := false
+	sitesActivated := false // Sites found on disk, also checked against PA
 	if lastConfigModTime != configModTime {
 		withGlobalLock(func() {
-			configFileModTime = configModTime
-			readSiteConfigFrom(baseDir + configFileName)
+			configFileModTime = configModTime // Not read again until it changes, also if it is invalid
+			configErr = readSiteConfigFrom(baseDir + configFileName)
 		})
-		if configModTime == 1 {
+		configRead = configErr == nil
+		if configErr == nil && configModTime == 1 {
 			slog.Info("Sin turbo.config: configuración por defecto")
-		} else {
+		} else if configErr == nil {
 			slog.Info("turbo.config leído y aplicado")
 		}
-		if newDir := sitesDir.Get(); newDir != baseDir && redirects < 2 { // "M" points elsewhere: read the config there
+		if newDir := sitesDir.Get(); configErr == nil && newDir != baseDir && redirects < 2 { // "M" points elsewhere: read the config there
 			slog.Info("Directorio de sitios", "directorio", newDir)
 			resetSettings()
 			withGlobalLock(func() { configFileModTime = 0 })
-			updateSettingsFollowing(checkSitesFlag, redirects+1)
-			return
+			return updateSettingsFollowing(checkSitesFlag, redirects+1)
 		}
 	}
 
@@ -646,6 +659,7 @@ func updateSettingsFollowing(checkSitesFlag bool, redirects int) {
 			withGlobalLock(func() {
 				subdomainContentCheckers["!"](false, siteSSLConfig[wildcardName], true, wildcardName, "") // Set first true to print errors
 			})
+			sitesActivated = true
 			if checkSitesFlag {
 				slog.Info("Sitio creado en disco y activado", "sitio", wildcardName)
 			}
@@ -673,12 +687,19 @@ func updateSettingsFollowing(checkSitesFlag bool, redirects int) {
 				withGlobalLock(func() {
 					subdomainContentCheckers["!"](false, siteSSLConfig[subWildcardName+"."+wildcardName], true, wildcardName, subWildcardName)
 				})
+				sitesActivated = true
 				if checkSitesFlag {
 					slog.Info("Sitio creado en disco y activado", "sitio", subWildcardName+"."+wildcardName)
 				}
 			}
 		}
 	}
+	if configRead || sitesActivated { // After the sites on disk are activated, which PA is checked against
+		globalMutex.RLock()
+		warnPanelOrigin()
+		globalMutex.RUnlock()
+	}
+	return configErr
 }
 
 // connHandler closes new connections from an IP that is already blocked. Requests are counted, and
@@ -689,7 +710,7 @@ func connHandler(conn net.Conn, connState customNetHttp.ConnState) {
 	}
 
 	if blocked, _ := ipBlocked(ipAddr(conn.RemoteAddr().String())); blocked {
-		conn.Close()
+		_ = conn.Close() // Refused: whatever happens to the connection doesn't matter
 	}
 }
 
@@ -714,19 +735,48 @@ func ipBlocked(ip string) (bool, int64) {
 }
 
 // rateLimited counts a request of the IP in the per-IP and global limiters. When the request must be
-// rejected, it also returns the seconds to send in Retry-After.
-func rateLimited(ip string) (bool, int64) {
+// rejected, it returns the status (429 for the IP, 503 for the whole server) and the seconds to send in
+// Retry-After; otherwise status is 0.
+func rateLimited(ip string) (status int, retryAfter int64) {
 	if perIpNotAvailable(ip, true) {
 		if blocked, retryAfter := ipBlocked(ip); blocked {
-			return true, retryAfter
+			return 429, retryAfter
 		}
-		return true, 1
+		return 429, 1
 	}
-	if globalAndPerIpControl(ip) {
-		windowSeconds := (atomic.LoadInt64(&serverRequestLimits[1]) + int64(time.Second) - 1) / int64(time.Second)
-		return true, max(windowSeconds, 1)
+	if globalRateExceeded() {
+		return 503, 1
 	}
-	return false, 0
+	return 0, 0
+}
+
+// globalRateExceeded counts a request for the whole server and reports whether it goes over CGL in the current
+// second. It doesn't blame any IP (H6) and takes no lock: a request that starts a new second resets the count.
+func globalRateExceeded() bool {
+	return globalRateExceededAt(time.Now().Unix())
+}
+
+// globalRateExceededAt is globalRateExceeded for a request that read the time now. The second and its count
+// change together, and only forwards: a request that read the previous second counts in the current one (H59).
+func globalRateExceededAt(now int64) bool {
+	limit := globalRequestLimit.Load()
+	if limit == 0 {
+		return false
+	}
+	for {
+		window := globalRequestWindow.Load()
+		second, count := int64(window>>32), int64(window&0xffffffff)
+		next := uint64(now)<<32 | 1 // #nosec G115 -- a Unix time in seconds: positive, and below 2^32 until 2106
+		if now <= second {
+			if count > limit { // Already over: nothing to count, and the count can't overflow
+				return true
+			}
+			next = window + 1
+		}
+		if globalRequestWindow.CompareAndSwap(window, next) {
+			return int64(next&0xffffffff) > limit
+		}
+	}
 }
 
 // cleanIPReferences forgets the IPs whose counting window ended more than CIL ago and that aren't blocked:
@@ -785,67 +835,12 @@ func perIpNotAvailable(ip string, incrementCounter bool) bool {
 	timeRatio := timeDiff / windowLimit
 
 	if requestRatio > timeRatio {
-		globalMutex.RLock()
-		_, persistent := persistentIPs[ip]
-		globalMutex.RUnlock()
-
-		ipData.blockedUntil = time.Now().Unix()
-		denialMsg := ip + " conn denial"
-
-		if persistent {
-			ipData.blockedUntil += 10
-			denialMsg += " persistent"
-		} else {
-			ipData.blockedUntil += 5
-		}
-
-		serverWriteLogs(denialsLogName, nil, 0, denialMsg)
-
+		ipData.blockedUntil = time.Now().Unix() + 5
+		serverWriteLogs(denialsLogName, nil, 0, ip+" conn denial")
 		return true
 	}
 
 	return false
-}
-
-func globalAndPerIpControl(ip string) bool {
-	var globalInterval int64 = atomic.LoadInt64(&serverRequestLimits[0])
-	var globalWindow int64 = atomic.LoadInt64(&serverRequestLimits[1])
-	var globalMaxReqs int64 = atomic.LoadInt64(&serverRequestLimits[2])
-
-	lastGlobalTime := atomic.LoadInt64(&lastRequestTimeNano)
-	globalReqCount := atomic.LoadInt64(&requestCountInWindow)
-	atomic.AddInt64(&requestCountInWindow, 1)
-
-	nowNano := time.Now().UnixNano()
-	timeDiff := nowNano - lastGlobalTime
-	globalReqCount++
-
-	if (timeDiff > globalWindow && globalReqCount < globalMaxReqs) || globalWindow == 0 || globalMaxReqs == 0 { // Continue with unnecessary checking
-		return false
-	}
-
-	globalReqRatio := (globalReqCount / globalMaxReqs)
-	globalTimeRatio := (timeDiff / globalWindow)
-
-	// Shows details
-
-	exceeded := false
-
-	if globalReqRatio > globalTimeRatio {
-		persistUntil := time.Now().Unix() + 59 // Time to preserve during cleanOldValues
-		globalMutex.Lock()
-		persistentIPs[ip] = persistUntil
-		globalMutex.Unlock()
-		serverWriteLogs(denialsLogName, nil, 0, ip+" rate limit exceed at: "+strconv.FormatInt(persistUntil, 10))
-		exceeded = true
-	}
-
-	if timeDiff > globalInterval {
-		atomic.StoreInt64(&lastRequestTimeNano, nowNano)
-		atomic.StoreInt64(&requestCountInWindow, 1)
-	}
-
-	return exceeded
 }
 
 func _constructSite(domain string, subdomain string) {
@@ -874,6 +869,11 @@ func _constructSite(domain string, subdomain string) {
 func constructSite(domain string, subdomain string) {
 	globalMutex.Lock()
 	defer globalMutex.Unlock()
+	constructSiteLocked(domain, subdomain)
+}
+
+// constructSiteLocked is constructSite for callers that hold the global lock.
+func constructSiteLocked(domain string, subdomain string) {
 	_constructSite(domain, subdomain)
 	siteKey := domain
 	if subdomain != "" {
@@ -908,7 +908,11 @@ func orderedIndexes(siteKey string) []string {
 func deleteSite(domain string, subdomain string) {
 	globalMutex.Lock()
 	defer globalMutex.Unlock()
+	deleteSiteLocked(domain, subdomain)
+}
 
+// deleteSiteLocked is deleteSite for callers that hold the global lock.
+func deleteSiteLocked(domain string, subdomain string) {
 	var key string
 	if subdomain != "" {
 		delete(sitesMap[domain], subdomain)
@@ -965,11 +969,24 @@ func httpsEnabled(siteKey string) bool {
 	return isSet && certIndex != 0
 }
 
+// redir redirects to the same request on subdomain.host, keeping the scheme and the port of the Host header.
 func redir(schemeSuffix string, host string, subdomain string, responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request, statusCode int) {
 	if subdomain != "" {
 		subdomain += "."
 	}
-	customNetHttp.Redirect(responseWriter, request, "http"+schemeSuffix+"://"+subdomain+host+request.RequestURI, statusCode)
+	port := ""
+	if _, hostPort, err := net.SplitHostPort(request.Host); err == nil {
+		port = ":" + hostPort
+	}
+	customNetHttp.Redirect(responseWriter, request, "http"+schemeSuffix+"://"+subdomain+host+port+request.RequestURI, statusCode)
+}
+
+// httpsPortSuffix is ":<port>" of TURBO_HTTPS_ADDR for the redirections to HTTPS, or "" for the default 443.
+func httpsPortSuffix() string {
+	if _, port, err := net.SplitHostPort(httpsAddr); err == nil && port != "443" {
+		return ":" + port
+	}
+	return ""
 }
 
 // servePlan is what serving a request needs from the shared settings, copied under the read lock.
@@ -1045,11 +1062,21 @@ func serve(serverType string, host string, domain string, subdomain string, firs
 	return plan
 }
 
-// serve sends the file, or runs its preprocessor, without the global lock.
+// serve answers with the file of the plan, or runs its preprocessor, without the global lock. Files are looked
+// up and opened through an os.Root of the site's content directory, so that nothing outside it is reached, not
+// even through a symbolic link (H1). The file is opened once and served from that handle (O1).
 func (plan *servePlan) serve(responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request) {
 	rewrittenPath := plan.path
-	fileInfo, err := os.Stat(plan.root + rewrittenPath)
+	contentRoot, err := os.OpenRoot(plan.root)
 	if err != nil {
+		reqMsg(responseWriter, request, 404)
+		return
+	}
+	defer contentRoot.Close()
+	opened := &openedFileFS{root: contentRoot.FS()}
+	defer opened.close()
+	fileInfo, err := opened.open(rootName(rewrittenPath))
+	if err != nil || (!fileInfo.IsDir() && strings.HasSuffix(rewrittenPath, "/")) { // "x.php/" names no folder: its extension would be lost
 		reqMsg(responseWriter, request, 404)
 		return
 	}
@@ -1063,8 +1090,8 @@ func (plan *servePlan) serve(responseWriter customNetHttp.ResponseWriter, reques
 
 		for _, indexName := range plan.indexes {
 			indexFile = trailingSlash + indexName
-			preprocFileInfo, err := os.Stat(plan.root + rewrittenPath + indexFile)
-			if err == nil && !preprocFileInfo.IsDir() { // Make sure this is the best error handling for Indexes, before: !os.IsNotExist(e)
+			indexInfo, err := opened.open(rootName(rewrittenPath + indexFile))
+			if err == nil && !indexInfo.IsDir() {
 				rewrittenPath += indexFile
 				indexFile = ""
 				break
@@ -1090,6 +1117,7 @@ func (plan *servePlan) serve(responseWriter customNetHttp.ResponseWriter, reques
 			reqMsg(responseWriter, request, 500)
 			return
 		}
+		opened.close() // The CGI opens the script itself
 		dynamic(plan.root, rewrittenPath, plan.queryString, preprocessor, responseWriter, request, &responseHeaders)
 		return
 	}
@@ -1097,7 +1125,57 @@ func (plan *servePlan) serve(responseWriter customNetHttp.ResponseWriter, reques
 	if mimeType, found := plan.mimeTypes[extension]; found {
 		responseHeaders.Set(contentTypeHeader, mimeType)
 	}
-	customNetHttp.ServeFile(responseWriter, request, plan.root+rewrittenPath)
+	customNetHttp.ServeFileFS(responseWriter, request, opened, rootName(rewrittenPath))
+}
+
+// openedFileFS is the fs.FS that serve hands to ServeFileFS: it gives back the file already opened through the
+// site's os.Root, so that ServeFileFS doesn't look it up and open it again, and opens any other name through the
+// Root.
+type openedFileFS struct {
+	root fs.FS
+	name string
+	file fs.File
+}
+
+// open opens name through the Root, keeping it (and closing the one kept before), and returns its information.
+func (opened *openedFileFS) open(name string) (fs.FileInfo, error) {
+	opened.close()
+	file, err := opened.root.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		file.Close() // #nosec G104 -- it is discarded: the error that matters is Stat's
+		return nil, err
+	}
+	opened.name, opened.file = name, file
+	return info, nil
+}
+
+// Open hands over the kept file once, for whoever opens it to close it.
+func (opened *openedFileFS) Open(name string) (fs.File, error) {
+	if file := opened.file; file != nil && name == opened.name {
+		opened.file = nil
+		return file, nil
+	}
+	return opened.root.Open(name)
+}
+
+// close closes the kept file, if it wasn't handed over.
+func (opened *openedFileFS) close() {
+	if opened.file != nil {
+		opened.file.Close() // #nosec G104 -- read-only file
+		opened.file = nil
+	}
+}
+
+// rootName turns a clean request path ("/a/b") into a name inside an os.Root ("a/b", or "." for "/").
+func rootName(requestPath string) string {
+	if name := strings.Trim(requestPath, "/"); name != "" {
+		return name
+	}
+	return "."
 }
 
 func dynamic(basePath string, requestPath string, queryString string, scriptPath string, responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request, headers *customNetHttp.Header) {
@@ -1196,12 +1274,16 @@ func rewriteRedirect(secure bool, target string, query string, responseWriter cu
 }
 
 func choose(responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request, host string, domain string, subdomain string, currentSubdomain string, firstDomain string, firstSubdomain string) (string, string, bool) {
-	pathWithoutQuery := cutAt(request.RequestURI, '?')
+	pathWithoutQuery, ok := cleanRequestPath(cutAt(request.RequestURI, '?')) // Decoded and inside the site (D5, H1)
+	if !ok {
+		reqMsg(responseWriter, request, 404) // The same answer whether the file exists or not (H2)
+		return "", "", false
+	}
 	rewriteResult, matchedRewrite := rewrite(pathWithoutQuery, domain, subdomain) // domain is the site map key and subdomain is the site subdomain map key, both in sitesMap
 	if rewriteResult == "" {
 		return pathWithoutQuery, "", true
 	} // This is for unmatched URIs for rewrite
-	rewriteResult = shortcutWords(request, rewriteResult, domain, subdomain, host, currentSubdomain, firstDomain, firstSubdomain, matchedRewrite)
+	rewriteResult = shortcutWords(request, rewriteResult, domain, subdomain, host, currentSubdomain, firstDomain, firstSubdomain, matchedRewrite, pathWithoutQuery)
 	queryIndex := strings.IndexByte(rewriteResult, '?')
 	if queryIndex != -1 {
 		pathWithoutQuery = rewriteResult[queryIndex+1:]
@@ -1216,21 +1298,20 @@ func choose(responseWriter customNetHttp.ResponseWriter, request *customNetHttp.
 	case 'N':
 		rewriteResult = rewriteResult[1:]
 	}
-	if rewriteResult != "" { // Placeholders may have produced ".." or "\\": keep the path inside the content directory
-		cleanPath := path.Clean(rewriteResult)
-		if cleanPath[0] != '/' || strings.IndexByte(rewriteResult, '\\') != -1 {
-			reqMsg(responseWriter, request, 400)
+	if rewriteResult != "" { // Placeholders may have produced ".." or "\\": the target is cleaned as a request path
+		cleanPath, ok := cleanRequestPath(rewriteResult)
+		if !ok {
+			reqMsg(responseWriter, request, 404)
 			return "", "", false
-		}
-		if rewriteResult[len(rewriteResult)-1] == '/' && cleanPath != "/" {
-			cleanPath += "/"
 		}
 		rewriteResult = cleanPath
 	}
 	return rewriteResult, pathWithoutQuery, true
 }
 
-func shortcutWords(request *customNetHttp.Request, input string, domain string, subdomain string, host string, currentSubdomain string, firstDomain string, firstSubdomain string, rewriteMatch string) string {
+// shortcutWords replaces the placeholders of a rewrite target. requestPath is the decoded, clean path that
+// rewriteMatch, the matched rewrite key, was compared with.
+func shortcutWords(request *customNetHttp.Request, input string, domain string, subdomain string, host string, currentSubdomain string, firstDomain string, firstSubdomain string, rewriteMatch string, requestPath string) string {
 	remaining := input
 	placeholder := ""
 	result := ""
@@ -1243,7 +1324,7 @@ func shortcutWords(request *customNetHttp.Request, input string, domain string, 
 		}
 		placeholder = remaining[openBraceIdx+1 : closeBraceIdx]
 		if _, placeholderExists = shortcutWordReplacers[placeholder]; placeholderExists {
-			result += remaining[:openBraceIdx] + shortcutWordReplacers[placeholder](request, domain, subdomain, host, currentSubdomain, firstDomain, firstSubdomain, rewriteMatch)
+			result += remaining[:openBraceIdx] + shortcutWordReplacers[placeholder](request, domain, subdomain, host, currentSubdomain, firstDomain, firstSubdomain, rewriteMatch, requestPath)
 		} else {
 			result += remaining[:openBraceIdx]
 		}
@@ -1257,16 +1338,20 @@ func shortcutWords(request *customNetHttp.Request, input string, domain string, 
 	return result
 }
 
-func readSiteConfigFrom(configPath string) {
-	// Probably need to check file permissions, because can't read and generate an err.
+// readSiteConfigFrom applies the turbo.config at configPath, or the defaults if there is none. A file that
+// can't be read or isn't valid JSON isn't applied (D11): it returns a *configFileError and the configuration in
+// use stays. Callers hold the global lock.
+func readSiteConfigFrom(configPath string) error {
 	if fileExists(configPath) {
 		configBytes, err := os.ReadFile(configPath) // #nosec G304 -- path under the sites directory chosen by the administrator (TURBO_DIR or M)
-		if err != nil || !json.Valid([]byte(configBytes)) {
-			slog.Error("turbo.config ilegible o no es JSON válido: se aplica la configuración por defecto", "archivo", configPath, "error", err)
-			setDefaultSettings()
-			return
+		if err != nil {
+			return &configFileError{path: configPath, err: err}
 		}
-		json.Unmarshal(configBytes, &rawConfigMap)
+		if err = parseConfig(configBytes, &rawConfigMap); err != nil {
+			rawConfigMap = make(map[string]map[string]interface{})
+			return &configFileError{path: configPath, data: configBytes, err: err}
+		}
+		dropControlChars(rawConfigMap)
 		configSchemaRead = migrateConfig(rawConfigMap, configBytes)
 		if configSchemaRead < configSchema {
 			slog.Warn("Configuración en esquema " + strconv.Itoa(configSchemaRead) + ": se aplicará la migración al guardar")
@@ -1338,10 +1423,11 @@ func readSiteConfigFrom(configPath string) {
 			}
 		}
 		rawConfigMap = make(map[string]map[string]interface{})
-		return
+		return nil
 	}
 	configSchemaRead = configSchema
 	setDefaultSettings()
+	return nil
 }
 
 func setDefaultSettings() {

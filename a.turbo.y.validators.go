@@ -94,6 +94,7 @@ var (
 			"CIL": func() { atomic.StoreInt64(&serverRequestLimits[0], 10000*int64(time.Millisecond)) },
 			"CIS": func() { atomic.StoreInt64(&serverRequestLimits[1], 1000*int64(time.Millisecond)) }, // Need to be first to be set
 			"CII": func() { atomic.StoreInt64(&serverRequestLimits[2], 100) },
+			"CGL": func() { globalRequestLimit.Store(0) },
 			"RT":  func() { setTimeLimits(func(limits *customNetHttp.Timeouts) { limits.RT = 5 * time.Second }) }, // Need to be first to be set
 			"RHT": func() { setTimeLimits(func(limits *customNetHttp.Timeouts) { limits.RHT = 1 * time.Second }) },
 			"WT":  func() { setTimeLimits(func(limits *customNetHttp.Timeouts) { limits.WT = 10 * time.Second }) },
@@ -103,6 +104,7 @@ var (
 
 	adminDeleteHandlers = map[string]func(string) (bool, string){
 		"@": func(ip string) (bool, string) {
+			ip = ipAddr(strings.TrimSpace(ip)) // As it was saved: canonical (H23)
 			if _, exists := deniedIPList()[ip]; !exists {
 				return false, "IP inexistente"
 			}
@@ -141,6 +143,7 @@ var (
 
 	adminAddHandlers = map[string]func(string, string) (bool, string){
 		"@": func(ip string, unixDate string) (bool, string) {
+			ip = strings.TrimSpace(ip)
 			parsedIP := net.ParseIP(ip)
 			if parsedIP == nil || parsedIP.IsUnspecified() {
 				return false, "IP incorrecto"
@@ -242,7 +245,7 @@ var (
 	}
 
 	defaultSettingKeysGroup = map[string][]string{
-		".": {"C", "M", "PA", "MUB", "MHB", "MBB", "CIL", "CIS", "CII", "RT", "RHT", "WT", "IT"},
+		".": {"C", "M", "PA", "MUB", "MHB", "MBB", "CIL", "CIS", "CII", "CGL", "RT", "RHT", "WT", "IT"},
 	}
 
 	defaultSettingErrorExceptions = map[string]map[string]map[string]bool{ // ME (E, for exceptions). There are some exceptions on errors, some cause unnecessary resets
@@ -255,6 +258,7 @@ var (
 			"CIL": map[string]bool{"Valor sin cambios": true},
 			"CIS": map[string]bool{"Valor sin cambios": true},
 			"CII": map[string]bool{"Valor sin cambios": true},
+			"CGL": map[string]bool{"Valor sin cambios": true},
 			"RT":  map[string]bool{"Valor sin cambios": true},
 			"RHT": map[string]bool{"Valor sin cambios": true},
 			"WT":  map[string]bool{"Valor sin cambios": true},
@@ -296,21 +300,20 @@ var (
 				panelUser.Set(args[0])
 				return true, "Usuario cambiado"
 			},
-			"P": func(args ...string) (bool, string) {
-				if len(args) != 2 {
+			"P": func(args ...string) (bool, string) { // args[2], if given, is newPasswordHash(args[0]), computed before the lock
+				if len(args) != 2 && len(args) != 3 {
 					return false, msgMissingData + " en P"
 				}
 				if !passwordMatches(args[1]) {
 					return false, "Contraseña actual incorrecta"
 				}
-				length := len(args[0])
-				if length < 1 || length > 24 {
-					return false, "Contraseña muy larga o corta"
+				hash, problem := "", ""
+				if len(args) == 3 {
+					hash = args[2]
+				} else if hash, problem = newPasswordHash(args[0]); problem != "" {
+					return false, problem
 				}
-				if passwordMatches(args[0]) {
-					return false, "Contraseña sin cambios"
-				}
-				setPanelPassword(args[0])
+				applyPasswordHash(hash, args[0])
 				return true, "Contraseña cambiada"
 			},
 			"M": func(args ...string) (bool, string) {
@@ -321,12 +324,11 @@ var (
 					return false, "Contraseña actual incorrecta"
 				}
 
-				args[0] = putSlash(args[0])
-				if args[0] == sitesDir.Get() {
+				if putSlash(args[0]) == sitesDir.Get() {
 					return false, "Directorio de sitios sin cambios"
 				}
 
-				args[0] = strings.Replace(args[0], "{"+currentDirPlaceholder+"}", currentDir(), 1)
+				args[0] = sitesDirSetting(args[0])
 				info, err := os.Stat(args[0])
 				if err != nil || !info.IsDir() { // Doesn't exist or the path isn't valid on this system
 					return false, "Directorio de sitios inexistente"
@@ -496,6 +498,29 @@ var (
 				atomic.StoreInt64(&serverRequestLimits[2], value)
 				return true, "Peticiones máximas por intervalo guardado"
 			},
+			"CGL": func(args ...string) (bool, string) { // Requests per second for the whole server (D4)
+				if len(args) != 2 {
+					return false, msgMissingData + " en CGL"
+				}
+				if !passwordMatches(args[1]) {
+					return false, "Contraseña actual incorrecta"
+				}
+				value, err := strconv.ParseInt(args[0], 10, 64)
+				if err != nil {
+					return false, "Valor incorrecto"
+				}
+				if value == globalRequestLimit.Load() {
+					return false, "Valor sin cambios"
+				}
+				if value != 0 && (value < 10 || value > 1000000) {
+					return false, "Debe ser 0 (sin límite) o de 10 a 1000000"
+				}
+				globalRequestLimit.Store(value)
+				if value == 0 {
+					return true, "Límite global de peticiones desactivado"
+				}
+				return true, "Límite global de peticiones guardado"
+			},
 			"RT": func(args ...string) (bool, string) {
 				settingArgs := args // Need to be the first to be set
 				if len(settingArgs) != 2 {
@@ -540,7 +565,7 @@ var (
 					if value < 50*time.Millisecond {
 						return false, "Inferior a 50 milisegundos"
 					}
-					if value > (serverTimeLimits.Load().RT / 2) {
+					if rt := serverTimeLimits.Load().RT; rt > 0 && value > rt/2 { // With RT = 0 there is no limit to be half of
 						return false, "Más que la mitad de lectura de peticiones"
 					}
 					if value > 450000*time.Millisecond {
@@ -778,6 +803,7 @@ var (
 			}
 
 			for ext, rawMIME := range entries {
+				ext = strings.ToLower(ext) // Looked up in lower case (ext): ".PHP" is also preprocessed (H3)
 				mimeType, isString := rawMIME.(string)
 				if !isString {
 					if printErrors {
@@ -941,6 +967,7 @@ var (
 			}
 
 			for ext, rawPath := range entries {
+				ext = strings.ToLower(ext) // Looked up in lower case (ext): ".PHP" is also preprocessed (H3)
 				executable, isString := rawPath.(string)
 				if !isString {
 					if printErrors {
@@ -1200,6 +1227,7 @@ var (
 			}
 
 			for ext := range entries {
+				ext = strings.ToLower(ext)
 				if len(ext) > 0 && ext[0] == '.' {
 					ext = ext[1:]
 				}
@@ -1283,6 +1311,7 @@ var (
 			}
 
 			for ext := range entries {
+				ext = strings.ToLower(ext)
 				if len(ext) > 0 && ext[0] == '.' {
 					ext = ext[1:]
 				}
@@ -1395,7 +1424,7 @@ var (
 			}
 			email, err := url.QueryUnescape(args[0])
 			args[0] = email
-			if err != nil || strings.IndexByte(args[0], '#') != -1 || strings.Contains(args[0], "--") || strings.IndexByte(args[0], ' ') != -1 || strings.IndexByte(args[0], '@') == -1 || strings.IndexByte(args[0], '.') == -1 {
+			if err != nil || !textAllowed(args[0], false) || strings.IndexByte(args[0], '#') != -1 || strings.Contains(args[0], "--") || strings.IndexByte(args[0], ' ') != -1 || strings.IndexByte(args[0], '@') == -1 || strings.IndexByte(args[0], '.') == -1 {
 				return false, "Valor de e-mail incorrecto"
 			}
 
@@ -1505,19 +1534,20 @@ var (
 				exists = false
 			}
 
+			if exists && !printErrors && args[0] == "0" { // "Borrar SSL", also for a certificate older than 75 days (H20)
+				if os.Remove(sitesDir.Get()+args[1]+certFileName) != nil ||
+					os.Remove(sitesDir.Get()+args[1]+keyFileName) != nil {
+					return false, "Error al borrar archivos SSL"
+				}
+				siteSSLConfig[siteKey]["C"] = false
+				return true, "Certificado SSL borrado"
+			}
+
 			if exists && (time.Now().Unix()-fileInfo.ModTime().Unix()) > 6480000 {
 				exists = false
 			}
 
 			if exists {
-				if !printErrors && args[0] == "0" {
-					if os.Remove(sitesDir.Get()+args[1]+certFileName) != nil ||
-						os.Remove(sitesDir.Get()+args[1]+keyFileName) != nil {
-						return false, "Error al borrar archivos SSL"
-					}
-					siteSSLConfig[siteKey]["C"] = false
-					return true, "Certificado SSL borrado"
-				}
 
 				siteSSLConfig[siteKey]["C"] = true
 				return true, "Certificado SSL activo"
@@ -1633,6 +1663,9 @@ var (
 			if argCount < 3 || argCount > 5 {
 				return false, msgMissingData + " en R"
 			}
+			if args[2] != "" { // D7: read at the root, it applies to www.<site> (H17)
+				return false, "Solo se configura en la raíz del sitio (d vacío): redirige www.<sitio> a <sitio>"
+			}
 			if args[0] != "0" && args[0] != "1" {
 				return false, "Valor incorrecto"
 			}
@@ -1668,6 +1701,9 @@ var (
 			argCount := len(args)
 			if argCount < 3 || argCount > 5 {
 				return false, msgMissingData + " en W"
+			}
+			if args[2] != "" { // Read at the root, it applies to <site>
+				return false, "Solo se configura en la raíz del sitio (d vacío): redirige <sitio> a www.<sitio>"
 			}
 			if args[0] != "0" && args[0] != "1" {
 				return false, "Valor incorrecto"
@@ -1761,11 +1797,21 @@ var (
 			return url.QueryEscape(wildcardParts[6])
 		},
 		"REWRITE_COMPLEMENT": func(request *customNetHttp.Request, wildcardParts ...string) string {
-			length := len(wildcardParts[6])
-			if length < len(request.RequestURI) {
-				return url.QueryEscape(request.RequestURI[length:])
+			// What follows the key in the decoded, clean path it matched (B2), and the query
+			complement := ""
+			if length := len(wildcardParts[6]); length < len(wildcardParts[7]) {
+				complement = wildcardParts[7][length:]
 			}
-			return ""
+			if queryStart := strings.IndexByte(request.RequestURI, '?'); queryStart != -1 {
+				complement += request.RequestURI[queryStart:]
+			}
+			return url.QueryEscape(complement)
 		},
 	}
 )
+
+// sitesDirSetting is the sites directory an "M" value names: with a final slash and {TURBO_CURRENT_DIR}
+// replaced by the working directory.
+func sitesDirSetting(value string) string {
+	return strings.Replace(putSlash(value), "{"+currentDirPlaceholder+"}", currentDir(), 1)
+}

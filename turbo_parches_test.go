@@ -257,8 +257,8 @@ func (h *h2) leer(stream uint32) (cuerpo string, goaway bool, codigo uint32) {
 }
 
 // P2, P3 y P5: en HTTP/2, :path por encima de TurboMaxURILength da 414 y una lista de
-// cabeceras por encima de TurboMaxHeaderBytes (bytes de nombre y valor, como en HTTP/1) da
-// 431, ambos con la plantilla; el límite es exacto.
+// cabeceras por encima de TurboMaxHeaderBytes (bytes de nombre y valor más 32 por campo,
+// como cuenta HTTP/2; C6) da 431, ambos con la plantilla; el límite es exacto.
 func TestT21_P2_LimitesHTTP2(t *testing.T) {
 	initForTest(t)
 	conLimite(t, &customNetHttp.TurboMaxURILength, 40)
@@ -274,8 +274,8 @@ func TestT21_P2_LimitesHTTP2(t *testing.T) {
 	}
 
 	// :method GET :scheme https :path / :authority x suman 7+3+7+5+5+1+10+1 = 39
-	// bytes; x-relleno completa el total.
-	relleno := func(total int) string { return strings.Repeat("r", total-39-len("x-relleno")) }
+	// bytes, más 32 por cada uno de los cinco campos; x-relleno completa el total.
+	relleno := func(total int) string { return strings.Repeat("r", total-39-len("x-relleno")-5*32) }
 	if cuerpo, _, _ := h.leer(h.peticion("/", "x-relleno", relleno(600))); cuerpo != "ok" {
 		t.Errorf("cabeceras de 600 bytes: %q; se esperaba ok", cuerpo)
 	}
@@ -287,6 +287,25 @@ func TestT21_P2_LimitesHTTP2(t *testing.T) {
 	customNetHttp.TurboMaxHeaderBytes.Store(2000)
 	if cuerpo, _, _ := h.leer(h.peticion("/", "x-relleno", relleno(1500))); cuerpo != "ok" {
 		t.Errorf("cabeceras de 1500 bytes con TurboMaxHeaderBytes = 2000: %q; se esperaba ok", cuerpo)
+	}
+}
+
+// C6 (H29): en HTTP/2 cada campo cuenta 32 bytes además de su nombre y su
+// valor, como en Go: con MHB = 5000, 200 cabeceras de 1 byte no caben.
+func TestC6_HTTP2FieldOverhead(t *testing.T) {
+	initForTest(t)
+	conLimite(t, &customNetHttp.TurboMaxHeaderBytes, 5000)
+	addr := servidorFork(t, true, manejadorOK)
+	h := dialH2(t, addr)
+	var campos []string
+	for i := 0; i < 200; i++ {
+		campos = append(campos, "x", "")
+	}
+	if cuerpo, _, _ := h.leer(h.peticion("/", campos...)); cuerpo != plantillaEsperada(431, "") {
+		t.Errorf("200 cabeceras de 1 byte con MHB = 5000: %q; se esperaba el 431 de la plantilla", cuerpo)
+	}
+	if cuerpo, _, _ := h.leer(h.peticion("/", campos[:100]...)); cuerpo != "ok" {
+		t.Errorf("50 cabeceras de 1 byte con MHB = 5000: %q; se esperaba ok", cuerpo)
 	}
 }
 
@@ -372,6 +391,52 @@ func TestT21_P6_TimeoutsHTTP1(t *testing.T) {
 	}
 }
 
+// B4 (H15): con RHT o IT a 0, la lectura de cabeceras y la inactividad usan
+// RT, como en Go, en lugar de no tener límite.
+func TestB4_ZeroTimeoutsUseRT(t *testing.T) {
+	initForTest(t)
+	anterior := *serverTimeLimits.Load()
+	t.Cleanup(func() { withGlobalLock(func() { setTimeLimits(func(t *customNetHttp.Timeouts) { *t = anterior }) }) })
+	withGlobalLock(func() {
+		setTimeLimits(func(t *customNetHttp.Timeouts) { t.RT, t.RHT, t.IT, t.WT = 300*time.Millisecond, 0, 0, 0 })
+	})
+	addr := servidorFork(t, false, manejadorOK)
+	cerradaEn := func(c net.Conn) (bool, time.Duration) {
+		inicio := time.Now()
+		c.SetReadDeadline(time.Now().Add(3 * time.Second))
+		_, err := c.Read(make([]byte, 1))
+		return err == io.EOF, time.Since(inicio)
+	}
+
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	io.WriteString(c, "GET / HTTP/1.1\r\nHost: x\r\n") // Headers that never end
+	if cerrada, tras := cerradaEn(c); !cerrada || tras > 2*time.Second {
+		t.Errorf("RT = 300 ms y RHT = 0: la petición a medias sigue abierta (%v tras %v)", cerrada, tras)
+	}
+
+	c2, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c2.Close()
+	io.WriteString(c2, "GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+	br := bufio.NewReader(c2)
+	res, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.ReadAll(res.Body)
+	inicio := time.Now()
+	c2.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, err := br.ReadByte(); err != io.EOF || time.Since(inicio) > 2*time.Second {
+		t.Errorf("RT = 300 ms e IT = 0: la conexión inactiva sigue abierta (%v tras %v)", err, time.Since(inicio))
+	}
+}
+
 // P7: si el manejador no lee el cuerpo, la conexión se cierra en lugar de
 // vaciarlo (Go lee hasta 256 KiB y la reutiliza).
 func TestT21_P7_CuerpoSinLeer(t *testing.T) {
@@ -383,6 +448,35 @@ func TestT21_P7_CuerpoSinLeer(t *testing.T) {
 	}
 	if !res.Close {
 		t.Error("falta Connection: close con el cuerpo sin leer")
+	}
+
+	// B1 (H13): with the body read to the end, the connection is reused, as in Go.
+	addr = servidorFork(t, false, func(w customNetHttp.ResponseWriter, r *customNetHttp.Request) {
+		io.Copy(io.Discard, r.Body)
+		io.WriteString(w, "ok")
+	})
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(5 * time.Second))
+	reader := bufio.NewReader(c)
+	for i, peticion := range []string{
+		"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\n0123456789",
+		"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n5\r\n01234\r\n0\r\n\r\n",
+		"GET / HTTP/1.1\r\nHost: x\r\n\r\n",
+	} {
+		io.WriteString(c, peticion)
+		res, err := http.ReadResponse(reader, nil)
+		if err != nil {
+			t.Fatalf("petición %d en la misma conexión: %v", i+1, err)
+		}
+		io.ReadAll(res.Body)
+		res.Body.Close()
+		if res.StatusCode != 200 || (res.Close && i < 2) {
+			t.Fatalf("petición %d: %d, Connection: close %v; se esperaba mantener la conexión tras un cuerpo leído entero", i+1, res.StatusCode, res.Close)
+		}
 	}
 }
 
@@ -406,6 +500,176 @@ func TestT21_P8_CabeceraServer(t *testing.T) {
 		if got := res.Header.Get("Server"); got != serverName {
 			t.Errorf("%s: Server %q; se esperaba %q", res.Proto, got, serverName)
 		}
+	}
+}
+
+// C4 (H27): ParseMultipartForm con maxMemory <= 0 usa MBB como límite y no
+// crea archivos temporales.
+func TestC4_ParseMultipartFormZero(t *testing.T) {
+	initForTest(t)
+	resultado := make(chan string, 1)
+	addr := servidorFork(t, false, func(w customNetHttp.ResponseWriter, r *customNetHttp.Request) {
+		err := r.ParseMultipartForm(0)
+		guardado := r.MultipartForm != nil && len(r.MultipartForm.File["f"]) > 0 // In memory or in a temporary file
+		if r.MultipartForm != nil {
+			r.MultipartForm.RemoveAll()
+		}
+		resultado <- fmt.Sprintf("err=%v archivo=%v", err, guardado)
+		io.WriteString(w, "ok")
+	})
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	fw, _ := mw.CreateFormFile("f", "grande.bin")
+	fw.Write(bytes.Repeat([]byte("x"), int(maxBodySize.Load())*2))
+	mw.Close()
+	req, _ := http.NewRequest("POST", "http://"+addr+"/", &buf)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	if res, err := (&http.Client{Timeout: 5 * time.Second}).Do(req); err == nil {
+		res.Body.Close()
+	}
+	select {
+	case r := <-resultado:
+		if !strings.Contains(r, "too large") || strings.Contains(r, "archivo=true") {
+			t.Errorf("ParseMultipartForm(0) con el doble de MBB: %s; se esperaba \"message too large\" sin archivo", r)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("el manejador no respondió")
+	}
+}
+
+// C7 (H30): un formulario urlencoded se guarda entero en memoria, así que se
+// limita a 10 MiB aunque MBB sea mayor (como Go).
+func TestC7_URLEncodedFormLimit(t *testing.T) {
+	initForTest(t)
+	conLimite(t, &customNetHttp.TurboMaxBodySize, 100<<20)
+	resultado := make(chan error, 1)
+	addr := servidorFork(t, false, func(w customNetHttp.ResponseWriter, r *customNetHttp.Request) {
+		resultado <- r.ParseForm()
+		io.WriteString(w, "ok")
+	})
+	for tamaño, demasiado := range map[int]bool{10 << 20: false, 11 << 20: true} {
+		cuerpo := "a=" + strings.Repeat("x", tamaño-2)
+		req, _ := http.NewRequest("POST", "http://"+addr+"/", strings.NewReader(cuerpo))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		if res, err := (&http.Client{Timeout: 10 * time.Second}).Do(req); err == nil {
+			res.Body.Close()
+		}
+		if err := <-resultado; (err != nil) != demasiado {
+			t.Errorf("formulario de %d bytes con MBB = 100 MiB: ParseForm = %v", tamaño, err)
+		}
+	}
+}
+
+// H53: el tope de 10 MiB de los formularios urlencoded se aplica al leer,
+// también cuando el manejador ya limita el cuerpo con MaxBytesReader a más:
+// no se lee (ni se guarda en memoria) más de lo que se va a aceptar.
+func TestH53_URLEncodedLimitWithMaxBytesReader(t *testing.T) {
+	initForTest(t)
+	conLimite(t, &customNetHttp.TurboMaxBodySize, 100<<20)
+	type resultadoForm struct {
+		err   error
+		leido int64
+	}
+	resultado := make(chan resultadoForm, 1)
+	addr := servidorFork(t, false, func(w customNetHttp.ResponseWriter, r *customNetHttp.Request) {
+		cuenta := &lectorContado{r: r.Body}
+		r.Body = customNetHttp.MaxBytesReader(w, io.NopCloser(cuenta), 50<<20)
+		err := r.ParseForm()
+		resultado <- resultadoForm{err, cuenta.n}
+		io.WriteString(w, "ok")
+	})
+	cuerpo := "a=" + strings.Repeat("x", 20<<20)
+	req, _ := http.NewRequest("POST", "http://"+addr+"/", strings.NewReader(cuerpo))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	if res, err := (&http.Client{Timeout: 20 * time.Second}).Do(req); err == nil {
+		res.Body.Close()
+	}
+	r := <-resultado
+	if r.err == nil {
+		t.Error("formulario de 20 MiB con MaxBytesReader de 50 MiB: ParseForm sin error; el tope es 10 MiB")
+	}
+	if r.leido > 11<<20 {
+		t.Errorf("formulario de 20 MiB: se leyeron %d bytes antes de rechazarlo; se esperaba no pasar de 10 MiB", r.leido)
+	}
+}
+
+type lectorContado struct {
+	r io.Reader
+	n int64
+}
+
+func (l *lectorContado) Read(p []byte) (int, error) {
+	n, err := l.r.Read(p)
+	l.n += int64(n)
+	return n, err
+}
+
+// H54: en HTTP/2, SETTINGS_MAX_HEADER_LIST_SIZE anuncia el mismo límite que
+// se aplica (MHB, con 32 bytes por campo): un cliente que respeta lo anunciado
+// no recibe 431 por una lista de cabeceras que el servidor dijo aceptar.
+func TestH54_HTTP2AnnouncedHeaderLimit(t *testing.T) {
+	initForTest(t)
+	conLimite(t, &customNetHttp.TurboMaxHeaderBytes, 5000)
+	addr := servidorFork(t, true, manejadorOK)
+	tr := &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, ForceAttemptHTTP2: true}
+	defer tr.CloseIdleConnections()
+	client := &http.Client{Transport: tr, Timeout: 5 * time.Second}
+	pedir := func(relleno int) (int, error) {
+		req, _ := http.NewRequest("GET", "https://"+addr+"/", nil)
+		if relleno > 0 {
+			req.Header.Set("X-Relleno", strings.Repeat("r", relleno))
+		}
+		res, err := client.Do(req)
+		if err != nil {
+			return 0, err
+		}
+		res.Body.Close()
+		return res.StatusCode, nil
+	}
+	if code, err := pedir(0); err != nil || code != 200 { // Opens the connection: the client learns the SETTINGS
+		t.Fatalf("petición inicial: %d %v", code, err)
+	}
+	if code, err := pedir(4500); err != nil || code != 200 {
+		t.Errorf("unos 4 800 bytes de cabeceras con MHB = 5000: %d %v; se esperaba 200", code, err)
+	}
+	// About 5 130 bytes: above MHB. The client may refuse it (the limit it was told) but the server must not
+	// announce a limit and then answer 431 below it.
+	if code, err := pedir(4800); err == nil && code == 431 {
+		t.Errorf("unos 5 130 bytes de cabeceras con MHB = 5000: el cliente la envió (el servidor anunció más) y recibió 431")
+	}
+}
+
+// C3 (H26): una sola cabecera Server, la de Turbo, aunque el manejador fije
+// Server (cabeceras del sitio, un CGI) o Date, en HTTP/1.1 y HTTP/2.
+func TestC3_OneServerHeader(t *testing.T) {
+	initForTest(t)
+	for _, conTLS := range []bool{false, true} {
+		addr := servidorFork(t, conTLS, func(w customNetHttp.ResponseWriter, r *customNetHttp.Request) {
+			switch r.URL.Path {
+			case "/server":
+				w.Header().Set("Server", "Otro")
+			case "/date":
+				w.Header().Set("Date", "Mon, 02 Jan 2006 15:04:05 GMT")
+			}
+			io.WriteString(w, "ok")
+		})
+		base := "http://" + addr
+		tr := &http.Transport{}
+		if conTLS {
+			base = "https://" + addr
+			tr = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, ForceAttemptHTTP2: true}
+		}
+		for _, path := range []string{"/", "/server", "/date"} {
+			res, err := (&http.Client{Transport: tr, Timeout: 5 * time.Second}).Get(base + path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			res.Body.Close()
+			if got := res.Header.Values("Server"); len(got) != 1 || got[0] != serverName {
+				t.Errorf("%s %s: Server %q; se esperaba una sola, %q", res.Proto, path, got, serverName)
+			}
+		}
+		tr.CloseIdleConnections()
 	}
 }
 
@@ -449,6 +713,26 @@ func TestT21_P9_PlantillaError(t *testing.T) {
 	res, cuerpo = get("/error")
 	if ct := strings.ToLower(res.Header.Get("Content-Type")); ct != "text/html; charset=utf-8" || cuerpo != "<p>Error 418</p>\ndetalle\n" {
 		t.Errorf("plantilla HTML: %q, %q", ct, cuerpo)
+	}
+}
+
+// C8 (H31): en una plantilla HTML, el detalle del error se escapa; en una de
+// texto se deja tal cual.
+func TestC8_HTMLTemplateDetailEscaped(t *testing.T) {
+	initForTest(t)
+	addr := servidorFork(t, false, func(w customNetHttp.ResponseWriter, r *customNetHttp.Request) {
+		customNetHttp.Error(w, `<script>alert("x")</script> & más`, 418)
+	})
+	anterior := customNetHttp.TurboErrorTemplates.Load()
+	t.Cleanup(func() { customNetHttp.TurboErrorTemplates.Store(anterior) })
+	customNetHttp.TurboErrorTemplates.Store(&map[int]string{0: "<p>Error {TURBO_RESPONSE_CODE}</p>"})
+	_, cuerpo := crudo(t, addr, "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+	if want := "<p>Error 418</p>\n&lt;script&gt;alert(&#34;x&#34;)&lt;/script&gt; &amp; más\n"; cuerpo != want {
+		t.Errorf("plantilla HTML: %q; se esperaba %q", cuerpo, want)
+	}
+	customNetHttp.TurboErrorTemplates.Store(&map[int]string{0: `Error {TURBO_RESPONSE_CODE}`})
+	if _, cuerpo = crudo(t, addr, "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"); !strings.Contains(cuerpo, "<script>") {
+		t.Errorf("plantilla de texto: %q; el detalle no debía cambiar", cuerpo)
 	}
 }
 

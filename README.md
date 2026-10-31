@@ -4,7 +4,7 @@
 
 ![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)
 ![Go Version](https://img.shields.io/github/go-mod/go-version/okzgn/turbo-go)
-![Status](https://img.shields.io/badge/Status-Release%20Candidate-orange)
+![Status](https://img.shields.io/badge/Status-Stable-green)
 
 A cross-platform, high-performance HTTP web server with a real-time, visual management interface. Manage unlimited domains and multi-level wildcard subdomains, SSL certificates, URI rewrites, request preprocessing, fine-grained request rate and size limiting, as well as custom aliases, headers, MIMEs, and indexes.
 
@@ -94,9 +94,30 @@ Releases are built with [`release.sh`](./release.sh), which also checks that `cu
 
 Before a release, [`deploy/prueba-puertos-reales.sh`](./deploy/prueba-puertos-reales.sh) checks a build on Linux with the real ports 80 and 443: HTTP, HTTPS redirection, HTTP/1.1 and HTTP/2, TLS versions, SNI, size limits, log messages and the exit when port 80 is taken. It needs `sudo -n setcap` and free ports.
 
+### Checks Before Publishing
+There is no CI: run these checks by hand, from the repository root, before merging a change or publishing a release (with the latest patch of the Go version in `go.mod`):
+
+```bash
+gofmt -l .                                   # no output (on Windows, check the files without CR)
+go vet ./...
+staticcheck ./...                            # no warnings outside customNetHttp
+govulncheck ./...
+gosec -exclude-dir=customNetHttp -exclude-dir=internal ./...
+go run ./customNetHttp/regenerar -comprobar  # customNetHttp == Go of UPSTREAM + the patches
+go test -count=1 ./...
+go test -race -count=1 ./...                 # on Linux or WSL (see below)
+for f in $(grep -ho '^func Fuzz[A-Za-z0-9_]*' *_test.go | cut -c6-); do go test -run '^$' -fuzz "^$f\$" -fuzztime 1m .; done
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o /dev/null .
+CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o /dev/null .
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o /dev/null .
+```
+
+`-race` needs cgo and a C compiler. Run it on Linux or in WSL: on Windows it needs gcc (MinGW), whose linker fails when the path of the Go installation or of the user folder has spaces. The tests compile two helper tools (a CGI and a simulated Certbot) in `TOOLS_BIN`, or in a temporary folder; on Windows `TOOLS_BIN` should be a short path, as Turbo rejects preprocessor paths longer than 128 characters.
+
 ### Execution
 - **Windows:** Run `turbo.exe` as Administrator for ports 80/443.
 - **Linux:** Grant execution permissions with `chmod +x` and run it: `./turbo` (requires free ports 80 and 443, or the addresses in `TURBO_HTTP_ADDR` and `TURBO_HTTPS_ADDR`). If it cannot open the HTTP address, Turbo exits with an error.
+- **Invalid `turbo.config`:** if `turbo.config` cannot be read or is not valid JSON (for example after a manual edit), Turbo does not start: it exits with code 1 and writes to `stderr` the file, the line and column of the error and the backups (`.bak`) next to it. Under systemd (`deploy/turbo.service` restarts it on failure) the service keeps restarting until the file is fixed; `journalctl -u turbo` shows the message.
 
 ---
 
@@ -112,7 +133,9 @@ Once Turbo is running, access the admin interface (GUI) at:
 - **Username:** `Turbo`
 - **Password:** `Admin`
 
-> Change the default credentials immediately after your first login, **or compile from source**. See [GUI section](https://turbo-server.github.io/#Get-started-on-interface).
+> Change the default credentials immediately after your first login, **or compile from source**. See [GUI section](https://turbo-server.github.io/#Get-started-on-interface). While they are in use, Turbo warns about it at startup. After 5 failed logins from the same IP within 10 minutes, that IP must wait before trying again (1 minute, then longer, up to 15).
+
+**Give the panel a host of its own.** Without a host in `PA` (by default `PA` is empty, and networks alone don't change this) the panel answers on every host, the sites' included, so a page served by Turbo on a site's host (uploaded by a customer, or compromised) shares the panel's origin and could use the administrator's session. Turbo warns about it at startup. The recommended setup is a host name that serves no site, only for the panel, for example `admin.example.com` with its own certificate: set it in **Dónde responde el panel** (`PA`), optionally together with the networks allowed to reach the panel (with both, a request needs both). Turbo refuses a `PA` host that serves a site, and a new site, subdomain or alias that would serve the `PA` host.
 
 **Notes:**
 
@@ -123,18 +146,18 @@ Once Turbo is running, access the admin interface (GUI) at:
 - **Environment Variables:**
   - `TURBO_USER`, `TURBO_PASSWORD`: panel credentials. They take priority over the configuration.
   - `TURBO_DIR`: sites directory.
-  - `TURBO_HTTP_ADDR`, `TURBO_HTTPS_ADDR`: listening addresses (`host:port`, `:port` or just the port; by default `:80` and `:443`), for example to run Turbo behind a proxy.
+  - `TURBO_HTTP_ADDR`, `TURBO_HTTPS_ADDR`: listening addresses (`host:port`, `:port` or just the port; by default `:80` and `:443`), for example to run Turbo behind a proxy. Redirections to HTTPS go to the port of `TURBO_HTTPS_ADDR` when it is not 443.
 
   Credentials can also be changed via the GUI: saving the configuration stores the username and a PBKDF2 hash of the password in `turbo.config`.
 - A request for a path ending in `/index.html` is redirected (301) to its folder (`./`), as Go's file server does.
 
 **Logs:**
-- To log rate-limiter denials, create an accessible file named `turbo.denials` in the sites directory; to log every access to every file or route on the server, create one named `turbo.visits`. Turbo checks for these files every 30 seconds, so logging starts (or stops, after deleting the file) within that time. Do not create these files if logging is not needed, as they can grow very large.
-- **Privacy:** for every request, `turbo.visits` records the client IP, the time, the method, the host and the full URL with its query string, including the requests to the GUI. It never records request bodies.
+- To log the IPs blocked by the rate limiter and the failed-login lockouts (one line per block, not one per rejected request; requests rejected by `CGL` are not logged), create an accessible file named `turbo.denials` in the sites directory; to log every access to every file or route on the server, create one named `turbo.visits`. Turbo checks for these files every 30 seconds, so logging starts (or stops, after deleting the file) within that time. Do not create these files if logging is not needed, as they can grow very large.
+- **Privacy:** for every request that reaches Turbo's handler, `turbo.visits` records the client IP, the time, the method, the host and the full URL with its query string, including the requests to the GUI. It never records request bodies. It does not record everything: requests answered by the rate limiters (429, 503), connections closed on arrival from a blocked IP, and requests rejected before the handler because they are malformed or too large (400, 414, 431) are not in it; the blocks and the failed-login lockouts are in `turbo.denials`.
   - The GUI sends its parameters, including the current password (`b`) of the general settings, in the request body, so they do not appear in the URL or in `turbo.visits`.
   - An API client that put the password (or any other sensitive value) in the URL would leave it in `turbo.visits`: send the parameters in the body (`application/x-www-form-urlencoded`), as the GUI does.
   - Treat `turbo.visits` as sensitive: restrict its permissions, do not share it, rotate or delete it, and do not commit it to version control (both log files are in `.gitignore`). Nothing is logged if the file does not exist.
-- Any other message (startup, configuration, sites, certificates, errors) goes to `stdout` with a level and a timestamp (`time=… level=INFO msg=…`); under systemd, to the journal.
+- Any other message (startup, configuration, sites, certificates, errors) goes to `stdout` with a level and a timestamp (`time=… level=INFO msg=…`); under systemd, to the journal. The exception is the message of an invalid `turbo.config` at startup, which goes to `stderr`.
 
 ---
 
@@ -143,7 +166,7 @@ Once Turbo is running, access the admin interface (GUI) at:
 - Linux distributions like Alpine or Amazon Linux have not been tested with this version. macOS has not been tested.
   > **Ubuntu 24.04 LTS has been tested and is supported. Previous versions were successfully and extensively tested on Alpine and Amazon Linux.**
 - Admin interface (GUI) not extensively tested on older OS versions or old browsers.
-- Behind a proxy, Turbo sees the proxy's address as the client IP (rate limits, denied IPs and logs).
+- Behind a proxy, Turbo sees the proxy's address as the client IP: the rate limits, denied IPs, logs, `PA` networks and the binding of panel sessions to an IP all see only the proxy, and 5 failed logins through it lock every client out of the panel, the administrator included, for up to 15 minutes.
 
 ---
 

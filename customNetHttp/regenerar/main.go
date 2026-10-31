@@ -21,11 +21,18 @@
 // usos pasan a godebug_<nombre>, que define 0.turbo.godebug.go.
 //
 // Los archivos de customNetHttp que empiezan por "0." son propios de Turbo y la
-// herramienta no los toca; el resto de *.go los genera ella.
+// herramienta no los toca; el resto de *.go los genera ella. Sus SHA-256 están
+// en PROPIOS.sha256, que la herramienta reescribe al regenerar en customNetHttp
+// y -comprobar verifica: un 0.*.go nuevo o cambiado tiene que verse en ese
+// archivo. FUENTES.sha256 tiene los SHA-256 de cada archivo de Go del que se
+// regenera: -actualizar lo escribe y el resto de modos comprueba que el GOROOT
+// coincide con él.
 package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -133,9 +140,20 @@ func ejecutar(dir, salida string, nParches int, comprobar, actualizar bool, log 
 		return fmt.Errorf("el GOROOT %s es %s y se está ejecutando %s: quita la variable GOROOT o ejecútalo con esa versión", goroot, v, version)
 	}
 
-	generados, err := generar(goroot, dir, version)
+	fuentes := map[string][]byte{}
+	generados, err := generar(goroot, dir, version, fuentes)
 	if err != nil {
 		return err
+	}
+	manifiestoFuentes := filepath.Join(dir, "FUENTES.sha256")
+	if !actualizar { // The Go sources must be the ones recorded for UPSTREAM (H14)
+		guardado, err := os.ReadFile(manifiestoFuentes)
+		if err != nil {
+			return fmt.Errorf("falta FUENTES.sha256 (regenera con -actualizar): %v", err)
+		}
+		if err := compararManifiesto(normalizar(string(guardado)), fuentes); err != nil {
+			return fmt.Errorf("las fuentes de Go de %s no son las de FUENTES.sha256: %v", goroot, err)
+		}
 	}
 	parches, err := filepath.Glob(filepath.Join(dir, "patches", "*.patch"))
 	if err != nil {
@@ -165,6 +183,9 @@ func ejecutar(dir, salida string, nParches int, comprobar, actualizar bool, log 
 	}
 
 	if comprobar {
+		if err := comprobarPropios(dir); err != nil {
+			return err
+		}
 		return compararCon(dir, generados, log)
 	}
 	destino := dir
@@ -177,8 +198,20 @@ func ejecutar(dir, salida string, nParches int, comprobar, actualizar bool, log 
 	if err := escribir(destino, generados); err != nil {
 		return err
 	}
+	if destino == dir {
+		propios, err := leerPropios(dir)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(dir, "PROPIOS.sha256"), []byte(manifiestoDe(propios)), 0o644); err != nil {
+			return err
+		}
+	}
 	if actualizar {
 		if err := os.WriteFile(filepath.Join(dir, "UPSTREAM"), []byte(version+"\n"), 0o644); err != nil {
+			return err
+		}
+		if err := os.WriteFile(manifiestoFuentes, []byte(manifiestoDe(fuentes)), 0o644); err != nil {
 			return err
 		}
 	}
@@ -203,7 +236,7 @@ func esperado(e os.DirEntry) bool {
 		return e.Name() == "patches" || e.Name() == "regenerar"
 	}
 	switch e.Name() {
-	case "LICENCE", "NOTICE", "PATENTS", "UPSTREAM", "PATCHES.md":
+	case "LICENCE", "NOTICE", "PATENTS", "UPSTREAM", "PATCHES.md", "PROPIOS.sha256", "FUENTES.sha256":
 		return true
 	}
 	return strings.HasSuffix(e.Name(), ".go")
@@ -290,7 +323,9 @@ type paqueteOrigen struct {
 	tipos    *types.Package
 }
 
-func generar(goroot, dir, version string) (map[string]string, error) {
+// generar fusiona los paquetes de Go en customNetHttp y devuelve los archivos generados. En fuentes deja cada
+// archivo de Go leído, por su ruta bajo GOROOT/src.
+func generar(goroot, dir, version string, fuentes map[string][]byte) (map[string]string, error) {
 	fset := token.NewFileSet()
 	imp := importer.ForCompiler(fset, "source", nil)
 	var paquetes []*paqueteOrigen
@@ -313,6 +348,7 @@ func generar(goroot, dir, version string) (map[string]string, error) {
 			}
 			p.archivos = append(p.archivos, f)
 			p.fuentes[f] = fuente
+			fuentes[o.dir+"/"+filepath.Base(ruta)] = fuente
 			p.nombres[f] = filepath.Base(ruta)
 		}
 		p.nombre = p.archivos[0].Name.Name
@@ -757,6 +793,9 @@ func aplicarParche(archivos map[string]string, texto string) error {
 			if pos < 0 {
 				return fmt.Errorf("%s: el fragmento %s no coincide", nombre, cab)
 			}
+			if len(antes) > 0 && coincidencias(contenido, antes) > 1 { // Never a guess between two places (H14)
+				return fmt.Errorf("%s: el fragmento %s coincide en más de un sitio", nombre, cab)
+			}
 			contenido = append(contenido[:pos], append(append([]string(nil), despues...), contenido[pos+len(antes):]...)...)
 			desplazamiento = pos - (inicioViejo - 1) + len(despues) - len(antes)
 		}
@@ -796,6 +835,94 @@ func buscar(contenido, bloque []string, esperado int) int {
 		}
 	}
 	return -1
+}
+
+// coincidencias cuenta en cuántas posiciones aparece el bloque de líneas.
+func coincidencias(contenido, bloque []string) int {
+	total := 0
+	for p := 0; p+len(bloque) <= len(contenido); p++ {
+		iguales := true
+		for k, l := range bloque {
+			if contenido[p+k] != l {
+				iguales = false
+				break
+			}
+		}
+		if iguales {
+			total++
+		}
+	}
+	return total
+}
+
+// manifiestoDe devuelve las líneas "<sha256>  <nombre>" de los archivos, ordenadas por nombre, como sha256sum.
+// Los finales de línea se normalizan a LF antes de calcular el hash.
+func manifiestoDe(archivos map[string][]byte) string {
+	nombres := make([]string, 0, len(archivos))
+	for nombre := range archivos {
+		nombres = append(nombres, nombre)
+	}
+	sort.Strings(nombres)
+	var b strings.Builder
+	for _, nombre := range nombres {
+		suma := sha256.Sum256([]byte(normalizar(string(archivos[nombre]))))
+		b.WriteString(hex.EncodeToString(suma[:]) + "  " + nombre + "\n")
+	}
+	return b.String()
+}
+
+// compararManifiesto comprueba que los archivos son exactamente los del manifiesto, con los mismos hashes.
+func compararManifiesto(manifiesto string, archivos map[string][]byte) error {
+	if actual := manifiestoDe(archivos); actual != manifiesto {
+		esperados := map[string]bool{}
+		for _, l := range strings.Split(strings.TrimSpace(manifiesto), "\n") {
+			esperados[l] = true
+		}
+		var diferencias []string
+		for _, l := range strings.Split(strings.TrimSpace(actual), "\n") {
+			if !esperados[l] {
+				diferencias = append(diferencias, strings.TrimSpace(l[min(len(l), 64):])+" (distinto o de más)")
+			}
+			delete(esperados, l)
+		}
+		for l := range esperados {
+			diferencias = append(diferencias, strings.TrimSpace(l[min(len(l), 64):])+" (distinto o falta)")
+		}
+		sort.Strings(diferencias)
+		return errors.New(strings.Join(diferencias, ", "))
+	}
+	return nil
+}
+
+// leerPropios lee los archivos propios de Turbo (0.*.go) de customNetHttp.
+func leerPropios(dir string) (map[string][]byte, error) {
+	rutas, err := filepath.Glob(filepath.Join(dir, "0.*.go"))
+	if err != nil {
+		return nil, err
+	}
+	propios := map[string][]byte{}
+	for _, ruta := range rutas {
+		if propios[filepath.Base(ruta)], err = os.ReadFile(ruta); err != nil {
+			return nil, err
+		}
+	}
+	return propios, nil
+}
+
+// comprobarPropios verifica los 0.*.go contra PROPIOS.sha256: ni uno de más ni uno cambiado (H14).
+func comprobarPropios(dir string) error {
+	guardado, err := os.ReadFile(filepath.Join(dir, "PROPIOS.sha256"))
+	if err != nil {
+		return fmt.Errorf("falta PROPIOS.sha256 (regenera sin -comprobar para crearlo): %v", err)
+	}
+	propios, err := leerPropios(dir)
+	if err != nil {
+		return err
+	}
+	if err := compararManifiesto(normalizar(string(guardado)), propios); err != nil {
+		return fmt.Errorf("los archivos propios no son los de PROPIOS.sha256: %v", err)
+	}
+	return nil
 }
 
 // rutaDiff convierte "a/1.net.http.server.go" (o /dev/null) en el nombre del

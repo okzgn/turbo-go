@@ -1272,12 +1272,10 @@ func parsePostForm(r *Request) (vs url.Values, err error) {
 	ct, _, err = mime.ParseMediaType(ct)
 	switch {
 	case ct == "application/x-www-form-urlencoded":
-		var reader io.Reader = r.Body
-		maxFormSize := TurboMaxBodySize.Load() // turbo:P10: el límite es MBB (Go: sin límite)
-		if _, ok := r.Body.(*maxBytesReader); !ok {
-			maxFormSize = TurboMaxBodySize.Load() // turbo:P10 (Go: 10 MB)
-			reader = io.LimitReader(r.Body, maxFormSize+1)
-		}
+		// turbo:P10: MBB, y no más de 10 MB, que se guardan enteros en memoria; también con un MaxBytesReader
+		// mayor, para no leer más de lo que se acepta (Go: 10 MB, y sin límite con un MaxBytesReader).
+		maxFormSize := min(TurboMaxBodySize.Load(), 10<<20)
+		reader := io.LimitReader(r.Body, maxFormSize+1)
 		b, e := io.ReadAll(reader)
 		if e != nil {
 			if err == nil {
@@ -1383,6 +1381,7 @@ func (r *Request) ParseMultipartForm(maxMemory int64) error {
 	if err != nil {
 		return err
 	}
+	mr.turboMaxParts, mr.turboMaxHeaders = turboFormLimits(r) // turbo:P10
 
 	f, err := mr.ReadForm(maxMemory)
 	if err != nil {

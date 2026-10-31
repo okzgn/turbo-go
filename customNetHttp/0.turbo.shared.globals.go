@@ -57,8 +57,8 @@ var (
 
 // Limits of multipart forms (fixed).
 var (
-	TurboMaxFormParts         = 10000 // Maximum parts of a form
-	TurboMaxFormHeaders int64 = 1000  // Maximum headers of the parts of a form
+	TurboMaxFormParts         = 1000 // Maximum parts of a form, as Go (D10; TurboWithFormLimits raises it for one request)
+	TurboMaxFormHeaders int64 = 1000 // Maximum headers of the parts of a form
 )
 
 func init() {

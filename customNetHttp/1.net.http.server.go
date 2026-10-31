@@ -255,6 +255,11 @@ type conn struct {
 	// Immutable; never nil.
 	server *Server
 
+	// turboReadLimit es el límite de lectura con el que empezó la última
+	// petición, para que StateActive no vuelva a leer TurboMaxHeaderBytes.
+	// turbo:P4
+	turboReadLimit int64
+
 	// cancelCtx cancels the connection-level context.
 	cancelCtx context.CancelFunc
 
@@ -989,7 +994,8 @@ func (c *conn) readRequest(ctx context.Context) (w *response, err error) {
 		}()
 	}
 
-	c.r.setReadLimit(c.server.initialReadLimitSize())
+	c.turboReadLimit = c.server.initialReadLimitSize() // turbo:P4: leído una vez por petición
+	c.r.setReadLimit(c.turboReadLimit)
 	if c.lastMethod == "POST" {
 		// RFC 7230 section 3 tolerance for old buggy clients.
 		peek, _ := c.bufr.Peek(4) // ReadRequest will get err below
@@ -1099,7 +1105,7 @@ func (w *response) Header() Header {
 // This number is approximately what a typical machine's TCP buffer
 // size is anyway.  (if we have the bytes on the machine, we might as
 // well read them)
-const maxPostHandlerReadBytes = 0 // turbo:P7: no se vacía el cuerpo sin leer; la conexión se cierra (Go: 256 << 10)
+const maxPostHandlerReadBytes = 0 // turbo:P7: no se vacía un cuerpo con datos sin leer; la conexión se cierra (Go: 256 << 10)
 
 func checkWriteHeaderCode(code int) {
 	// Issue 22880: require valid WriteHeader status codes.
@@ -1221,9 +1227,9 @@ func (h extraHeader) Write(w *bufio.Writer) {
 		w.Write(headerDate)
 		w.Write(h.date)
 		w.Write(crlf)
-		w.WriteString("Server: " + TurboServerName) // turbo:P8
-		w.Write(crlf)
 	}
+	w.WriteString("Server: " + TurboServerName) // turbo:P8: siempre, aunque el manejador fije Date
+	w.Write(crlf)
 	if h.contentLength != nil {
 		w.Write(headerContentLength)
 		w.Write(h.contentLength)
@@ -1405,7 +1411,7 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 					// Body was closed in handler with non-EOF error.
 					w.closeAfterReply = true
 				}
-			case bdy.unreadDataSizeLocked() >= maxPostHandlerReadBytes:
+			case bdy.unreadDataSizeLocked() > maxPostHandlerReadBytes: // turbo:P7: un cuerpo leído entero (0 sin leer) mantiene la conexión (Go: >=)
 				tooBig = true
 			default:
 				discard = true
@@ -1465,6 +1471,7 @@ func (cw *chunkWriter) writeHeader(p []byte) {
 	if !header.has("Date") {
 		setHeader.date = time.Now().UTC().AppendFormat(cw.res.dateBuf[:0], TimeFormat)
 	}
+	delHeader("Server") // turbo:P8: una sola cabecera Server, la de Turbo (extraHeader)
 
 	if hasCL && hasTE && te != "identity" {
 		// TODO: return an error if WriteHeader gets a return parameter
@@ -2009,7 +2016,7 @@ func (c *conn) serve(ctx context.Context) {
 
 	for {
 		w, err := c.readRequest(ctx)
-		if c.r.remain != c.server.initialReadLimitSize() {
+		if c.r.remain != c.turboReadLimit { // turbo:P4
 			// If we read any bytes off the wire, we're active.
 			c.setState(c.rwc, StateActive, runHooks)
 		}
@@ -3629,14 +3636,18 @@ func (s *Server) trackConn(c *conn, add bool) {
 	}
 }
 
-// turbo:P6: los timeouts de Turbo (IT y RHT), leídos en cada uso; 0 es sin
-// límite, sin recurrir a ReadTimeout.
+// turbo:P6: los timeouts de Turbo (IT y RHT), leídos en cada uso; con 0 se
+// usa RT, como Go con ReadTimeout.
 func (s *Server) idleTimeout() time.Duration {
-	return TurboTimeLimits.Load().IT
+	return turboIdleTimeout()
 }
 
 func (s *Server) readHeaderTimeout() time.Duration {
-	return TurboTimeLimits.Load().RHT
+	t := TurboTimeLimits.Load()
+	if t.RHT != 0 {
+		return t.RHT
+	}
+	return t.RT
 }
 
 func (s *Server) doKeepAlives() bool {
