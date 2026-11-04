@@ -90,7 +90,8 @@ func resetTestState(dir string) {
 	for k := range signedInTokens {
 		delete(signedInTokens, k)
 	}
-	deniedIPs.Store(&map[string]int64{})
+	clear(sessionDeadlines)
+	publishDeniedIPs(map[string]int64{}) // With its /64s, which a test's denial of an IPv6 would leave behind
 	configFileModTime = 0
 	globalMutex.Unlock()
 
@@ -213,6 +214,31 @@ func post(base, path, token string) (int, string, error) {
 	defer res.Body.Close()
 	b, _ := io.ReadAll(res.Body)
 	return res.StatusCode, string(b), nil
+}
+
+// postSession is post for the actions that renew the session (setU, setP, and setM with other credentials): it
+// returns the token to go on with, the new one if the answer carries it in the "ok" header. A request whose session
+// has ended gets 401 instead of the 200 of the login page.
+func postSession(base, path, token string) (int, string, string, error) {
+	req, _ := http.NewRequest("POST", base+path, nil)
+	req.Host = "localhost"
+	if token != "" {
+		req.Header.Set("ok", token)
+	}
+	c := &http.Client{Timeout: clientTimeout()}
+	res, err := c.Do(req)
+	if err != nil {
+		return 0, "", token, err
+	}
+	defer res.Body.Close()
+	b, _ := io.ReadAll(res.Body)
+	if res.Header.Get("X-Turbo-Login") == "required" {
+		return 401, string(b), token, nil
+	}
+	if renewed := res.Header.Get(sessionHeaderName); renewed != "" {
+		token = renewed
+	}
+	return res.StatusCode, string(b), token, nil
 }
 
 func login(t testing.TB, base string) string {

@@ -2,7 +2,24 @@
 
 [English](CHANGELOG.md)
 
-v2.4 es la versión siguiente a v2.3.rc3. Si actualiza desde **v2.3.rc3**, se aplican todas las etapas de v2.4: lea antes [Actualizar desde v2.3.rc3](#actualizar-desde-v23rc3).
+v2.4.1 es la versión siguiente a v2.4. Si actualiza desde **v2.4**, lea antes [Actualizar desde v2.4](#actualizar-desde-v24). Si actualiza desde **v2.3.rc3**, se aplican todas las etapas de v2.4 y de v2.4.1: lea antes [Actualizar desde v2.3.rc3](#actualizar-desde-v23rc3), y después [Actualizar desde v2.4](#actualizar-desde-v24).
+
+Los binarios publicados son estáticos y se compilan con el último parche de Go 1.26. Compruebe la descarga con `SHA256SUMS`, en la carpeta de la descarga: `sha256sum -c --ignore-missing SHA256SUMS` (`--ignore-missing` comprueba solo los binarios que descargó; sin él, `sha256sum` falla por los demás).
+
+## Actualizar desde v2.4
+
+**Recomendación: actualice cuanto antes.** v2.4.1 corrige fallos de seguridad: un cliente podía ocupar todas las plazas CGI y dejar el PHP de todos los sitios respondiendo 503, una sesión del panel robada podía cambiar lo que el administrador confirma después con la contraseña o llegar al panel con una plantilla de error, y un sitio podía perder sus ajustes cuando su carpeta no se podía leer, y servirse luego sus scripts como texto. Los detalles están en el aviso de seguridad del repositorio, que se publica junto con esta versión.
+
+Antes de actualizar, haga una copia de la carpeta de sitios, incluido `turbo.config`, y revise los cambios incompatibles de v2.4.1, sobre todo:
+- las plantillas de respuesta y los reemplazos de caracteres piden la contraseña actual, las acciones que la piden toman sus valores tal como llegan (un cliente de la API los envía codificados para URL, sin los tokens de los reemplazos), y un reemplazo no puede ser de letras ni dígitos;
+- toda página de error lleva una `Content-Security-Policy` sin scripts, en cualquier host;
+- una contraseña nueva tiene de 12 a 64 bytes;
+- cambiar las credenciales, o cerrar todas las sesiones, termina también la sesión de la petición: la respuesta trae una nueva, que un cliente de la API toma de su cabecera `ok`; y una sesión dura como mucho 12 horas;
+- un `PA` con redes y sin host deja que el panel responda solo en una dirección IP o en `localhost`;
+- un `turbo.config` con un sitio que no es un objeto JSON, o uno completo cuyo `M` nombra un directorio que no existe o no se puede listar, es inválido: Turbo no arranca con él;
+- la unidad systemd de referencia limita más lo que pueden hacer Turbo y sus CGI: vuelva a instalarla siguiendo sus comentarios, y compruebe que sus CGI siguen funcionando.
+
+El commit "v2.4." `57cbb3c` de `main` es v2.4; no tenía la etapa 6 (la tercera revisión), que llega con v2.4.1.
 
 ## Actualizar desde v2.3.rc3
 
@@ -18,7 +35,7 @@ Antes de actualizar:
    - prueba los índices en orden aleatorio;
    - no aplica la restricción del panel (`PA`).
 4. **Dé al panel un host propio** en `PA`, que no sirva ningún sitio (vea el README, también para tener HTTPS en ese host), y cambie las credenciales por defecto. v2.3.rc3 no guarda la contraseña en `turbo.config`: tras actualizar vuelve a ser `Admin` (o `TURBO_PASSWORD`) hasta que la cambie.
-5. **Revise los cambios incompatibles** de cada etapa, sobre todo:
+5. **Revise los cambios incompatibles** de cada etapa de v2.4, y después los de v2.4.1 ([Actualizar desde v2.4](#actualizar-desde-v24)), sobre todo:
    - Turbo no arranca si `turbo.config` no es JSON válido o no se puede leer, si su `PA`, `U` o `PH` no se pueden usar, o si solo apunta a su propio directorio o a uno que no puede usar, y dice por qué;
    - un preprocesador de `turbo.config` que no se puede usar hace que su extensión responda 500;
    - cambiar el directorio de sitios a uno sin `turbo.config` conserva los ajustes en uso;
@@ -37,16 +54,91 @@ Antes de actualizar:
    - los límites por IP y el bloqueo de logins fallidos cuentan cada /64 de IPv6 como un cliente, y como mucho corren a la vez `CGP` procesos CGI (por defecto 4 por CPU, al menos 16; por encima, 503): suba `CII`/`CIS` o `CGP` si su tráfico lo necesita;
    - la unidad systemd de referencia corre sin root, con el binario en `/usr/local/bin`: vuelva a instalarla según sus comentarios.
    - el panel, los mensajes de la API y los registros están en inglés, `setC` confirma con `a=overwrite` y las líneas del registro tienen las claves en inglés: actualice cualquier cliente o script que los compare.
+   - un sitio cuya carpeta se borra sigue en `turbo.config`, con sus ajustes, hasta que se borra desde el panel o del archivo.
+   - los CGI ya no reciben las cabeceras de la petición con `_` en el nombre, `HTTP_HOST` es el host tal como eligió el sitio, y una IPv6 denegada deniega su /64.
 
-**Los commits "v2.3.rc4." (`9307623`) y "v2.4." (`808dc6f`) de `main` no son esta versión:** `9307623` tiene las etapas 1 a 3, y `808dc6f` las etapas 1 a 4; a los dos les falta la etapa 5, que corrige, entre otras cosas, fallos de seguridad. Si compiló Turbo desde uno de ellos, actualice también; su `turbo.config` ya tiene el esquema 2, así que los puntos 2 y 3 no se aplican, y los cambios incompatibles que revisar son los de las etapas que le faltan (la 4 y la 5 a `9307623`, la 5 a `808dc6f`).
-
-Los binarios publicados son estáticos y se compilan con el último parche de Go 1.26. Compruebe la descarga con `SHA256SUMS`, en la carpeta de la descarga: `sha256sum -c --ignore-missing SHA256SUMS` (`--ignore-missing` comprueba solo los binarios que descargó; sin él, `sha256sum` falla por los demás).
+**Los commits "v2.3.rc4." (`9307623`) y "v2.4." (`808dc6f`) de `main` no son versiones publicadas:** `9307623` tiene las etapas 1 a 3 de v2.4 y `808dc6f` las etapas 1 a 4; v2.4 es el commit "v2.4." `57cbb3c`, con las etapas 1 a 5. Si compiló Turbo desde uno de los dos primeros, actualice también; su `turbo.config` ya tiene el esquema 2, así que los puntos 2 y 3 no se aplican, y los cambios incompatibles que revisar son los de las etapas que le faltan (la 4 y la 5 a `9307623`, la 5 a `808dc6f`) y los de v2.4.1.
 
 ---
 
+## v2.4.1
+
+La primera versión publicada después de v2.4. Trae las correcciones de una revisión de Turbo para producción y las de la tercera revisión de v2.4 (etapa 6), que v2.4 no tenía: se enumeran abajo, de la más reciente a la más antigua, y al actualizar desde v2.4 se aplican las dos.
+
+### Revisión para producción
+
+#### Novedades
+- **Cerrar todas las sesiones:** **Close every session**, en **General settings** (`closeSessions` en la API), cierra todas las sesiones del panel, también las copias del token de quien la pide, y le da a este una sesión nueva. Pide la contraseña actual.
+- **Sitios sin su carpeta en el panel:** los sitios cuya carpeta no está, que Turbo conserva con sus ajustes para cuando vuelva, se listan en **Sites without their folder**, donde se pueden borrar; `sites` de la API los lista bajo `~`. Turbo registra, al leer `turbo.config`, cada sitio que conserva sin su carpeta.
+
+#### Correcciones
+- **HTTP/2, un cliente que deja de leer:** una conexión HTTP/2 tiene un solo escritor. Con un cliente que dejó de leer, el plazo de escritura de cada respuesta (`WT`) solo encolaba un reset que no se podía escribir, y todos los manejadores de la conexión, con su CGI y su plaza, esperaban mientras el cliente la mantuviera abierta: unas pocas conexiones así dejaban el PHP de todos los sitios respondiendo 503. Ahora se cierra una conexión en la que no se puede escribir nada durante 30 s, y también una que no responde a un PING en 15 s tras 60 s sin una trama del cliente.
+- **HTTP/1, un cliente que lee despacio:** un CGI conservaba su plaza hasta que su cliente había leído toda la salida, hasta `WT` + 2 s, por rápido que fuera el script: una petición por segundo desde una sola IP dejaba el PHP de todos los sitios respondiendo 503. Ahora la salida de un CGI espera a su cliente en memoria (hasta 1 MiB por respuesta y 64 MiB en total) y después en un archivo temporal (hasta 256 MiB por respuesta y 1 GiB en total), y el CGI libera su plaza al terminar; pasados esos límites espera a su cliente, como antes.
+- **Reemplazos de caracteres:** la sesión sola podía añadir uno (`s=php d=phtml`), y el servidor leía desde entonces el token como el texto reemplazado en todos los parámetros de todas las acciones, también en las que se confirman con la contraseña: el `delPreprocessor a=phtml` del administrador borraba el preprocesador de `php` (sus scripts se servían entonces como texto), un subdominio borrado podía ser otro, y `addPreprocessor` podía guardar otro programa. Ahora añadir o borrar un reemplazo pide la contraseña actual, un reemplazo no puede ser de letras ni dígitos, y los reemplazos no se deshacen en las acciones que piden la contraseña ni en el sitio y el subdominio de ninguna acción.
+- **Plantillas de error:** con `PA` vacío (lo predeterminado), una plantilla de respuesta con un script, que podía poner la sesión sola, lo ejecutaba en el origen del panel, desde donde podía capturar la contraseña la próxima vez que el administrador confirmara algo. Ahora toda página de error lleva una `Content-Security-Policy` sin scripts, en cualquier host, y añadir o borrar una plantilla pide la contraseña actual.
+- **`turbo.config` leído mientras la carpeta de un sitio no se puede leer:** al arrancar, o al volver a leer el archivo, un sitio cuya carpeta o cuya `@` no se podía mirar (permisos, E/S, un disco en red) perdía sus ajustes, y cuando la carpeta volvía a poder leerse el sitio venía del disco con los valores por defecto, sus scripts servidos como texto. Ahora sus ajustes se conservan, como para una carpeta que no está, y se aplican cuando la carpeta se puede usar.
+- **Un sitio mal formado en `turbo.config`:** un sitio, un subdominio o una lista de uno que no es un objeto JSON (`"?": null`, `"?": "php"`, `"": null`) se saltaba sin decir nada, y el sitio quedaba activo sin sus preprocesadores, sus scripts servidos como texto; y un preprocesador con un carácter de control se descartaba. Ahora lo primero hace inválido el archivo (Turbo no arranca con él, una recarga conserva la configuración en uso, y el mensaje señala el sitio), y lo segundo responde 500, como un preprocesador que no se puede usar.
+- **HTTPS de un sitio cuyo certificado aún no se puede cargar:** un `"S": "1"` de `turbo.config` se perdía cuando el certificado no se podía cargar en ese momento (una copia que trae `@` antes que los `.pem`, una clave que aún no se puede leer), y el siguiente guardado escribía `"S": "0"`. Ahora se conserva, sin el certificado no se redirige, y el certificado se carga en la siguiente revisión de la configuración (cada 30 s).
+- **Seguir `M`:** un `turbo.config` completo cuyo `M` nombraba un directorio que aún no existe (un disco sin montar) se aplicaba en el directorio de arranque, todos los sitios quedaban sin su carpeta, y guardar escribía ese directorio como `M`; uno cuyo directorio no se podía listar, y un `setM` a un directorio cuyo `turbo.config` llevaba, por su propio `M`, a uno que no se puede usar, vaciaban la configuración en uso antes de descubrirlo. Ahora se comprueba toda la cadena antes de aplicar nada: Turbo no arranca, una recarga conserva la configuración en uso, y `setM` lo rechaza.
+- **El `turbo.config` del directorio de arranque y el de `M`, el mismo archivo:** cuando uno es un enlace simbólico al otro, guardar escribía el puntero encima de la configuración completa que acababa de guardar, y Turbo ya no arrancaba. Ahora la deja completa.
+- **Sesiones:** cambiar el usuario o la contraseña conservaba la sesión de la petición, así que una copia de su token (una cookie tomada desde la misma IP, tras el mismo NAT) sobrevivía al cambio, y una sesión se renovaba mientras se usara. Ahora `setU`, `setP` y `setM` con otras credenciales cierran todas las sesiones y dan una nueva a quien lo pide, y una sesión dura como mucho 12 horas desde su login.
+- **Logins fallidos:** el límite contaba cada dirección IPv4 o cada /64 IPv6, y un /48 tiene 65 536. Ahora los /64 de un /48 comparten un límite de 20 fallos en 10 minutos. Una de las comprobaciones de contraseña que corren a la vez se reserva para las peticiones con sesión y para los logins desde las redes de `PA`, así que una avalancha de logins desde otro sitio no deja fuera al administrador (503). Una contraseña nueva tiene de 12 a 64 bytes.
+- **`PA` solo con redes:** el panel respondía en cualquier host, así que una página cuyo nombre resuelve a Turbo (DNS rebinding) podía llegar a él desde el navegador de alguien de esas redes. Ahora, con redes y sin host, el panel solo responde en una dirección IP o en `localhost`, y Turbo lo avisa al arrancar.
+- **Registros:** solo se agrupaban los handshakes TLS fallidos. Los demás errores de conexión del servidor (entre ellos, una línea por cada trama GOAWAY con error que envía un cliente HTTP/2) y los de los CGI cuyo cliente se va salían de uno en uno, lo que permitía a cualquiera llenar el registro, y journald descartaba después los mensajes de verdad. Ahora se agrupan por tipo: el primero de cada tipo enseguida, y después como mucho una línea por minuto con el recuento y el último, también al parar Turbo.
+- **`release.sh`:** publicaba `SHA256SUMS` sin `govulncheck` (solo avisaba), y dejaba los binarios sin sumas cuando fallaba. Ahora falla sin `govulncheck` (salvo con `TURBO_RELEASE_WITHOUT_GOVULNCHECK=1`), comprueba que cada binario se compiló desde el commit etiquetado, sin cambios y sin cgo, y borra `dist/<versión>` cuando no termina bien.
+- **La unidad systemd:** no limitaba lo que podía hacer en el host un CGI comprometido. Ahora añade `UMask=0027`, `ProtectHome=tmpfs` con `BindPaths=/home/server`, `PrivateDevices`, los `Protect*` del kernel, los grupos de control, el reloj, el nombre de host y `/proc`, `RestrictNamespaces`, `RestrictRealtime`, `RestrictSUIDSGID`, `LockPersonality`, `RestrictAddressFamilies`, `SystemCallArchitectures=native` y `SystemCallFilter=@system-service`, y `deploy/systemd-test.sh` los comprueba.
+- **Integración continua:** cada trabajo tiene un límite de tiempo, así que una prueba que se cuelga termina con las pilas de sus goroutines en lugar de a las 6 horas de GitHub, y el checkout no guarda el token.
+
+#### Cambios incompatibles
+- **La contraseña actual para las plantillas de respuesta y los reemplazos de caracteres:** `addHttpCodeResponse`, `delHttpCodeResponse`, `addCharsReplace` y `delCharsReplace` la piden en `b`; el panel la pregunta.
+- **Lo que el servidor lee tal como llega:** las acciones que piden la contraseña actual, los `cfg<CLAVE>` y `hardUpload` toman sus parámetros tal como llegan, y el sitio y el subdominio (`s`, `d`) de ninguna acción se reemplazan. Un cliente de la API que enviara esos valores con los tokens de los reemplazos (`-.-` por `;`…) debe enviarlos codificados para URL, como hace un cuerpo `application/x-www-form-urlencoded`. Un reemplazo de letras o dígitos se rechaza, y uno de `turbo.config` se descarta con un aviso.
+- **Sin scripts en ninguna página de error:** todo error que Turbo responde con la plantilla de error lleva una `Content-Security-Policy` sin scripts, en cualquier host: una plantilla con scripts ya no los ejecuta.
+- **Una contraseña nueva tiene de 12 a 64 bytes** (`setP`). Una que ya está en uso sigue valiendo; `TURBO_PASSWORD` con menos de 12 bytes recibe un aviso, y con más de 64, o con caracteres de control, Turbo no arranca.
+- **Sesiones:** `setU`, `setP`, `setM` con otras credenciales y `closeSessions` terminan también la sesión de la petición, y la respuesta trae la nueva: la cookie, y la cabecera `ok`, de la que un cliente de la API debe tomarla. Una sesión termina 12 horas después de su login.
+- **`PA` con redes y sin host** solo responde en una dirección IP o en `localhost`: para llegar al panel por un nombre, añada ese nombre a `PA`.
+- **`turbo.config`:** un sitio, o una lista de un sitio, que no es un objeto JSON, y un `turbo.config` completo cuyo `M` nombra un directorio que no existe o no se puede listar, hacen inválido el archivo: Turbo no arranca con él, y una recarga conserva la configuración en uso.
+- **Logins fallidos:** los /64 IPv6 de un /48 comparten un límite de 20 en 10 minutos.
+- **`sites`** lista bajo `~` los sitios sin su carpeta.
+- **Registros:** los errores de conexión y los de los CGI salen agrupados por tipo (el primero enseguida, después como mucho una línea por minuto con el recuento): una herramienta que contara sus líneas debe leer el recuento.
+- **La unidad systemd** limita lo que pueden hacer Turbo y sus CGI: ni otras carpetas personales, ni dispositivos, ni ajustes del kernel, ni espacios de nombres, ni otras familias de direcciones, ni llamadas al sistema fuera de `@system-service`, y los archivos que crea ya no los pueden leer otros usuarios. Vuelva a instalarla siguiendo sus comentarios (`/home/server` con `0750`), y compruebe que sus CGI siguen funcionando.
+- **`release.sh`** necesita `govulncheck`.
+
+### Etapa 6: tercera revisión
+
+#### Correcciones
+- **Un sitio cuya carpeta desaparece un momento conserva sus ajustes:** cada 30 s Turbo desactiva los sitios cuya carpeta o cuya `@` ya no está, y cuando la carpeta volvía (un despliegue que borra y vuelve a crear `@`, una subida por FTP, un disco en red que no respondió) el sitio se activaba de nuevo con los valores por defecto: sin sus preprocesadores (sus scripts se servían como texto, con su código fuente), HTTPS, cabeceras, reescrituras ni alias, hasta reiniciar Turbo o editar `turbo.config`, y guardar mientras tanto lo dejaba así en `turbo.config`. Ahora un sitio desactivado conserva sus ajustes y los recupera con su carpeta, y guardar lo mantiene en `turbo.config`. Solo una carpeta que no existe desactiva un sitio: otro error del disco (permisos, E/S, un disco en red que no responde) lo deja como está, y un directorio de sitios que no se puede leer no desactiva ninguno (antes los desactivaba todos).
+- **Un sitio de `turbo.config` cuya carpeta no está:** al leer `turbo.config` se conservan sus ajustes (y se guardan), que se aplican cuando la carpeta aparece; antes, el sitio se descartaba sin aviso, y su carpeta, al aparecer, era un sitio nuevo con los valores por defecto.
+- **Un `turbo.config` completo cuyo `M` nombra otro directorio de sitios:** sin `turbo.config` allí, se aplica allí, con sus sitios, que son los de ese directorio; antes se aplicaba y se vaciaba al seguir `M`, y todos los sitios quedaban con los valores por defecto (sus scripts servidos como texto) en cada arranque. Con un `turbo.config` allí que no se puede usar (inválido, o con punteros que llevan de vuelta), Turbo no arranca y una recarga mantiene la configuración en uso, como con un puntero; antes, la recarga la vaciaba. Las carpetas del directorio que `M` deja ya no se activan como sitios por el camino.
+- **Errores antes de leer la petición, sin scripts:** los errores que Turbo responde antes de leer entera una petición (400 por una petición mal formada o por HTTP sin cifrar al puerto HTTPS, 414, 431, 501), en HTTP/1 y HTTP/2, llevan una `Content-Security-Policy` que no permite scripts. En el host del panel, una plantilla de error HTML ejecutaba sus scripts en el origen del panel (la revisión para producción de v2.4.1 pone esa política también en todas las demás páginas de error).
+- **Recargar con un disco lento:** las carpetas de los sitios de `turbo.config` se miran antes de tomar el lock global, como ya se hacía con sus certificados y preprocesadores, así que un disco lento o en red no detiene todas las peticiones mientras se aplica `turbo.config`.
+- **Los CGI al parar:** cuando se acaban los 10 s de gracia, Turbo cierra las conexiones que siguen abiertas, lo que termina sus CGI con todo lo que arrancaron, y espera hasta 3 s a que acaben; antes, sin systemd, seguían después de Turbo.
+- **HSTS del panel sin su certificado:** una vez borrado el certificado del panel (**Panel certificate**, `cfgPC a=0`), una petición por una conexión que sigue abierta, o por una sesión TLS reanudada, ya no vuelve a poner `Strict-Transport-Security` durante un año, lo que dejaba al navegador sin forma de volver al host del panel.
+- **IPs denegadas durante una recarga:** mientras se aplica `turbo.config`, las IPs denegadas en uso siguen denegadas, y la lista del archivo las sustituye de una vez; antes dejaban de aplicarse un momento, y una lista larga costaba O(n²) con todas las peticiones esperando.
+- **Certbot:** un intento conserva la cuenta ACME del anterior (con una cuenta nueva cada vez, el límite de Let's Encrypt, 10 cuentas nuevas por IP cada 3 horas, rechazaba los siguientes sitios emitidos seguidos), y un hook que deja abierta la salida de Certbot ya no retiene ese intento, ni todos los siguientes, hasta reiniciar.
+- **Cambiar el directorio de sitios (`setM`):** un directorio cuyos sitios no se pueden listar se rechaza antes de cambiar nada (400 "Sites directory can't be read"); antes dejaba el servidor sin sitios hasta volver a poner `M`.
+- **Cabeceras que solo se diferencian en mayúsculas:** desde el panel, una sustituye a la otra del sitio; antes se quedaban las dos, y cada respuesta llevaba cualquiera de los valores.
+- **Listas de `turbo.config`:** la fecha de una IP denegada puede ser un entero JSON, y una entrada de `@`, `_` o `#` que no se puede usar queda en el registro; antes se saltaban sin aviso.
+- **`TURBO_USER`:** el panel avisa al arrancar mientras la contraseña es `Admin`, sea cual sea el usuario (antes, solo con `Turbo`).
+- **`{REWRITE_COMPLEMENT}`:** un `?` de la ruta (`%3F`) se queda en ella, codificado de nuevo; antes la ruta se cortaba ahí.
+- **Actualizar desde v2.3.rc3:** los orígenes de las reescrituras se descodifican una vez cada uno, siempre con el mismo resultado (uno con `%25` podía descodificarse dos veces, según el orden de un mapa).
+- **Copias de `turbo.config`:** dos guardados dentro del mismo segundo conservan las dos copias (la segunda con `-2`).
+- **Límite de las cabeceras (`MHB`) después de un POST:** las líneas vacías que un cliente puede enviar tras el cuerpo ya no cuentan como el final de las cabeceras de la petición siguiente, lo que dejaba pasar una del tamaño del búfer de lectura.
+- **Hash de la contraseña (`PH`):** no se acepta una sal ni una clave de más de 64 bytes; una enorme, escrita a mano, hacía que cada login fallido costara minutos de CPU.
+- **Registros:** en `turbo.visits`, un campo con un carácter de control C1, un separador de línea Unicode o UTF-8 inválido se escribe entre comillas y escapado, como uno con un carácter de control ASCII; y si un CGI no puede entrar en un Job Object en Windows, queda en el registro (una vez).
+- **Los textos del panel:** los últimos que quedaban en español están en inglés (**Default**, **MIME type:**, **Help**, **Panel certificate**, **Signing in**), y una IP denegada que se quita dándole una fecha pasada desaparece de la lista del panel por la respuesta del servidor, como se pretendía.
+
+#### Cambios incompatibles
+- **Un sitio cuya carpeta se borra sigue en `turbo.config`:** sus ajustes se guardan para cuando la carpeta vuelva, también tras un reinicio. Para quitarlo, bórrelo desde el panel (`delSite` borra ahora también un sitio sin su carpeta) o de `turbo.config`. Un sitio o subdominio creado desde el panel empieza con los valores por defecto, aunque se guardaran los ajustes de uno con su nombre.
+- **Sin scripts en los errores anteriores a leer la petición:** una plantilla de error HTML con scripts no los ejecuta en los errores 400, 414, 431 y 501 que Turbo responde antes de leer entera la petición, en ningún host.
+- **Lo que recibe un CGI:** las cabeceras de la petición con `_` en el nombre no le llegan, como en Apache (detrás de un proxy, el `X_Forwarded_For` del cliente se convertía en el mismo `HTTP_X_FORWARDED_FOR` que el `X-Forwarded-For` del proxy, y ganaba una de cada dos veces); y `HTTP_HOST` y `SERVER_NAME` llevan el host tal como eligió el sitio: en minúsculas, sin punto final, con su puerto solo si es un número. Las redirecciones toman de ahí su puerto también.
+- **Una IPv6 denegada deniega su /64,** el cliente que cuentan los límites de peticiones (sus direcciones cambian solas), y el panel no acepta una de la /64 del propio administrador ("Current IP").
+- **Una petición cuyo destino no empieza por `/`** (uno opaco, como `x:@evil.test`, o `*` fuera de `OPTIONS`) recibe 400; antes acababa tras el host de una redirección.
+- **`TURBO_USER` de más de 24 caracteres, o con caracteres de control:** Turbo no arranca, como con uno vacío (se guarda como `U`, y `turbo.config` se rechazaba al quitar la variable).
+- **Handshakes TLS fallidos en el registro:** se cuentan y se registran como mucho una vez por minuto, con el recuento y el último, en lugar de una línea por cada uno, lo que permitía a cualquiera llenar el registro.
+
 ## v2.4
 
-La primera versión publicada después de v2.3.rc3. Reúne cinco etapas de trabajo, ninguna publicada por separado: se enumeran abajo, de la más reciente a la más antigua, con sus cambios. Al actualizar desde v2.3.rc3 se aplican todas.
+La primera versión publicada después de v2.3.rc3, el commit "v2.4." `57cbb3c` de `main`. Reúne cinco etapas de trabajo, ninguna publicada por separado: se enumeran abajo, de la más reciente a la más antigua, con sus cambios. Al actualizar desde v2.3.rc3 se aplican todas.
 
 ### Etapa 5: segunda revisión
 
@@ -184,7 +276,7 @@ La primera versión publicada después de v2.3.rc3. Reúne cinco etapas de traba
 - **`net/http` actualizado:** `customNetHttp` es ahora el `net/http` de Go 1.26 más los parches de Turbo, documentados en [`customNetHttp/PATCHES.md`](customNetHttp/PATCHES.md). Trae todas las correcciones de seguridad de Go publicadas hasta esa versión. El rendimiento sirviendo archivos sube de forma notable respecto a v2.3.rc3.
 - **Puertos configurables:** las variables `TURBO_HTTP_ADDR` y `TURBO_HTTPS_ADDR` cambian dónde escucha Turbo, por ejemplo para usarlo detrás de un proxy.
 - **Unidad systemd de referencia:** [`deploy/turbo.service`](deploy/turbo.service) corre con un usuario sin privilegios, con `CAP_NET_BIND_SERVICE`, registra en el journal y se reinicia si falla.
-- **Mensajes con nivel y hora:** los mensajes de la consola usan `log/slog` (`time=… level=… msg=…`) y están en español.
+- **Mensajes con nivel y hora:** los mensajes de la consola usan `log/slog` (`time=… level=… msg=…`).
 - **GUI embebida desde `turbo.dev/`:** una sola copia de la GUI, embebida con `//go:embed`.
 - **Comprobaciones antes de publicar:** el README enumera las comprobaciones que hay que pasar a mano antes de cada cambio o versión: formato, `vet`, `staticcheck`, `govulncheck`, `gosec`, `regenerate -check`, pruebas, `-race`, fuzzing y compilación cruzada.
 

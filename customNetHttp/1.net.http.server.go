@@ -2356,6 +2356,7 @@ func Error(w ResponseWriter, error string, code int) {
 	// text/plain for the error message.
 	h.Set("Content-Type", contentType) // turbo:P9
 	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Content-Security-Policy", turboErrorCSP) // turbo:P9: no scripts in an error page, on any host
 	w.WriteHeader(code)
 	io.WriteString(w, body) // turbo:P9
 }

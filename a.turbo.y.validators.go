@@ -34,6 +34,7 @@ import (
 	"strings"
 	"time"
 	"turbo/customNetHttp"
+	"unicode"
 )
 
 var (
@@ -64,10 +65,11 @@ var (
 				pathSeparator = "/"
 				subdomainDir = changeWildcards(subdomainDir)
 			}
-			if info, statErr := siteDirStat(sitesDir.Get() + domainDir + pathSeparator + subdomainDir); statErr != nil || !info.IsDir() {
+			// What the reload looked at before taking the lock (lookAheadSettings), if it did
+			if info, statErr := diskStat(sitesDir.Get() + domainDir + pathSeparator + subdomainDir); statErr != nil || !info.IsDir() {
 				return false, "Site directory not found: " + domainDir + pathSeparator + subdomainDir
 			}
-			if info, statErr := siteDirStat(sitesDir.Get() + domainDir + pathSeparator + subdomainDir + "/" + publicDirName); statErr != nil || !info.IsDir() {
+			if info, statErr := diskStat(sitesDir.Get() + domainDir + pathSeparator + subdomainDir + "/" + publicDirName); statErr != nil || !info.IsDir() {
 				return false, "Site content directory not found: " + domainDir + pathSeparator + subdomainDir + "/" + publicDirName
 			}
 			if checkExists && !siteExists(origDomain, origSubdomain) {
@@ -106,7 +108,7 @@ var (
 	adminDeleteHandlers = map[string]func(string) (bool, string){
 		"@": func(ip string) (bool, string) {
 			ip = ipAddr(strings.TrimSpace(ip)) // As it was saved: canonical
-			if _, exists := deniedIPList()[ip]; !exists {
+			if _, exists := deniedIPsInUse()[ip]; !exists {
 				return false, "IP not found"
 			}
 			setDeniedIPs(func(list map[string]int64) { delete(list, ip) })
@@ -156,7 +158,7 @@ var (
 			if parseErr != nil {
 				return false, "Invalid UNIX date"
 			}
-			existingUnix, exists := deniedIPList()[address]
+			existingUnix, exists := deniedIPsInUse()[address] // Also while a turbo.config is applied
 			if parsedUnix == 0 || time.Now().Unix() > parsedUnix {
 				if exists {
 					setDeniedIPs(func(list map[string]int64) { delete(list, address) })
@@ -1005,6 +1007,14 @@ var (
 					}
 					continue
 				}
+				if !isFromFile { // The same header in other case is this one: replaced (both would go out, either first)
+					for existing := range customHeaders[siteKeys[1]] {
+						if existing != header && strings.EqualFold(existing, header) {
+							delete(customHeaders[siteKeys[1]], existing)
+							existed = true
+						}
+					}
+				}
 				customHeaders[siteKeys[1]][header] = value
 				if printErrors {
 					if !existed {
@@ -1058,16 +1068,13 @@ var (
 					slog.Warn("turbo.config preprocessor that can't be used: the extension will answer 500", "site", site, "extension", ext, "reason", reason)
 					preprocessors[site][strings.TrimPrefix(ext, ".")] = value
 				}
-				value, isString := rawValue.(string)
+				value, isString := rawValue.(string) // From the panel, as sent: no character replacements (literalActions)
 				if !isString {
 					if printErrors {
 						return false, "Invalid preprocessor value"
 					}
 					keepFailing(invalidPreprocessorMark, "the value is not a string")
 					continue
-				}
-				if !isFromFile {
-					value = replaceURIChars(value)
 				}
 				if extLen := len(ext); extLen > 12 || extLen > 0 && !extChars(ext) {
 					reason := "Invalid extension"
@@ -1651,7 +1658,7 @@ var (
 					return false, "Error creating the certificates directory"
 				}
 			}
-			certDir := certificatesDir + changeWildcards(siteKey) // One Certbot folder per site: obtainCertificate empties it before each attempt
+			certDir := certificatesDir + changeWildcards(siteKey) // One Certbot folder per site: runCertbot removes the previous certificate before each attempt, and keeps the ACME account
 
 			if currentCertDomain == siteKey {
 				return false, "{\"message\":\"Please wait, certificate being processed\",\"status\":\"WAIT\"}"
@@ -1697,7 +1704,16 @@ var (
 					return false, "HTTPS redirect already enabled"
 				}
 				if loadSiteCertificate(configKey, sitesDir.Get()+siteFolder(args[1], args[2])) != nil {
-					return false, "SSL certificates invalid or missing"
+					if !fromFile {
+						return false, "SSL certificates invalid or missing"
+					}
+					// From turbo.config, HTTPS stays on until its files can be loaded (a folder restored before its
+					// .pem, a key not readable yet): turned off, the next save wrote "S": 0 for good. Nothing is
+					// redirected to HTTPS without a certificate (httpsRedirect), and loadPendingCertificates loads it
+					// every 30 s.
+					siteSSLConfig[configKey]["S"] = 1
+					slog.Warn("HTTPS is on, but the site's certificate can't be loaded: it is tried again every 30 s", "site", configKey)
+					return true, "HTTPS redirect enabled, certificate pending"
 				}
 				siteSSLConfig[configKey]["S"] = 1
 				if servers[0] != nil && !httpsListening.Load() {
@@ -1902,6 +1918,11 @@ func preprocessorCommand(value string) (executable string, problem string) {
 // can't be inside another token. Otherwise undoing the replacements would depend on their order, or turn a text
 // typed on purpose into something else. Callers hold the global lock.
 func replacementTokenProblem(char string, token string) string {
+	// A replacement stands for characters that a URL can't carry as they are (";", "#", "&"…): a letter or a digit
+	// never needs one, and with them a token could turn a site's or an extension's name into another one.
+	if strings.IndexFunc(char, func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }) != -1 {
+		return "Letters and digits are never replaced"
+	}
 	if strings.Contains(token, char) {
 		return "Replacement with its own character"
 	}

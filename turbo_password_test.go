@@ -5,6 +5,7 @@ package main
 // without the user, and PBKDF2 errors are not ignored.
 
 import (
+	"encoding/base64"
 	"errors"
 	"os"
 	"os/exec"
@@ -114,13 +115,13 @@ func TestI19_PasswordHashError(t *testing.T) {
 	previous := derivePasswordKey
 	t.Cleanup(func() { derivePasswordKey = previous })
 	derivePasswordKey = func(password string, salt []byte, iterations int, keyLength int) ([]byte, error) {
-		if password == "NewPass" {
+		if password == "NewPassword1" {
 			return nil, errors.New("pbkdf2 unavailable")
 		}
 		return previous(password, salt, iterations, keyLength)
 	}
 	logs := captureLog(t)
-	rec = apiFrom(handler, "198.51.100.32", token, "/admin:inside:setP?a=NewPass&b=Admin")
+	rec = apiFrom(handler, "198.51.100.32", token, "/admin:inside:setP?a=NewPassword1&b=Admin")
 	if rec.code != 500 {
 		t.Errorf("setP with PBKDF2 failing: %d %q; expected 500", rec.code, rec.body.String())
 	}
@@ -130,7 +131,7 @@ func TestI19_PasswordHashError(t *testing.T) {
 	if !strings.Contains(logs.String(), "pbkdf2 unavailable") {
 		t.Errorf("the error was not logged:\n%s", logs.String())
 	}
-	if _, err := hashPassword("NewPass"); err == nil {
+	if _, err := hashPassword("NewPassword1"); err == nil {
 		t.Error("hashPassword does not return the PBKDF2 error")
 	}
 }
@@ -161,5 +162,20 @@ func TestI19_FIPSOnly(t *testing.T) {
 		cmd.Process.Kill()
 		<-done
 		t.Logf("Turbo starts with fips140=only")
+	}
+}
+
+// Review of 57cbb3c, S11: the salt and the key of a "PH" are bounded (8 to 64 and 16 to 64 bytes): each login
+// derives a key of that length, a PBKDF2 per 32 bytes, so a huge one written by hand made every failed login cost
+// minutes of CPU.
+func TestRL_S11_PasswordHashLengthsBounded(t *testing.T) {
+	encoded := func(n int) string { return base64.StdEncoding.EncodeToString(make([]byte, n)) }
+	for _, c := range []struct {
+		salt, key int
+		ok        bool
+	}{{16, 32, true}, {8, 16, true}, {64, 64, true}, {16, 65, false}, {65, 32, false}, {7, 32, false}, {16, 15, false}} {
+		if _, _, _, ok := parsePasswordHash("pbkdf2-sha256$1000$" + encoded(c.salt) + "$" + encoded(c.key)); ok != c.ok {
+			t.Errorf("salt of %d bytes and key of %d: accepted %v; expected %v", c.salt, c.key, ok, c.ok)
+		}
 	}
 }

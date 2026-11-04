@@ -27,10 +27,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"log/slog"
 	"maps"
 	"math"
@@ -49,17 +51,19 @@ import (
 	"syscall"
 	"time"
 	"turbo/customNetHttp"
+	"unicode/utf8"
 )
 
 // Locks: globalMutex guards the maps of this block (signedInTokens, charReplacements, fixedCharReplacements,
-// sitesMap, siteSSLConfig, mimeTypes, customHeaders, preprocessors, indexFiles, domainAliases), together with
+// sitesMap, siteSSLConfig, mimeTypes, customHeaders, preprocessors, indexFiles, domainAliases, dormantSites), together with
 // siteCertificates, fixedHTTPResponses, currentCertDomain and configFileModTime: read them with RLock and change
 // them with Lock (lockedCheck, withGlobalLock), never outside, as a concurrent map read and write ends the
 // process. Values read on every request without it are atomic or published copies (atomicString,
 // atomic.Pointer, sync.Map, atomic counters), and logMutex guards the log files.
 var (
 	servers               = make([]*customNetHttp.Server, 2) // Current servers
-	signedInTokens        = make(map[string]int64)           // Signed-in tokens
+	signedInTokens        = make(map[string]int64)           // Signed-in tokens: when each session ends without requests
+	sessionDeadlines      = make(map[string]int64)           // When each session ends however it is used (sessionMaxLifetime)
 	deniedIPs             atomic.Pointer[map[string]int64]   // IPs denied by the administrator until a UNIX date (saved as "@"; published copy, see setDeniedIPs)
 	panelUser             atomicString                       // Panel username
 	panelPasswordHash     atomicString                       // Panel password hash, saved as "PH" (see setPanelPassword)
@@ -78,6 +82,7 @@ var (
 	preprocessors = make(map[string]map[string]string)            // Preprocessors
 	indexFiles    = make(map[string]map[string]int)               // Index files: name -> position (tried from the lowest)
 	domainAliases = make(map[string]string)                       // Domain aliases
+	dormantSites  = make(map[string]map[string]string)            // Sites whose folder isn't there: site -> subdomain -> its section of turbo.config (JSON), applied when the folder appears
 
 	serverTimeLimits    = &customNetHttp.TurboTimeLimits     // Server time limits (published copy, see setTimeLimits)
 	serverRequestLimits requestLimits                        // Per-IP limits (CIL, CIS, CII)
@@ -177,6 +182,10 @@ func main() {
 		slog.Error("TURBO_USER is set but empty: Turbo does not start")
 		os.Exit(1)
 	}
+	if envExists && !panelUserValid(envValue) { // Saved as "U", turbo.config would be refused once it is unset
+		slog.Error("TURBO_USER must have 1 to 24 characters, without control characters: Turbo does not start")
+		os.Exit(1)
+	}
 	if envExists {
 		slog.Info("Panel user taken from TURBO_USER")
 		panelUser.Set(envValue)
@@ -188,8 +197,15 @@ func main() {
 		slog.Error("TURBO_PASSWORD is set but empty: Turbo does not start")
 		os.Exit(1)
 	}
+	if envExists && (len(envValue) > maxPasswordBytes || !textAllowed(envValue, false)) { // The panel couldn't take it
+		slog.Error("TURBO_PASSWORD must have at most " + strconv.Itoa(maxPasswordBytes) + " bytes, without control characters: Turbo does not start")
+		os.Exit(1)
+	}
 	if envExists {
 		slog.Info("Panel password taken from TURBO_PASSWORD")
+		if len(envValue) < minNewPasswordBytes {
+			slog.Warn("TURBO_PASSWORD has fewer than " + strconv.Itoa(minNewPasswordBytes) + " bytes: use a longer one, as the panel requires for a new password")
+		}
 		if err := setPanelPassword(envValue); err != nil {
 			slog.Error("Can't hash TURBO_PASSWORD: Turbo does not start", "error", err)
 			os.Exit(1)
@@ -255,6 +271,7 @@ func main() {
 		case <-cleanupTicker.C:
 			runRecovering("cleanOldValues", func() {
 				cleanOldValues(&signedInTokens)
+				cleanOldValues(&sessionDeadlines)
 				withGlobalLock(cleanDeniedIPs)
 				cleanLoginFailures()
 				cleanIPReferences()
@@ -263,11 +280,16 @@ func main() {
 	}
 }
 
-// shutdownGrace is how long the requests in progress have to finish when Turbo is stopped.
-const shutdownGrace = 10 * time.Second
+// shutdownGrace is how long the requests in progress have to finish when Turbo is stopped (a variable so that tests
+// can shorten it), and cgiEndWait how long, after it, the CGIs that were ended have to be gone.
+var shutdownGrace = 10 * time.Second
+
+const cgiEndWait = 3 * time.Second
 
 // shutdown stops both servers: they stop accepting connections and wait up to shutdownGrace for the requests in
-// progress. Then the logs are closed, and main returns (exit code 0).
+// progress. Then the connections still open are closed, which ends their CGIs with all they started (P12): without
+// systemd, nothing else would, and they would go on after Turbo. Then the logs are closed, and main returns (exit
+// code 0).
 func shutdown(received os.Signal) {
 	slog.Info("Stopping", "signal", received.String())
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
@@ -281,14 +303,45 @@ func shutdown(received os.Signal) {
 		go func() {
 			defer wg.Done()
 			if err := server.Shutdown(ctx); err != nil {
-				slog.Warn("Requests unfinished at shutdown", "error", err)
+				slog.Warn("Requests unfinished at shutdown: their connections are closed", "error", err)
+				_ = server.Close() // Its error is that of a listener already closed by Shutdown
 			}
 		}()
 	}
 	wg.Wait()
+	waitCGIsEnded(cgiEndWait)
+	errorLines.flush()                    // The errors counted and not written yet
 	serverSetLogState(visitsLogName, nil) // Closed, so the last lines are written
 	serverSetLogState(denialsLogName, nil)
 	slog.Info("Stopped")
+}
+
+// waitCGIsEnded waits, up to wait, until no CGI is running (each releases its slot once it is gone).
+func waitCGIsEnded(wait time.Duration) {
+	deadline := time.Now().Add(wait)
+	for {
+		cgiSlots.mutex.Lock()
+		running := cgiSlots.running
+		if running > 0 && cgiSlots.freed == nil {
+			cgiSlots.freed = make(chan struct{})
+		}
+		freed := cgiSlots.freed
+		cgiSlots.mutex.Unlock()
+		remaining := time.Until(deadline)
+		if running <= 0 {
+			return
+		}
+		if remaining <= 0 {
+			slog.Warn("CGIs still running when Turbo exits", "count", running)
+			return
+		}
+		timer := time.NewTimer(remaining)
+		select {
+		case <-freed:
+			timer.Stop()
+		case <-timer.C:
+		}
+	}
 }
 
 // runRecovering runs a periodic task of main() and logs a panic instead of ending the process.
@@ -337,15 +390,72 @@ func deniedIPList() map[string]int64 {
 	return nil
 }
 
-// setDeniedIPs publishes a modified copy of the denied IPs. Callers hold the global lock, so writes don't
-// overlap, while the rate limiter reads the published list without it.
+// deniedIPsLoading is the list of denied IPs being built while applySiteConfig applies a turbo.config: the
+// published one stays in use meanwhile, and is replaced once, whole (publishLoadedDeniedIPs). Guarded by
+// globalMutex.
+var deniedIPsLoading map[string]int64
+
+// deniedIPsInUse is the list of denied IPs as the validators see it: the one being built while a turbo.config is
+// applied, or else the published one. Callers hold the global lock.
+func deniedIPsInUse() map[string]int64 {
+	if deniedIPsLoading != nil {
+		return deniedIPsLoading
+	}
+	return deniedIPList()
+}
+
+// setDeniedIPs publishes a modified copy of the denied IPs, or changes the list being built while a turbo.config
+// is applied. Callers hold the global lock, so writes don't overlap, while the rate limiter reads the published
+// list without it.
 func setDeniedIPs(change func(map[string]int64)) {
+	if deniedIPsLoading != nil {
+		change(deniedIPsLoading)
+		return
+	}
 	list := maps.Clone(deniedIPList())
 	if list == nil {
 		list = make(map[string]int64)
 	}
 	change(list)
+	publishDeniedIPs(list)
+}
+
+// publishLoadedDeniedIPs publishes, once, the list built while a turbo.config was applied. Callers hold the global
+// lock.
+func publishLoadedDeniedIPs() {
+	if list := deniedIPsLoading; list != nil {
+		deniedIPsLoading = nil
+		publishDeniedIPs(list)
+	}
+}
+
+// deniedNetworks is, for the denied IPv6 addresses, the /64 of each (limiterKey) with the latest of their dates:
+// the rate limits count a /64 as one client, whose addresses change by themselves (privacy addresses), so a
+// denial covers the whole /64. Published with deniedIPs.
+var deniedNetworks atomic.Pointer[map[string]int64]
+
+// publishDeniedIPs publishes a list of denied IPs, which mustn't be modified afterwards, and its /64s.
+func publishDeniedIPs(list map[string]int64) {
+	networks := make(map[string]int64)
+	for ip, until := range list {
+		if network := limiterKey(ip); network != ip {
+			networks[network] = max(networks[network], until)
+		}
+	}
+	deniedNetworks.Store(&networks)
 	deniedIPs.Store(&list)
+}
+
+// deniedUntil returns the UNIX date until which ip is denied: its own, or that of a denied IPv6 address of its
+// /64; 0 if it isn't. Without the global lock, like the rest of the limiter.
+func deniedUntil(ip string) int64 {
+	until := deniedIPList()[ip]
+	if networks := deniedNetworks.Load(); networks != nil {
+		if network := limiterKey(ip); network != ip {
+			until = max(until, (*networks)[network])
+		}
+	}
+	return until
 }
 
 // cleanDeniedIPs removes the expired denials. Callers hold the global lock.
@@ -389,9 +499,135 @@ func newHTTPSServer(tlsConfig *tls.Config) *customNetHttp.Server {
 	return &customNetHttp.Server{
 		ConnState: connHandler,
 		Handler:   customNetHttp.HandlerFunc(serverHandlerFn("s")),
-		ErrorLog:  slog.NewLogLogger(slog.Default().Handler(), slog.LevelWarn), // Connection errors (TLS, HTTP/2)
+		ErrorLog:  serverErrorLog, // Connection errors (TLS, HTTP/2)
 		TLSConfig: tlsConfig,
-		HTTP2:     &customNetHttp.HTTP2Config{MaxConcurrentStreams: http2MaxStreams},
+		HTTP2: &customNetHttp.HTTP2Config{
+			MaxConcurrentStreams: http2MaxStreams,
+			WriteByteTimeout:     http2WriteByteTimeout,
+			SendPingTimeout:      http2SendPingTimeout,
+			PingTimeout:          http2PingTimeout,
+		},
+	}
+}
+
+// The time limits of an HTTP/2 connection, besides those of its streams (P6). A connection has a single writer: a
+// client that stops reading blocks it, and the write deadline of a stream (WT) only queues a reset that can't be
+// written either, so every handler of the connection, with its CGI and its slot, waited for as long as the client
+// kept the connection open. http2WriteByteTimeout closes a connection to which nothing could be written for that
+// long; http2SendPingTimeout pings a connection from which nothing arrived for that long, and http2PingTimeout closes
+// it if the ping isn't answered, so that a client gone without closing doesn't keep its streams open. Variables so
+// that tests can shorten them.
+var (
+	http2WriteByteTimeout = 30 * time.Second
+	http2SendPingTimeout  = 60 * time.Second
+	http2PingTimeout      = 15 * time.Second
+)
+
+// serverErrorLog is the ErrorLog of both servers (Go's errors of the connections) and cgiErrorLog that of the CGIs
+// (a CGI that fails, or whose client goes away): both write through errorLines, as warnings.
+var (
+	serverErrorLog = log.New(errorLines, "", 0)
+	cgiErrorLog    = log.New(errorLines, "", 0)
+)
+
+// errorLines is where the error lines of the connections and of the CGIs are written: each kind once at once and
+// then at most once a minute, with the count and the last line.
+var errorLines = &aggregatedLog{}
+
+// aggregatedLog writes lines that anyone can make the server write, one per connection or per frame (a failed TLS
+// handshake, a bogus HTTP/2 preface, a GOAWAY with an error, a protocol error, a client gone from a CGI…), as
+// warnings: the first of each kind at once, and those that follow within aggregatedLogInterval counted, and written
+// when it ends with the count and the last one. One line each let anyone fill the log, and journald, past its rate
+// limit, dropped Turbo's other messages. The kinds are the first words of a line, up to one with a digit (an
+// address, a port); at most aggregatedLogKinds are kept apart, and the rest share one.
+type aggregatedLog struct {
+	mutex sync.Mutex
+	kinds map[string]*aggregatedKind
+	timer *time.Timer // The next write of the lines counted, while there are any
+}
+
+type aggregatedKind struct {
+	count  int       // Lines counted and not written yet
+	last   string    // The last of them
+	logged time.Time // When a line of this kind was last written
+}
+
+const (
+	aggregatedLogInterval = time.Minute
+	aggregatedLogKinds    = 64
+)
+
+// aggregatedLogKind is the kind of a line: its first four words, up to one with a digit after the first (an address,
+// a port; the first may be "http2:").
+func aggregatedLogKind(line string) string {
+	words := strings.Fields(line)
+	kept := words[:0]
+	for index, word := range words {
+		if len(kept) == 4 || (index > 0 && strings.ContainsAny(word, "0123456789")) {
+			break
+		}
+		kept = append(kept, word)
+	}
+	return strings.Join(kept, " ")
+}
+
+func (l *aggregatedLog) Write(p []byte) (int, error) {
+	line := strings.TrimSpace(string(p))
+	kind := aggregatedLogKind(line)
+	now := time.Now()
+	l.mutex.Lock()
+	if l.kinds == nil {
+		l.kinds = make(map[string]*aggregatedKind)
+	}
+	entry := l.kinds[kind]
+	if entry == nil {
+		if len(l.kinds) >= aggregatedLogKinds-1 { // The last place is for all the others
+			kind = "(other)"
+			entry = l.kinds[kind]
+		}
+		if entry == nil {
+			entry = &aggregatedKind{}
+			l.kinds[kind] = entry
+		}
+	}
+	if entry.count == 0 && now.Sub(entry.logged) >= aggregatedLogInterval { // The first in a while: at once
+		entry.logged = now
+		l.mutex.Unlock()
+		slog.Warn(line)
+		return len(p), nil
+	}
+	entry.count++
+	entry.last = line
+	if l.timer == nil {
+		l.timer = time.AfterFunc(aggregatedLogInterval, l.flush)
+	}
+	l.mutex.Unlock()
+	return len(p), nil
+}
+
+// flush writes the lines counted, one per kind, with the count and the last one.
+func (l *aggregatedLog) flush() {
+	type counted struct {
+		kind, last string
+		count      int
+	}
+	var lines []counted
+	now := time.Now()
+	l.mutex.Lock()
+	for kind, entry := range l.kinds {
+		if entry.count > 0 {
+			lines = append(lines, counted{kind, entry.last, entry.count})
+			entry.count, entry.last, entry.logged = 0, "", now
+		}
+	}
+	if l.timer != nil {
+		l.timer.Stop()
+		l.timer = nil
+	}
+	l.mutex.Unlock()
+	sort.Slice(lines, func(i, j int) bool { return lines[i].kind < lines[j].kind })
+	for _, line := range lines {
+		slog.Warn("Repeated errors (logged once a minute at most)", "kind", line.kind, "count", line.count, "last", line.last)
 	}
 }
 
@@ -443,7 +679,7 @@ func createHTTPServer() *customNetHttp.Server {
 	server := &customNetHttp.Server{
 		ConnState: connHandler,
 		Handler:   customNetHttp.HandlerFunc(serverHandlerFn("")),
-		ErrorLog:  slog.NewLogLogger(slog.Default().Handler(), slog.LevelWarn), // Connection errors
+		ErrorLog:  serverErrorLog, // Connection errors
 	}
 
 	return httpServerStart(server)
@@ -580,11 +816,13 @@ func refreshLogFiles(baseDir string) {
 // once while it lasts (a rotation that leaves the file with another owner, for example).
 var logOpenProblems sync.Map
 
-// logField writes a field of a log line as it is, or quoted and escaped if it has spaces, quotes or control
-// characters, so that each line keeps its fields apart (an HTTP/2 path may have spaces).
+// logField writes a field of a log line as it is, or quoted and escaped if it has spaces, quotes, control
+// characters (C1 ones too), other characters that don't print (such as U+2028, a line break for some tools) or
+// invalid UTF-8, so that each line keeps its fields apart (an HTTP/2 path may have spaces) and shows in a terminal
+// as it is.
 func logField(field string) string {
-	for i := 0; i < len(field); i++ {
-		if c := field[i]; c <= ' ' || c == '"' || c == 0x7f {
+	for _, r := range field {
+		if r <= ' ' || r == '"' || r == utf8.RuneError || !strconv.IsPrint(r) {
 			return strconv.Quote(field)
 		}
 	}
@@ -644,6 +882,17 @@ func serverHandlerFn(serverType string) func(w customNetHttp.ResponseWriter, r *
 					return
 				}
 			}
+		}
+		// The rest is as it chose the site: the host's name in lower case, without a final dot, and its port only if
+		// it is a number, so that a CGI's HTTP_HOST and SERVER_NAME, and the port of a redirection, never carry what
+		// the choice of the site left out ("[example.com]x", or a port with markup over HTTP/2).
+		r.Host = canonicalHost(r.Host)
+
+		// A target that doesn't start with "/" (an opaque one, such as x:@evil.com, or "*" outside OPTIONS) names no
+		// file of a site, and after the host of a redirection it would change the URL: refused.
+		if r.RequestURI == "" || r.RequestURI[0] != '/' {
+			reqMsg(w, 400)
+			return
 		}
 
 		if panelACMEChallenge(w, r) || console(w, r) {
@@ -827,6 +1076,7 @@ func resetSettings() {
 	preprocessors = make(map[string]map[string]string)       // Preprocessors
 	indexFiles = make(map[string]map[string]int)             // Indexes
 	domainAliases = make(map[string]string)                  // Domain aliases
+	dormantSites = make(map[string]map[string]string)        // Those of the new sites directory come with its configuration
 	siteCertificates = make(map[string]*tls.Certificate)
 	certificatesByName.Store(&map[string]*tls.Certificate{})
 	panelCertificate, panelCertificateStamp = nil, "" // Read again from the new sites directory
@@ -880,20 +1130,18 @@ var settingsUpdateMutex sync.Mutex
 // (a hook for tests).
 var beforeSitesScan = func() {}
 
-// reloadOptions are how the reload of setM reads the turbo.config of the sites directory it just chose.
+// reloadOptions are how the reload of setM reads the turbo.config of the sites directory it just chose, and how a
+// reload reads the one that "M" names.
 type reloadOptions struct {
-	keepWithoutConfig bool   // Without a turbo.config there, the settings in use stay instead of the defaults
-	ignorePointer     bool   // A turbo.config there that only points to another directory counts as none
-	keepSession       string // If the credentials change, the session that stays (the one of setM); the others end
+	keepWithoutConfig bool          // Without a turbo.config there, the settings in use stay instead of the defaults
+	ignorePointer     bool          // A turbo.config there that only points to another directory counts as none
+	keepSession       string        // If the credentials change, the session that stays (the one of setM); the others end
+	carried           *parsedConfig // A whole turbo.config whose "M" names that directory, without turbo.config: applied there
 }
 
 // updateSettingsFollowing is updateSettings counting how many times "M" moved it to another sites directory,
 // to stop if two configs point at each other. Callers hold settingsUpdateMutex.
 func updateSettingsFollowing(checkSitesFlag bool, redirects int, options reloadOptions) error {
-	if checkSitesFlag {
-		checkSites()
-	}
-
 	baseDir := sitesDir.Get()
 	var lastConfigModTime int64
 	withReadLock(func() { lastConfigModTime = configFileModTime })
@@ -903,6 +1151,9 @@ func updateSettingsFollowing(checkSitesFlag bool, redirects int, options reloadO
 	dirEntries, err := os.ReadDir(baseDir)
 	if err != nil { // Without the sites, the defaults would leave every site and its settings out
 		return &sitesDirError{dir: baseDir, err: err}
+	}
+	if checkSitesFlag { // Only with the sites directory readable: a disk that doesn't answer deactivates no site
+		checkSites()
 	}
 
 	// Anything at the path counts as turbo.config, also a broken link or a folder: only a missing one means none.
@@ -930,27 +1181,33 @@ func updateSettingsFollowing(checkSitesFlag bool, redirects int, options reloadO
 	var configErr error
 	configRead := false
 	sitesActivated := false // Sites found on disk, also checked against PA
+	// The whole turbo.config that named this directory, which has none of its own, applies here: its sites are these.
+	carried := options.carried != nil && lastConfigModTime != configModTime && withoutConfig && options.keepWithoutConfig
 	if lastConfigModTime != configModTime && withoutConfig && options.keepWithoutConfig {
 		withGlobalLock(func() {
 			configFileModTime = configModTime
 			configFileLoaded = true // Kept as if it came from a file there
 		})
-		slog.Info("Sites directory without turbo.config: the global settings, the credentials and the lists in use are kept", "directory", baseDir)
+		if carried {
+			slog.Info("Sites directory without turbo.config: the turbo.config that names it applies here, and saving writes it here", "directory", baseDir)
+		} else {
+			slog.Info("Sites directory without turbo.config: the global settings, the credentials and the lists in use are kept", "directory", baseDir)
+		}
 	}
 	readConfig := lastConfigModTime != configModTime && !(withoutConfig && options.keepWithoutConfig)
 	var config parsedConfig
 	if readConfig { // Read and checked before taking the lock
 		config, configErr = parseSiteConfig(baseDir + configFileName)
 	}
-	// Outside setM, a turbo.config that only points to another directory must lead to one with its configuration:
-	// applied on its own, the pointer would leave the defaults, the default credentials and an open panel included.
-	// One without "M" ({}, or only "^") points nowhere: it is an empty configuration, loaded as such.
-	if readConfig && configErr == nil && !options.keepWithoutConfig && config.raw != nil && isSitesDirPointerMap(config.raw) {
-		if _, points := config.raw["."]["M"]; points {
-			if problem := pointerTargetProblem(config.raw, redirects); problem != nil {
-				data, _ := os.ReadFile(baseDir + configFileName) // #nosec G304 -- turbo.config of the sites directory in use, for the message
-				configErr = &configFileError{path: baseDir + configFileName, data: data, err: problem}
-			}
+	// Every sites directory that this turbo.config leads to, through a pointer or the "M" of a whole one, must be
+	// usable before anything is applied (sitesDirChainProblem): following it emptied the configuration in use first.
+	// Outside setM, a pointer must lead to a configuration: applied on its own, it would leave the defaults, the
+	// default credentials and an open panel included. One without "M" ({}, or only "^") points nowhere: it is an
+	// empty configuration, loaded as such.
+	if readConfig && configErr == nil && config.raw != nil {
+		if problem := sitesDirChainProblem(config.raw, baseDir, redirects, options.keepWithoutConfig); problem != nil {
+			data, _ := os.ReadFile(baseDir + configFileName) // #nosec G304 -- turbo.config of the sites directory in use, for the message
+			configErr = &configFileError{path: baseDir + configFileName, data: data, err: problem}
 		}
 	}
 	// A turbo.config that only points to another directory is followed without applying it: it has no settings,
@@ -964,12 +1221,31 @@ func updateSettingsFollowing(checkSitesFlag bool, redirects int, options reloadO
 			}
 		}
 	}
+	// A whole turbo.config whose "M" names another sites directory (checked above). With a turbo.config of its own
+	// there (whole, or a pointer on to one), that one applies whole after this one. Without one, this turbo.config is
+	// followed like a pointer, without applying it here, and applied there, where its sites are: applied here
+	// (against that directory) and emptied when following "M", every site was left with the defaults, its scripts
+	// served as text.
+	var carry *parsedConfig
+	if readConfig && configErr == nil && config.raw != nil && !isSitesDirPointerMap(config.raw) && redirects < 2 {
+		if value, _ := config.raw["."]["M"].(string); value != "" {
+			if resolved, err := resolveSitesDir(value); err == nil && dirExists(resolved) && !sameDir(resolved, baseDir) {
+				if _, statErr := os.Lstat(resolved + configFileName); os.IsNotExist(statErr) {
+					pointerTarget, pointerValue, carry = resolved, value, &config
+				}
+			}
+		}
+	}
 	diskSites := scanDiskSites(baseDir, dirEntries)
+	restoring := dormantSectionsFound(diskSites)
 	var look *diskLook
-	if readConfig && configErr == nil && pointerTarget == "" {
-		look = lookAheadSettings(config, baseDir, diskSites)
-	} else {
-		look = lookAheadSettings(parsedConfig{}, baseDir, diskSites)
+	switch {
+	case readConfig && configErr == nil && pointerTarget == "":
+		look = lookAheadSettings(config, baseDir, diskSites, restoring)
+	case carried:
+		look = lookAheadSettings(*options.carried, baseDir, diskSites, restoring)
+	default:
+		look = lookAheadSettings(parsedConfig{}, baseDir, diskSites, restoring)
 	}
 
 	// In a single section: what came from the file is replaced and the sites found on disk are activated, so no
@@ -992,9 +1268,18 @@ func updateSettingsFollowing(checkSitesFlag bool, redirects int, options reloadO
 				configFileLoaded = configModTime != 1
 				configFileDigest = config.digest
 			}
+		} else if carried {
+			certificatePublishPaused = true
+			credentials := panelUser.Get() + "\x00" + panelPasswordHash.Get()
+			applySiteConfig(*options.carried) // Its "M" names this directory: unchanged
+			if panelUser.Get()+"\x00"+panelPasswordHash.Get() != credentials {
+				closeOtherSessions(options.keepSession)
+			}
 		}
-		sitesActivated = activateDiskSites(diskSites, checkSitesFlag)
-		dropAliasesOfSites() // Once all the sites are in: a site wins over an alias of its host
+		if sitesDir.Get() == baseDir { // Not the folders of a directory that "M" leaves: they aren't its sites
+			sitesActivated = activateDiskSites(diskSites, checkSitesFlag)
+			dropAliasesOfSites() // Once all the sites are in: a site wins over an alias of its host
+		}
 		if certificatePublishPaused {
 			certificatePublishPaused = false
 			publishCertificates()
@@ -1002,27 +1287,34 @@ func updateSettingsFollowing(checkSitesFlag bool, redirects int, options reloadO
 	})
 	if readConfig && configErr == nil {
 		configRead = true
-		if configModTime == 1 {
+		switch {
+		case configModTime == 1:
 			slog.Info("No turbo.config: default configuration")
-		} else {
+		case carry != nil:
+			slog.Info("turbo.config read: it applies in the sites directory that its \"M\" names, which has no turbo.config", "directory", pointerTarget)
+		default:
 			slog.Info("turbo.config read and applied")
 		}
 		if newDir := sitesDir.Get(); !sameDir(newDir, baseDir) && redirects < 2 { // "M" points elsewhere: read the config there
 			slog.Info("Sites directory", "directory", newDir)
 			// Without a turbo.config there, the settings just read stay, as setM keeps them, to be written there
-			// with the next save; the defaults would open the panel.
+			// with the next save; the defaults would open the panel. A whole turbo.config read here applies there.
 			_, statErr := os.Lstat(newDir + configFileName)
 			keep := options.keepWithoutConfig || os.IsNotExist(statErr)
 			resetSettings()
 			withGlobalLock(func() { configFileModTime = 0 })
-			return updateSettingsFollowing(checkSitesFlag, redirects+1, reloadOptions{keepWithoutConfig: keep, keepSession: options.keepSession})
+			return updateSettingsFollowing(checkSitesFlag, redirects+1, reloadOptions{keepWithoutConfig: keep, keepSession: options.keepSession, carried: carry})
 		}
+	}
+	if carried {
+		configRead = true
 	}
 
 	var knownStamp string
 	withReadLock(func() { knownStamp = panelCertificateStamp })
 	panelLook := lookAtPanelCertificate(baseDir, knownStamp) // Read without the lock
 	withGlobalLock(func() { applyPanelCertificate(baseDir, panelLook) })
+	loadPendingCertificates() // Sites with HTTPS on whose certificate couldn't be loaded yet
 
 	if configRead || sitesActivated { // After the sites on disk are activated, which PA is checked against
 		withReadLock(warnPanelOrigin)
@@ -1031,9 +1323,10 @@ func updateSettingsFollowing(checkSitesFlag bool, redirects int, options reloadO
 }
 
 // lookAheadSettings looks at the disk, before the reload takes the global lock, for what the validators will look
-// at under it: the sites directory of M, the certificate files of each site of config and of the disk (loaded
-// when the site has HTTPS on) and the executables of the preprocessors.
-func lookAheadSettings(config parsedConfig, baseDir string, disk []diskSite) *diskLook {
+// at under it: the sites directory of M, the folders of each site of config, the certificate files of each site
+// of config, of the disk and of restoring (the settings kept for the sites of the disk that come back; loaded when
+// the site has HTTPS on) and the executables of their preprocessors.
+func lookAheadSettings(config parsedConfig, baseDir string, disk []diskSite, restoring map[diskSite]map[string]interface{}) *diskLook {
 	look := newDiskLook()
 	if value, isString := config.raw["."]["M"].(string); isString {
 		if resolved, err := resolveSitesDir(value); err == nil {
@@ -1048,23 +1341,20 @@ func lookAheadSettings(config parsedConfig, baseDir string, disk []diskSite) *di
 		case "_", "@", "#", ".", "^": // Not sites
 			continue
 		}
+		look.siteFolders(baseDir, domain, "")
 		for subdomain, content := range subdomains {
+			if subdomain != "" {
+				look.siteFolders(baseDir, domain, subdomain)
+			}
 			settings, _ := content.(map[string]interface{})
-			if ssl, isMap := settings["!"].(map[string]interface{}); isMap {
-				look.siteFiles(baseDir+siteFolder(domain, subdomain), httpsSetting(ssl["S"]))
-			}
-			preprocessorEntries, _ := settings["?"].(map[string]interface{})
-			for _, entry := range preprocessorEntries {
-				if value, isString := entry.(string); isString {
-					if executable, problem := preprocessorCommand(value); problem == "" {
-						look.stat(executable)
-					}
-				}
-			}
+			look.siteSection(baseDir, domain, subdomain, settings)
 		}
 	}
 	for _, site := range disk {
 		look.siteFiles(baseDir+siteFolder(site.site, site.subdomain), false)
+	}
+	for site, settings := range restoring {
+		look.siteSection(baseDir, site.site, site.subdomain, settings)
 	}
 	return look
 }
@@ -1098,8 +1388,8 @@ func connHandler(conn net.Conn, connState customNetHttp.ConnState) {
 // counting a request.
 func ipBlocked(ip string) (bool, int64) {
 	nowUnix := time.Now().Unix() // Denials are dates, saved in turbo.config
-	if deniedUntil, isDenied := deniedIPList()[ip]; isDenied && deniedUntil > nowUnix {
-		return true, deniedUntil - nowUnix
+	if until := deniedUntil(ip); until > nowUnix {
+		return true, until - nowUnix
 	}
 	ipRef, found := ipReferences.Load(limiterKey(ip))
 	if !found {
@@ -1251,8 +1541,7 @@ func cleanIPReferences() {
 // count (which restarts after CIL): with t elapsed, CII × (⌊t/CIS⌋ + 1) requests are allowed, the current one
 // included. Going over blocks the IP for 5 seconds.
 func perIPNotAvailable(ip string, incrementCounter bool) bool {
-	deniedUntil, isDenied := deniedIPList()[ip] // Without the global lock, like the rest of the limiter
-	if isDenied && deniedUntil > time.Now().Unix() {
+	if deniedUntil(ip) > time.Now().Unix() { // Without the global lock, like the rest of the limiter
 		return true
 	}
 
@@ -1349,10 +1638,13 @@ func orderedIndexes(siteKey string) []string {
 	return names
 }
 
+// deleteSite deletes a site from the panel, with what was kept of it if its folder had gone (dormantSites): a
+// folder with its name, later, is a new site.
 func deleteSite(domain string, subdomain string) {
 	globalMutex.Lock()
 	defer globalMutex.Unlock()
 	deleteSiteLocked(domain, subdomain)
+	forgetDormantLocked(domain, subdomain)
 }
 
 // deleteSiteLocked is deleteSite for callers that hold the global lock. Deleting a root domain deletes its
@@ -1463,6 +1755,9 @@ func forgetSiteKey(siteKey string) {
 	}
 }
 
+// checkSites deactivates the sites whose folder, or its public folder (@), is gone, keeping their settings for
+// when it comes back (keepDormantLocked). Callers have checked that the sites directory can be read: if it can't,
+// the disk says nothing about the sites.
 func checkSites() {
 	type activeSite struct{ subdomain, domain string }
 	var active []activeSite
@@ -1476,7 +1771,7 @@ func checkSites() {
 
 	var missing []activeSite
 	for _, site := range active {
-		if exists, _ := siteExistenceCheckers["/"](false, site.domain, site.subdomain); !exists { // siteExistenceCheckers["/"] is used when input is like: *.domain.com
+		if siteFolderGoneWith(siteDirStat, site.domain, site.subdomain) {
 			missing = append(missing, site)
 		}
 	}
@@ -1489,12 +1784,12 @@ func checkSites() {
 				return
 			}
 			// Looked at again holding the lock, which hardUpload holds while it swaps @ for the uploaded files,
-			// between two renames during which @ isn't there: deleted then, the site came back from the disk with
-			// the default settings, its preprocessors left out (its PHP served as text). Only for a site that is
+			// between two renames during which @ isn't there: the site stays active. Only for a site that is
 			// missing, rarely: the disk of every site is looked at above, without the lock.
-			if exists, _ := siteExistenceCheckers["/"](false, site.domain, site.subdomain); exists {
+			if !siteFolderGoneWith(siteDirStat, site.domain, site.subdomain) {
 				return
 			}
+			keepDormantLocked(site.domain, site.subdomain)
 			deleteSiteLocked(site.domain, site.subdomain)
 			deleted = true
 		})
@@ -1506,8 +1801,161 @@ func checkSites() {
 		if site.subdomain != "" {
 			name = site.subdomain + "." + site.domain
 		}
-		slog.Info("Site deleted from disk and deactivated", "site", name)
+		slog.Info("Site folder gone: the site is deactivated, and its settings are kept for when the folder comes back", "site", name)
 	}
+}
+
+// siteFolderGoneWith reports, looking with stat, whether the folder of a site or its public folder (@) is no
+// longer there: it doesn't exist, or isn't a folder. Any other error (permissions, I/O, a network disk that
+// doesn't answer) says nothing about the site, which is left as it is.
+func siteFolderGoneWith(stat func(string) (os.FileInfo, error), domain string, subdomain string) bool {
+	folder := sitesDir.Get() + siteFolder(domain, subdomain)
+	for _, path := range []string{strings.TrimSuffix(folder, "/"), folder + publicDirName} {
+		info, err := stat(path)
+		if err != nil {
+			return errors.Is(err, fs.ErrNotExist)
+		}
+		if !info.IsDir() {
+			return true
+		}
+	}
+	return false
+}
+
+// keepDormantLocked keeps the settings of a site whose folder is gone (for a domain, also those of its
+// subdomains, whose folders go with it), as turbo.config has them, before it is deactivated: they come back with
+// its folder, instead of the defaults (with which its scripts were served as text), and saving keeps them in
+// turbo.config. Callers hold the global lock.
+func keepDormantLocked(domain string, subdomain string) {
+	subdomains := []string{subdomain}
+	if subdomain == "" {
+		subdomains = sortedKeys(sitesMap[domain])
+	}
+	for _, sub := range subdomains {
+		if _, active := sitesMap[domain][sub]; active {
+			setDormantLocked(domain, sub, createSubdomainData(domain, sub))
+		}
+	}
+}
+
+// keepDormantFromFile keeps, for a site of the turbo.config being applied whose folder or public folder isn't
+// there, or can't be looked at (for a domain, with its subdomains), its section, to be applied when the folder can
+// be used; saving keeps it in turbo.config. Any error of the disk counts: permissions, I/O or a network disk that
+// doesn't answer say nothing about the site, which, readable again, would otherwise come from the disk with the
+// defaults (its scripts served as text). A name that can't be a site's, or a folder and an @ that are there (the
+// check of the site logs why it can't be used), keeps nothing. Callers hold the global lock, within
+// applySiteConfig.
+func keepDormantFromFile(domain string, subdomain string) {
+	name := domain
+	if subdomain != "" {
+		name = subdomain + "." + changeWildcards(domain, "x")
+	}
+	if valid, _ := hostOk(name, false); !valid || reservedSiteNames[changeWildcards(domain)] || siteFolderPresentWith(diskStat, domain, subdomain) {
+		return
+	}
+	subdomains := []string{subdomain}
+	if subdomain == "" {
+		subdomains = sortedKeys(rawConfigMap[domain])
+	}
+	for _, sub := range subdomains {
+		section, isMap := rawConfigMap[domain][sub].(map[string]interface{})
+		if _, content := subdomainContentCheckers[sub]; content || !isMap {
+			continue
+		}
+		if sub != "" {
+			if valid, _ := hostOk(sub+"."+changeWildcards(domain, "x"), false); !valid {
+				continue
+			}
+		}
+		setDormantLocked(domain, sub, jsonSection(section))
+	}
+	slog.Info("turbo.config site whose folder isn't there or can't be read: its settings apply when it can be used", "site", domain, "subdomain", subdomain)
+}
+
+// siteFolderPresentWith reports, looking with stat, whether the folder of a site and its public folder (@) are both
+// there as folders.
+func siteFolderPresentWith(stat func(string) (os.FileInfo, error), domain string, subdomain string) bool {
+	folder := sitesDir.Get() + siteFolder(domain, subdomain)
+	for _, path := range []string{strings.TrimSuffix(folder, "/"), folder + publicDirName} {
+		if info, err := stat(path); err != nil || !info.IsDir() {
+			return false
+		}
+	}
+	return true
+}
+
+// jsonSection is the JSON of a site's section of turbo.config as it was read, keys in byte order.
+func jsonSection(section map[string]interface{}) string {
+	var builder strings.Builder
+	encoder := json.NewEncoder(&builder)
+	encoder.SetEscapeHTML(false)
+	if encoder.Encode(section) != nil { // Decoded from JSON: it always encodes
+		return "{}"
+	}
+	return strings.TrimSuffix(builder.String(), "\n")
+}
+
+// setDormantLocked keeps the section of turbo.config of an inactive site. Callers hold the global lock.
+func setDormantLocked(domain string, subdomain string, section string) {
+	if dormantSites[domain] == nil {
+		dormantSites[domain] = make(map[string]string)
+	}
+	dormantSites[domain][subdomain] = section
+}
+
+// forgetDormantLocked drops what is kept of a site (for a domain, also of its subdomains): one created or
+// deleted from the panel starts anew. Callers hold the global lock.
+func forgetDormantLocked(domain string, subdomain string) {
+	if subdomain == "" {
+		delete(dormantSites, domain)
+		return
+	}
+	delete(dormantSites[domain], subdomain)
+	if len(dormantSites[domain]) == 0 {
+		delete(dormantSites, domain)
+	}
+}
+
+// restoreDormantLocked activates a site whose folder is back with the settings kept for it, applied as when
+// turbo.config is read. Callers hold the global lock.
+func restoreDormantLocked(domain string, subdomain string, kept string) {
+	delete(dormantSites[domain], subdomain) // Only this one: its subdomains come back with their own folders
+	if len(dormantSites[domain]) == 0 {
+		delete(dormantSites, domain)
+	}
+	var settings map[string]interface{}
+	if json.Unmarshal([]byte(kept), &settings) != nil { // Written by Turbo: it always decodes
+		constructSiteLocked(domain, subdomain)
+		return
+	}
+	constructSiteWithoutIndex(domain, subdomain)
+	for _, settingKey := range subdomainContentOrder {
+		if value, present := settings[settingKey]; present {
+			subdomainContentCheckers[settingKey](false, value, true, domain, subdomain)
+		}
+	}
+}
+
+// dormantSectionsFound returns, decoded, the settings kept for the inactive sites among those found on disk, which
+// activating them restores: the reload looks at their files before taking the lock, as it does for turbo.config's.
+func dormantSectionsFound(found []diskSite) map[diskSite]map[string]interface{} {
+	var sections map[diskSite]map[string]interface{}
+	withReadLock(func() {
+		for _, site := range found {
+			kept, dormant := dormantSites[site.site][site.subdomain]
+			if !dormant || siteExists(site.site, site.subdomain) {
+				continue
+			}
+			var settings map[string]interface{}
+			if json.Unmarshal([]byte(kept), &settings) == nil {
+				if sections == nil {
+					sections = make(map[diskSite]map[string]interface{})
+				}
+				sections[site] = settings
+			}
+		}
+	})
+	return sections
 }
 
 // beforeMissingSitesDeleted runs when checkSites has found sites missing on disk and is about to deactivate them
@@ -1755,6 +2203,7 @@ func rootName(requestPath string) string {
 func dynamic(basePath string, requestPath string, queryString string, scriptPath string, responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request) {
 	handler := new(customNetHttp.CgiHandler)
 	handler.Path = scriptPath
+	handler.Logger = cgiErrorLog                             // Counted as the connections' errors: one per request a client could make
 	handler.Timeout = serverTimeLimits.Load().WT             // Zero (no write timeout) leaves the CGI without limit
 	handler.Env = append(handler.Env, "REDIRECT_STATUS=CGI") // PHP refuses to run as a CGI without it while cgi.force_redirect is on (the default)
 	handler.InheritEnv = cgiTempVariables
@@ -1783,8 +2232,30 @@ func dynamic(basePath string, requestPath string, queryString string, scriptPath
 		reqMsg(responseWriter, 503)
 		return
 	}
-	defer releaseCGISlot()
+	// The CGI's output waits in output for the client (newCGIOutput), so that the CGI, done, frees its slot at once,
+	// however slowly the client reads: holding it until the client had read everything let a few clients that don't
+	// read keep every slot, and every site's CGIs answered 503.
+	output := newCGIOutput(cgiResponseWriter{responseWriter})
+	slotHeld, completed := true, false
+	defer func() {
+		if completed {
+			output.finish() // What is left reaches the client, the slot already free
+		} else {
+			output.abort() // Cut (the client went away, or WT ran out): nothing more is written
+		}
+		if slotHeld {
+			releaseCGISlot()
+		}
+	}()
 	withoutSessionCookie(request)
+	// A header with "_" in its name becomes the same variable as the one with "-" (X_Forwarded_For and
+	// X-Forwarded-For are both HTTP_X_FORWARDED_FOR), and the client's could win over what a proxy in front set: as
+	// Apache does, they don't reach the CGI.
+	for name := range request.Header {
+		if strings.IndexByte(name, '_') != -1 {
+			delete(request.Header, name)
+		}
+	}
 	if request.URL.RawQuery != "" && queryString != "" {
 		queryString = request.URL.RawQuery + "&" + queryString
 	} else if request.URL.RawQuery != "" {
@@ -1804,7 +2275,247 @@ func dynamic(basePath string, requestPath string, queryString string, scriptPath
 		// of a CGI that runs out of time reaches the client.
 		_ = customNetHttp.NewResponseController(responseWriter).SetWriteDeadline(time.Now().Add(handler.Timeout + 2*time.Second)) // Not supported only by test writers
 	}
-	handler.ServeHTTP(cgiResponseWriter{responseWriter}, request)
+	handler.ServeHTTP(output, request)
+	completed = true
+	releaseCGISlot() // The CGI has ended: its slot is free while its output reaches the client
+	slotHeld = false
+}
+
+// How much of a CGI's output may wait for its client: in memory, cgiOutputMemory per response and cgiOutputBudget for
+// all of them; beyond, in a temporary file, cgiOutputFileMax per response and cgiOutputFileBudget for all of them.
+// Within them a CGI never waits for its client, so it ends, and frees its slot, as soon as it is done; beyond them
+// it waits for its client, as it did writing straight to it (as nginx's FastCGI buffers do).
+const (
+	cgiOutputMemory     = 1 << 20
+	cgiOutputBudget     = 64 << 20
+	cgiOutputFileMax    = 256 << 20
+	cgiOutputFileBudget = 1 << 30
+)
+
+// cgiOutputInUse and cgiOutputFilesInUse are what the outputs of the CGIs take, in memory and in temporary files,
+// while they wait for their clients.
+var cgiOutputInUse, cgiOutputFilesInUse atomic.Int64
+
+// cgiOutput is the ResponseWriter a CGI writes to: the headers go to the client's writer at once, and the body is
+// kept (in memory, then in a temporary file) and sent by a goroutine of its own, so that a client that reads slowly,
+// or not at all, doesn't hold the CGI (with its slot). Writing to the client fails when it goes away or when WT runs
+// out; then the CGI's next write fails too, and the CGI handler ends it.
+type cgiOutput struct {
+	customNetHttp.ResponseWriter // cgiResponseWriter: the headers the CGI may set, and the client's writer
+
+	mutex       sync.Mutex
+	more        *sync.Cond  // Signals a new chunk, the end, or that something was sent
+	chunks      [][]byte    // In memory, waiting to be sent, in order; all of them before what is in file
+	pending     int         // Bytes in chunks
+	file        *os.File    // Where the output goes once the memory is full, until all of it is sent
+	fileRead    int64       // What of file was sent
+	fileWritten int64       // What of file was written
+	noFile      bool        // The temporary file couldn't be used: beyond the memory, the CGI waits
+	flushing    bool        // A Flush was asked: done after what was written before it
+	closed      bool        // The CGI is done (or cut): nothing more comes
+	err         error       // Writing to the client failed, or the response was cut
+	sending     bool        // The sender is running
+	cut         atomic.Bool // The response was cut: the sender stops between two writes
+	done        chan struct{}
+}
+
+// errCGIOutputCut is the error of a CGI's write once its response was cut.
+var errCGIOutputCut = errors.New("the response was cut")
+
+func newCGIOutput(w customNetHttp.ResponseWriter) *cgiOutput {
+	output := &cgiOutput{ResponseWriter: w, done: make(chan struct{})}
+	output.more = sync.NewCond(&output.mutex)
+	return output
+}
+
+// Write keeps a copy of p to be sent: in memory while this response and all of them are within their limits (a
+// response with nothing waiting always gets a chunk in), else at the end of its temporary file, while within its
+// limits; else it waits until the client takes some.
+func (output *cgiOutput) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	size := int64(len(p))
+	output.mutex.Lock()
+	defer output.mutex.Unlock()
+	for {
+		if output.err != nil {
+			return 0, output.err
+		}
+		inFile := output.fileWritten - output.fileRead
+		if inFile == 0 && (output.pending == 0 || output.pending+len(p) <= cgiOutputMemory && cgiOutputInUse.Load()+size <= cgiOutputBudget) {
+			output.chunks = append(output.chunks, append([]byte(nil), p...)) // io.Copy reuses its buffer
+			output.pending += len(p)
+			cgiOutputInUse.Add(size)
+			break
+		}
+		if !output.noFile && inFile+size <= cgiOutputFileMax && cgiOutputFilesInUse.Load()+size <= cgiOutputFileBudget && output.spill(p) {
+			break
+		}
+		output.more.Wait()
+	}
+	if !output.sending {
+		output.sending = true
+		go output.send()
+	}
+	output.more.Broadcast()
+	return len(p), nil
+}
+
+// spill writes p at the end of the temporary file, creating it the first time, and reports whether it could.
+// Callers hold output.mutex (the sender reads another part of the file meanwhile).
+func (output *cgiOutput) spill(p []byte) bool {
+	if output.file == nil {
+		file, err := os.CreateTemp("", "turbo-cgi-output-*") // 0600, in Turbo's temporary folder
+		if err != nil {
+			output.noFile = true
+			return false
+		}
+		output.file = file
+	}
+	if _, err := output.file.WriteAt(p, output.fileWritten); err != nil {
+		output.noFile = true
+		return false
+	}
+	output.fileWritten += int64(len(p))
+	cgiOutputFilesInUse.Add(int64(len(p)))
+	return true
+}
+
+// Flush asks for what was written so far to be flushed to the client once it is sent.
+func (output *cgiOutput) Flush() {
+	output.mutex.Lock()
+	defer output.mutex.Unlock()
+	output.flushing = true
+	if !output.sending {
+		output.sending = true
+		go output.send()
+	}
+	output.more.Broadcast()
+}
+
+// Unwrap lets NewResponseController reach the server's ResponseWriter.
+func (output *cgiOutput) Unwrap() customNetHttp.ResponseWriter {
+	return output.ResponseWriter
+}
+
+// send writes the output to the client in order, the memory first and then the file, until the CGI is done and
+// all of it is sent, or writing fails.
+func (output *cgiOutput) send() {
+	defer close(output.done)
+	buffer := make([]byte, 32<<10)
+	for {
+		output.mutex.Lock()
+		for len(output.chunks) == 0 && output.fileWritten == output.fileRead && !output.flushing && !output.closed && output.err == nil {
+			output.more.Wait()
+		}
+		if output.err != nil || (len(output.chunks) == 0 && output.fileWritten == output.fileRead && !output.flushing && output.closed) {
+			output.mutex.Unlock()
+			return
+		}
+		chunks, flush := output.chunks, output.flushing
+		output.chunks, output.pending, output.flushing = nil, 0, false // Taken: cgiOutputInUse still counts them until sent
+		var fromFile int64                                             // With the memory sent, the next part of the file
+		if len(chunks) == 0 {
+			fromFile = min(output.fileWritten-output.fileRead, int64(len(buffer)))
+		}
+		file, readAt := output.file, output.fileRead
+		output.mutex.Unlock()
+
+		var err error
+		for _, chunk := range chunks {
+			if err == nil && output.cut.Load() {
+				err = errCGIOutputCut
+			}
+			if err == nil {
+				_, err = output.ResponseWriter.Write(chunk)
+			}
+			cgiOutputInUse.Add(-int64(len(chunk)))
+		}
+		if err == nil && fromFile > 0 && !output.cut.Load() {
+			read, readErr := file.ReadAt(buffer[:fromFile], readAt)
+			if read > 0 {
+				_, err = output.ResponseWriter.Write(buffer[:read])
+			}
+			if err == nil && readErr != nil && !errors.Is(readErr, io.EOF) {
+				err = readErr
+			}
+			output.mutex.Lock()
+			if output.err == nil { // Not dropped meanwhile (dropLocked counted it already)
+				output.fileRead += int64(read)
+				cgiOutputFilesInUse.Add(-int64(read))
+				if output.fileRead == output.fileWritten { // All of the file sent: it is used again from the start
+					output.fileRead, output.fileWritten = 0, 0
+					_ = output.file.Truncate(0)
+				}
+			}
+			output.mutex.Unlock()
+		}
+		if err == nil && flush {
+			err = customNetHttp.NewResponseController(output.ResponseWriter).Flush()
+			if errors.Is(err, customNetHttp.ErrNotSupported) {
+				err = nil
+			}
+		}
+		output.mutex.Lock()
+		if err != nil && output.err == nil {
+			output.err = err
+			output.dropLocked()
+		}
+		output.more.Broadcast()
+		output.mutex.Unlock()
+	}
+}
+
+// dropLocked forgets what wasn't sent, in memory and in the file. Callers hold output.mutex.
+func (output *cgiOutput) dropLocked() {
+	for _, chunk := range output.chunks {
+		cgiOutputInUse.Add(-int64(len(chunk)))
+	}
+	output.chunks, output.pending = nil, 0
+	cgiOutputFilesInUse.Add(-(output.fileWritten - output.fileRead))
+	output.fileRead, output.fileWritten = 0, 0
+}
+
+// end waits until the sender stops, and removes the temporary file.
+func (output *cgiOutput) end() {
+	output.mutex.Lock()
+	sending := output.sending
+	output.more.Broadcast()
+	output.mutex.Unlock()
+	if sending {
+		<-output.done
+	}
+	output.mutex.Lock()
+	defer output.mutex.Unlock()
+	output.dropLocked() // Nothing is left after a sender that finished; after one that failed, what it didn't send
+	if output.file != nil {
+		_ = output.file.Close()
+		_ = os.Remove(output.file.Name())
+		output.file = nil
+	}
+}
+
+// finish waits until all the output is sent, or writing to the client failed: the CGI is done.
+func (output *cgiOutput) finish() {
+	output.mutex.Lock()
+	output.closed = true
+	output.mutex.Unlock()
+	output.end()
+}
+
+// abort drops what wasn't sent and waits until the sender stops writing: the response was cut, and the handler,
+// which owns the client's writer, is about to end.
+func (output *cgiOutput) abort() {
+	output.cut.Store(true)
+	output.mutex.Lock()
+	output.closed = true
+	if output.err == nil {
+		output.err = errCGIOutputCut
+	}
+	output.dropLocked()
+	output.mutex.Unlock()
+	output.end()
 }
 
 // cgiTempVariables are the variables of the temporary folder that a CGI inherits from Turbo, when they are set:
@@ -2155,7 +2866,11 @@ func shortcutWords(request *customNetHttp.Request, input string, domain string, 
 			result.WriteString(url.QueryEscape(value)) // A host name is left as it is; "/", "?" or "@" can't change the URL
 		case inPath:
 			if placeholder == "REWRITE_COMPLEMENT" { // The path here; a redirection adds the query to the target's
-				value = cutAt(value, '?')
+				// Without the query that the replacer adds: a "?" before it comes from the decoded path (%3F), and is
+				// escaped with the segment
+				if queryStart := strings.IndexByte(request.RequestURI, '?'); queryStart != -1 {
+					value = strings.TrimSuffix(value, request.RequestURI[queryStart:])
+				}
 				addQuery = redirection // An internal target already gets the request's query (CGI, QUERY_STRING)
 			}
 			segments := strings.Split(value, "/")
@@ -2210,6 +2925,9 @@ func parseSiteConfig(configPath string) (parsedConfig, error) {
 	if err = panelSettingsProblem(raw["."]); err != nil {
 		return parsedConfig{}, &configFileError{path: configPath, data: configBytes, err: err}
 	}
+	if err = siteSectionsProblem(raw); err != nil { // Before dropControlChars, which would drop a section that is a string
+		return parsedConfig{}, &configFileError{path: configPath, data: configBytes, err: err}
+	}
 	dropControlChars(raw)
 	schemaRead, err := migrateConfig(raw, configBytes)
 	if err != nil {
@@ -2232,6 +2950,7 @@ func applySiteConfig(config parsedConfig) {
 		return
 	}
 	clearFileSettings()
+	defer publishLoadedDeniedIPs() // The file's denied IPs replace the ones in use at once, when all is applied
 	rawConfigMap = config.raw
 	configSchemaRead = config.schema
 	if configSchemaRead < configSchema {
@@ -2248,19 +2967,29 @@ func applySiteConfig(config parsedConfig) {
 		if _, keyExists = rawConfigMap[configKey]; keyExists { // This is for another kind of lists in config file
 			for _, subKey := range sortedKeys(rawConfigMap[configKey]) {
 				subValue := rawConfigMap[configKey][subKey]
-				stringValue, keyExists = subValue.(string)
+				stringValue, keyExists = configNumberOrString(subValue) // A string, or a JSON integer (the date of a denied IP)
 				if !keyExists {
+					slog.Warn("turbo.config entry discarded: wrong type (a string or an integer is expected)", "list", configKey, "key", subKey)
 					continue
 				}
-				if applied, problem := adminAddHandlers[configKey](subKey, stringValue); !applied && configKey == "_" && !strings.HasSuffix(problem, "unchanged") && problem != "Fixed replacement" {
+				applied, problem := adminAddHandlers[configKey](subKey, stringValue)
+				if applied || strings.HasSuffix(problem, "unchanged") {
+					continue
+				}
+				switch {
+				case configKey == "_" && problem != "Fixed replacement":
 					slog.Warn("turbo.config character replacement discarded", "character", subKey, "replacement", stringValue, "reason", problem)
+				case configKey == "@" && problem != "Expired UNIX date": // An expired denial is no mistake: it ended
+					slog.Warn("turbo.config denied IP discarded", "ip", subKey, "date", stringValue, "reason", problem)
+				case configKey == "#":
+					slog.Warn("turbo.config response discarded", "code", subKey, "reason", problem)
 				}
 			}
 			continue
 		}
 	}
 	if _, keyExists = rawConfigMap["@"]; keyExists {
-		slog.Info("Denied IPs active", "total", len(deniedIPList()))
+		slog.Info("Denied IPs active", "total", len(deniedIPsInUse()))
 	}
 	// The conditions between settings are checked once all of them are in
 	loadingConfig = true
@@ -2300,10 +3029,15 @@ func applySiteConfig(config parsedConfig) {
 			continue
 		}
 		if !siteExistenceCheck(domain, "") {
+			keepDormantFromFile(domain, "") // Its folder may appear later
 			continue
 		}
 		for _, subKey := range sortedKeys(rawConfigMap[domain]) {
-			if _, keyExists = subdomainContentCheckers[subKey]; keyExists || (subKey != "" && !siteExistenceCheck(domain, subKey)) {
+			if _, keyExists = subdomainContentCheckers[subKey]; keyExists {
+				continue
+			}
+			if subKey != "" && !siteExistenceCheck(domain, subKey) {
+				keepDormantFromFile(domain, subKey)
 				continue
 			}
 			subdomainData, keyExists := rawConfigMap[domain][subKey].(map[string]interface{})
@@ -2333,12 +3067,28 @@ func sortedKeys[V any](values map[string]V) []string {
 	return keys
 }
 
+// sortedKeyUnion returns the keys of both maps, each once, in byte order.
+func sortedKeyUnion[V any, W any](a map[string]V, b map[string]W) []string {
+	keys := make([]string, 0, len(a)+len(b))
+	for key := range a {
+		keys = append(keys, key)
+	}
+	for key := range b {
+		if _, inA := a[key]; !inA {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 // clearFileSettings empties, before a turbo.config is applied, everything that comes from it: the sites with
-// their settings and certificates, the denied IPs, and the character replacements and responses that aren't
-// fixed. Callers hold the global lock, and pause the publication of certificates (certificatePublishPaused) until
-// the new ones are loaded.
+// their settings and certificates (also those kept for sites without their folder), the denied IPs, and the
+// character replacements and responses that aren't fixed. Callers hold the global lock, and pause the publication
+// of certificates (certificatePublishPaused) until the new ones are loaded.
 func clearFileSettings() {
 	sitesMap = make(map[string]map[string]map[string]string)
+	dormantSites = make(map[string]map[string]string)
 	siteSSLConfig = make(map[string]map[string]interface{})
 	mimeTypes = make(map[string]map[string]string)
 	customHeaders = make(map[string]map[string]string)
@@ -2346,7 +3096,7 @@ func clearFileSettings() {
 	indexFiles = make(map[string]map[string]int)
 	domainAliases = make(map[string]string)
 	siteCertificates = make(map[string]*tls.Certificate)
-	deniedIPs.Store(&map[string]int64{})
+	deniedIPsLoading = make(map[string]int64) // Published whole when applySiteConfig ends: the list in use stays meanwhile
 	for char := range charReplacements {
 		if !fixedCharReplacements[char] {
 			delete(charReplacements, char)
@@ -2406,8 +3156,9 @@ func scanDiskSites(baseDir string, dirEntries []os.DirEntry) []diskSite {
 	return found
 }
 
-// activateDiskSites activates, with their defaults, the sites found on disk that aren't active yet, and reports
-// whether there was any. Callers hold the global lock.
+// activateDiskSites activates the sites found on disk that aren't active yet, and reports whether there was any:
+// with the settings kept for them if their folder had gone or turbo.config has them (dormantSites), or else with
+// the defaults. Callers hold the global lock.
 func activateDiskSites(found []diskSite, logThem bool) bool {
 	activated := false
 	for _, disk := range found {
@@ -2421,13 +3172,18 @@ func activateDiskSites(found []diskSite, logThem bool) bool {
 			}
 			continue
 		}
-		constructSiteLocked(disk.site, disk.subdomain) // With index.html, as a new site
 		siteKey := disk.site
 		if disk.subdomain != "" {
 			siteKey = disk.subdomain + "." + disk.site
 		}
-		subdomainContentCheckers["!"](false, siteSSLConfig[siteKey], true, disk.site, disk.subdomain)
 		activated = true
+		if kept, dormant := dormantSites[disk.site][disk.subdomain]; dormant {
+			restoreDormantLocked(disk.site, disk.subdomain, kept)
+			slog.Info("Site folder back: the site is activated with its settings", "site", siteKey)
+			continue
+		}
+		constructSiteLocked(disk.site, disk.subdomain) // With index.html, as a new site
+		subdomainContentCheckers["!"](false, siteSSLConfig[siteKey], true, disk.site, disk.subdomain)
 		if logThem {
 			slog.Info("Site created on disk and activated", "site", siteKey)
 		}
@@ -2452,7 +3208,7 @@ func configNumberOrString(value interface{}) (text string, ok bool) {
 // configValueForLog is a value of turbo.config to show in the log: the password and its hash never are.
 func configValueForLog(key string, value interface{}) string {
 	if key == "P" || key == "PH" {
-		return "(oculto)"
+		return "(hidden)"
 	}
 	text := fmt.Sprint(value)
 	if len(text) > 120 {

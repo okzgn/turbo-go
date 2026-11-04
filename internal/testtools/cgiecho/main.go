@@ -10,7 +10,8 @@
 // test uses it, not the test suite). With child=<ms> it leaves a child
 // that inherits its output, waits that long and creates the file childmark=<path>;
 // with childstdin=<ms>, one that inherits its input (not its output). With
-// procstatus=1 it writes the Cap* lines of /proc/self/status (Linux).
+// procstatus=1 it writes the Cap* lines of /proc/self/status (Linux). With
+// env=<NAME,NAME…> it also writes those variables.
 package main
 
 import (
@@ -89,6 +90,11 @@ func main() {
 	keys := []string{"QUERY_STRING", "REDIRECT_STATUS", "SCRIPT_FILENAME", "SCRIPT_NAME", "DOCUMENT_ROOT", "REQUEST_URI", "CONTENT_LENGTH", "HTTP_HOST", "PATH_INFO", "HTTP_COOKIE"}
 	for _, k := range keys {
 		fmt.Printf("%s=%s\n", k, os.Getenv(k))
+	}
+	for _, k := range strings.Split(q.Get("env"), ",") {
+		if k != "" {
+			fmt.Printf("%s=%s\n", k, os.Getenv(k))
+		}
 	}
 	env := os.Environ()
 	sort.Strings(env)

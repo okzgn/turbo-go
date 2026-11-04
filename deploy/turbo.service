@@ -3,7 +3,7 @@
 # Installation (example with the sites in /home/server/):
 #   sudo useradd --system --home-dir /home/server --shell /usr/sbin/nologin turbo
 #   sudo install -o root -g root -m 0755 turbo /usr/local/bin/turbo
-#   sudo mkdir -p /home/server && sudo chown -R turbo:turbo /home/server
+#   sudo mkdir -p /home/server && sudo chown -R turbo:turbo /home/server && sudo chmod 0750 /home/server
 #   sudo install -d -o root -g root -m 0755 /home/server/turbo.dev
 #   sudo install -d -o root -g root -m 0755 /etc/turbo
 #   sudo install -o root -g root -m 0600 /dev/null /etc/turbo/credentials
@@ -33,10 +33,25 @@
 # service. If a site is not trusted, give it another server, or a user of its
 # own behind a proxy.
 #
+# Hardening: what a CGI that has been taken over can do on the rest of the
+# host is limited too. It sees no other home folder than /home/server
+# (ProtectHome with BindPaths), no devices but the pseudo ones, can't create
+# namespaces (a way to attack the kernel), load modules, change the clock,
+# the hostname or kernel settings, use set-user-ID files or sockets other
+# than Unix, IPv4, IPv6 and netlink, nor make system calls outside those of a
+# service (@system-service, plus capget, capset and prctl, which Turbo uses
+# to clear the capabilities of the programs it runs; any other gets EPERM).
+# Files are created without permissions for other users (UMask=0027), and
+# /home/server is 0750. deploy/systemd-test.sh checks the unit and prints
+# its systemd-analyze security score. If a PHP extension needs something
+# else (a system call, an address family), add it with a drop-in
+# (systemctl edit turbo) rather than removing the whole line.
+#
 # If you change the sites directory (M, in the panel) to a folder outside
-# /home/server, also change WorkingDirectory, ReadWritePaths and ReadOnlyPaths
-# here (the turbo.dev of that folder, created by root): otherwise the service
-# can't write there and that turbo.dev is not read-only.
+# /home/server, also change WorkingDirectory, BindPaths, ReadWritePaths and
+# ReadOnlyPaths here (the turbo.dev of that folder, created by root):
+# otherwise the service can't see or write there, and that turbo.dev is not
+# read-only.
 #
 # On stop (systemctl stop), systemd sends SIGTERM only to Turbo (KillMode=mixed),
 # which lets the requests in progress, the CGIs' included, finish for up to
@@ -84,6 +99,26 @@ ProtectSystem=strict
 ReadWritePaths=/home/server/
 ReadOnlyPaths=/home/server/turbo.dev
 PrivateTmp=true
+UMask=0027
+ProtectHome=tmpfs
+BindPaths=/home/server
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=capget capset prctl
+SystemCallErrorNumber=EPERM
 KillMode=mixed
 Restart=on-failure
 RestartSec=5

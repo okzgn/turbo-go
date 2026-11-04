@@ -102,7 +102,9 @@ func console(responseWriter customNetHttp.ResponseWriter, request *customNetHttp
 	if request.TLS == nil && panelHTTPSRedirect(responseWriter, request) {
 		return true
 	}
-	if request.TLS != nil && panelAccess.Load().hosts[requestHostName(request.Host)] { // Its own host: always HTTPS
+	// Its own host, while a certificate covers it: always HTTPS. Without one (cfgPC a=0 sent max-age=0), a request on a
+	// connection still open, or a TLS session resumed, would set it again for a year, with no HTTPS to come back to.
+	if hostName := requestHostName(request.Host); request.TLS != nil && panelAccess.Load().hosts[hostName] && certificateFor(hostName) != nil {
 		panelHeaders.Set("Strict-Transport-Security", "max-age=31536000")
 	}
 
@@ -204,8 +206,13 @@ const (
 	sessionCookieNameTLS = "__Host-turbo_session"
 )
 
-// sessionLifetime is how long a session lasts without requests.
-const sessionLifetime = 600
+// sessionLifetime is how long a session lasts without requests, and sessionMaxLifetime how long it lasts at most,
+// however it is used: a copy of a token (a cookie stolen from the same IP) isn't kept alive forever by requesting
+// something every few minutes.
+const (
+	sessionLifetime    = 600
+	sessionMaxLifetime = 12 * 3600
+)
 
 // loginMaxBodyBytes bounds the body of a login, which is read before anything is checked.
 const loginMaxBodyBytes = 4096
@@ -272,7 +279,11 @@ func renewSession(key string, request *customNetHttp.Request) {
 	now := time.Now().Unix()
 	withGlobalLock(func() {
 		if expiry, found := signedInTokens[key]; found && expiry > now {
-			signedInTokens[key] = now + sessionLifetime
+			renewed := now + sessionLifetime
+			if deadline, bounded := sessionDeadlines[key]; bounded && renewed > deadline {
+				renewed = deadline // Never past sessionMaxLifetime from the login
+			}
+			signedInTokens[key] = renewed
 		}
 	})
 }
@@ -283,8 +294,30 @@ func closeOtherSessions(keep string) {
 	for key := range signedInTokens {
 		if key != keep {
 			delete(signedInTokens, key)
+			delete(sessionDeadlines, key)
 		}
 	}
+}
+
+// openSessionLocked opens a session for clientIP and returns its token. Callers hold the global lock.
+func openSessionLocked(clientIP string) string {
+	token := newSessionToken()
+	now := time.Now().Unix()
+	key := sessionKey(clientIP, token)
+	signedInTokens[key] = now + sessionLifetime
+	sessionDeadlines[key] = now + sessionMaxLifetime
+	return token
+}
+
+// renewCredentialsSessionLocked closes every session, the one of request too, after the panel's credentials change,
+// and opens a new one for its client, whose token goes in the answer: in the cookie, which the browser replaces, and
+// in the "ok" header, for API clients. A copy of the old token (a cookie stolen from the same IP, which the session
+// of setU or setP kept until now) is then worth nothing. Callers hold the global lock.
+func renewCredentialsSessionLocked(responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request) {
+	closeOtherSessions("")
+	token := openSessionLocked(ipAddr(request.RemoteAddr))
+	responseWriter.Header().Add("Set-Cookie", sessionCookie(token, false, request))
+	responseWriter.Header().Set(sessionHeaderName, token)
 }
 
 // sameOriginRequest reports whether the browser says the request comes from the panel's own origin. The
@@ -328,7 +361,7 @@ func consoleActions(actionPath string, responseWriter customNetHttp.ResponseWrit
 			return true
 		}
 		if isSessionValid {
-			withGlobalLock(func() { delete(signedInTokens, currentSession) })
+			withGlobalLock(func() { delete(signedInTokens, currentSession); delete(sessionDeadlines, currentSession) })
 		}
 		responseWriter.Header().Add("Set-Cookie", sessionCookie("", true, request))
 
@@ -384,7 +417,7 @@ func consoleActions(actionPath string, responseWriter customNetHttp.ResponseWrit
 				reqMsg(responseWriter, 429)
 				return true
 			}
-			loginOK, busy := checkLogin(request.PostForm["u"][0], request.PostForm["p"][0], passwordSlotWait)
+			loginOK, busy := checkLogin(request.PostForm["u"][0], request.PostForm["p"][0], passwordSlotWait, inPanelNetworks(clientIP))
 			if busy {
 				finishLoginAttempt(clientIP, false)
 				responseWriter.Header().Set("Retry-After", "2")
@@ -394,12 +427,8 @@ func consoleActions(actionPath string, responseWriter customNetHttp.ResponseWrit
 			if loginOK {
 				finishLoginAttempt(clientIP, false)
 				forgetLoginFailures(clientIP)
-				now := time.Now().Unix()
-				token := newSessionToken()
-
-				globalMutex.Lock()
-				signedInTokens[sessionKey(clientIP, token)] = now + sessionLifetime
-				globalMutex.Unlock()
+				var token string
+				withGlobalLock(func() { token = openSessionLocked(clientIP) })
 				// The browser panel uses the cookie; API clients send the token in the "ok" header.
 				responseWriter.Header().Add("Set-Cookie", sessionCookie(token, false, request))
 				respond(responseWriter, sessionHeaderName+token)
@@ -436,60 +465,86 @@ var (
 	loginFailuresByIP  = make(map[string]*loginFailures)
 )
 
+// loginMaxNetworkFailures is how many failed logins the /64s of an IPv6 /48 may make together within
+// loginFailureWindow: a /48, which a tunnel broker gives away, is 65 536 /64s, each with its own loginMaxFailures.
+const loginMaxNetworkFailures = 20
+
+// loginLimit is a count of failed logins and its limit: that of the client (an IPv4 address or an IPv6 /64), or
+// that of its IPv6 /48.
+type loginLimit struct {
+	key string
+	max int
+}
+
+// loginLimits are the counts a login attempt of ip goes into.
+func loginLimits(ip string) []loginLimit {
+	limits := []loginLimit{{limiterKey(ip), loginMaxFailures}}
+	if parsed := net.ParseIP(ip); parsed != nil && parsed.To4() == nil {
+		limits = append(limits, loginLimit{parsed.Mask(net.CIDRMask(48, 128)).String() + "/48", loginMaxNetworkFailures})
+	}
+	return limits
+}
+
 // startLoginAttempt starts a login attempt of ip, which finishLoginAttempt must end, and returns 0; or, without
-// starting it, the seconds to wait: what is left of its block, or passwordSlotWait while the failures and the
-// attempts being checked already reach loginMaxFailures.
+// starting it, the seconds to wait: what is left of a block of its client or of its /48, or passwordSlotWait while
+// the failures and the attempts being checked already reach their limit.
 func startLoginAttempt(ip string) int64 {
-	ip = limiterKey(ip)
+	limits := loginLimits(ip)
 	loginFailuresMutex.Lock()
 	defer loginFailuresMutex.Unlock()
 	now := time.Now()
-	failures, found := loginFailuresByIP[ip]
-	if !found {
-		failures = &loginFailures{}
-		loginFailuresByIP[ip] = failures
+	for _, limit := range limits {
+		failures, found := loginFailuresByIP[limit.key]
+		if !found {
+			failures = &loginFailures{}
+			loginFailuresByIP[limit.key] = failures
+		}
+		if left := failures.blockedUntil.Sub(now); left > 0 {
+			return int64((left + time.Second - 1) / time.Second)
+		}
+		if now.After(failures.windowEnd) {
+			failures.count = 0 // The next failure opens a new window
+		}
+		if failures.count+failures.inFlight >= limit.max {
+			return int64(passwordSlotWait / time.Second)
+		}
 	}
-	if left := failures.blockedUntil.Sub(now); left > 0 {
-		return int64((left + time.Second - 1) / time.Second)
+	for _, limit := range limits {
+		loginFailuresByIP[limit.key].inFlight++
 	}
-	if now.After(failures.windowEnd) {
-		failures.count = 0 // The next failure opens a new window
-	}
-	if failures.count+failures.inFlight >= loginMaxFailures {
-		return int64(passwordSlotWait / time.Second)
-	}
-	failures.inFlight++
 	return 0
 }
 
 // finishLoginAttempt ends an attempt of ip started by startLoginAttempt and, if it failed, counts the failure and
-// blocks ip when it reaches loginMaxFailures.
+// blocks its client, or its /48, when it reaches the limit.
 func finishLoginAttempt(ip string, failed bool) {
-	ip = limiterKey(ip)
 	loginFailuresMutex.Lock()
 	defer loginFailuresMutex.Unlock()
-	failures, found := loginFailuresByIP[ip]
-	if !found {
-		return
-	}
-	failures.inFlight = max(failures.inFlight-1, 0)
-	if !failed {
-		return
-	}
 	now := time.Now()
-	if now.After(failures.windowEnd) {
-		failures.count, failures.windowEnd = 0, now.Add(loginFailureWindow)
+	for _, limit := range loginLimits(ip) {
+		failures, found := loginFailuresByIP[limit.key]
+		if !found {
+			continue
+		}
+		failures.inFlight = max(failures.inFlight-1, 0)
+		if !failed {
+			continue
+		}
+		if now.After(failures.windowEnd) {
+			failures.count, failures.windowEnd = 0, now.Add(loginFailureWindow)
+		}
+		if failures.count++; failures.count < limit.max {
+			continue
+		}
+		block := min(loginFirstBlock<<min(failures.blocks, 4), loginLongestBlock)
+		failures.blocks++
+		failures.count, failures.windowEnd, failures.blockedUntil = 0, now, now.Add(block)
+		serverWriteLogs(denialsLogName, nil, 0, limit.key+" login denial "+block.String())
 	}
-	if failures.count++; failures.count < loginMaxFailures {
-		return
-	}
-	block := min(loginFirstBlock<<min(failures.blocks, 4), loginLongestBlock)
-	failures.blocks++
-	failures.count, failures.windowEnd, failures.blockedUntil = 0, now, now.Add(block)
-	serverWriteLogs(denialsLogName, nil, 0, ip+" login denial "+block.String())
 }
 
-// forgetLoginFailures clears the failed logins of ip after a correct one.
+// forgetLoginFailures clears the failed logins of the client of ip after a correct one (not those of its /48,
+// which other clients may share).
 func forgetLoginFailures(ip string) {
 	ip = limiterKey(ip)
 	loginFailuresMutex.Lock()
@@ -510,11 +565,22 @@ func cleanLoginFailures() {
 	}
 }
 
-// warnDefaultCredentials logs when the panel still has the default username and password.
+// warnDefaultCredentials logs when the panel still has the default password, with the default username or another
+// one (TURBO_USER alone leaves the password Admin).
 func warnDefaultCredentials() {
-	if panelUser.Get() == "Turbo" && passwordMatches("Admin") {
+	switch {
+	case !passwordMatches("Admin"):
+	case panelUser.Get() == "Turbo":
 		slog.Warn("The default credentials (Turbo/Admin) are in use: change them from the panel or with TURBO_USER and TURBO_PASSWORD.")
+	default:
+		slog.Warn("The default password (Admin) is in use: change it from the panel or with TURBO_PASSWORD.")
 	}
+}
+
+// panelUserValid says whether a panel username can be used and saved as "U": 1 to 24 characters, without control
+// characters, as setU and turbo.config take it.
+func panelUserValid(user string) bool {
+	return len(user) >= 1 && len(user) <= 24 && textAllowed(user, false)
 }
 
 func consoleHTMLRedir(redirectURL string, responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request) {
@@ -585,10 +651,11 @@ func parsePanelAccess(setting string) (*panelAccessList, string) {
 	return list, ""
 }
 
-// isClientIP reports whether ip is the address the request comes from.
+// isClientIP reports whether denying ip would deny the address the request comes from: it is that address, or an
+// IPv6 address of its /64, which a denial covers (deniedUntil).
 func isClientIP(ip string, request *customNetHttp.Request) bool {
 	denied := net.ParseIP(strings.TrimSpace(ip))
-	return denied != nil && denied.Equal(net.ParseIP(ipAddr(request.RemoteAddr)))
+	return denied != nil && limiterKey(ipAddr(denied.String())) == limiterKey(ipAddr(request.RemoteAddr))
 }
 
 // panelAllowed reports whether the panel answers this request under "PA": on one of its hosts, if it has any,
@@ -608,6 +675,12 @@ func panelAccessProblem(list *panelAccessList, request *customNetHttp.Request) s
 	}
 	if len(list.networks) == 0 {
 		return ""
+	}
+	// With networks and no host, the panel answers on an IP address or localhost, which no other page can take: a
+	// page of any name that the browser of someone in those networks loads, and whose name then resolves to Turbo
+	// (DNS rebinding), would otherwise reach the panel from them, on its own origin.
+	if _, notAddress := netip.ParseAddr(hostName); len(list.hosts) == 0 && notAddress != nil && hostName != "localhost" {
+		return "the host " + hostName + " is a name, and PA only has networks: use an IP address, or add the host to PA"
 	}
 	clientIP := net.ParseIP(ipAddr(request.RemoteAddr))
 	for _, network := range list.networks {
@@ -649,7 +722,9 @@ func panelHostServedBy(siteKey string) string {
 // serves a site (accepted from turbo.config, so as not to break it). Callers hold the global read lock.
 func warnPanelOrigin() {
 	list := panelAccess.Load()
-	if len(list.hosts) == 0 {
+	if len(list.hosts) == 0 && len(list.networks) > 0 {
+		slog.Warn("PA only has networks: the panel answers on IP addresses and localhost, not on host names. Set a host dedicated to the panel in PA to reach it by name.")
+	} else if len(list.hosts) == 0 {
 		slog.Warn("The panel answers on the same hosts as the sites: a page served by Turbo could use its session. Set a host dedicated to the panel in PA.")
 	} else if conflict := panelHostConflict(list); conflict != "" {
 		slog.Warn(conflict + " (PA of turbo.config: kept, but the panel shares its origin with that site)")
@@ -686,12 +761,14 @@ func parsePasswordHash(hash string) (iterations int, salt []byte, key []byte, ok
 	if err != nil || iterations < 1 || iterations > 10000000 {
 		return 0, nil, nil, false
 	}
+	// Bounded: each login derives a key of this length (a PBKDF2 per 32 bytes), so a "PH" with a huge key would make
+	// every failed login cost minutes. hashPassword writes 16 bytes of salt and 32 of key.
 	salt, err = base64.StdEncoding.DecodeString(parts[2])
-	if err != nil || len(salt) < 8 {
+	if err != nil || len(salt) < 8 || len(salt) > 64 {
 		return 0, nil, nil, false
 	}
 	key, err = base64.StdEncoding.DecodeString(parts[3])
-	if err != nil || len(key) < 16 {
+	if err != nil || len(key) < 16 || len(key) > 64 {
 		return 0, nil, nil, false
 	}
 	return iterations, salt, key, true
@@ -719,8 +796,8 @@ func applyPasswordHash(hash string, password string) {
 // newPasswordHash checks a new panel password and returns its hash, or why it can't be used (problem), or the
 // error that kept it from being hashed. It costs two PBKDF2, so setP runs it before taking the global lock.
 func newPasswordHash(password string) (hash string, problem string, err error) {
-	if length := len(password); length < 1 || length > 24 {
-		return "", "Password too long or too short", nil
+	if length := len(password); length < minNewPasswordBytes || length > maxPasswordBytes {
+		return "", "The password must have " + strconv.Itoa(minNewPasswordBytes) + " to " + strconv.Itoa(maxPasswordBytes) + " bytes", nil
 	}
 	if passwordMatches(password) {
 		return "", "Password unchanged", nil
@@ -733,32 +810,85 @@ func newPasswordHash(password string) (hash string, problem string, err error) {
 // a flood of logins can't keep the administrator waiting without limit.
 const passwordSlotWait = 2 * time.Second
 
+// minNewPasswordBytes and maxPasswordBytes bound the length of a password: a new one (setP) needs at least
+// minNewPasswordBytes, as the failed-login limits only slow down guessing a short one; one already in use
+// (turbo.config, TURBO_PASSWORD) keeps working, with a warning at startup if it is shorter.
+const (
+	minNewPasswordBytes = 12
+	maxPasswordBytes    = 64
+)
+
+// passwordReservedSlot is a PBKDF2 slot kept for the password checks of the requests with a panel session (the
+// current password of an action) and of the logins from the networks of PA: a flood of logins from elsewhere, which
+// takes the other slots, doesn't keep the administrator out (503).
+var passwordReservedSlot = make(chan struct{}, 1)
+
+// acquirePasswordSlot takes a PBKDF2 slot, waiting at most wait (0: as long as needed); priority callers may also
+// take passwordReservedSlot. It returns how to give it back, or false if there was none in time.
+func acquirePasswordSlot(wait time.Duration, priority bool) (release func(), acquired bool) {
+	slots, reserved := passwordHashSlots, passwordReservedSlot
+	normal := func() { <-slots }
+	if wait == 0 {
+		slots <- struct{}{}
+		return normal, true
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	if priority {
+		select {
+		case slots <- struct{}{}:
+			return normal, true
+		case reserved <- struct{}{}:
+			return func() { <-reserved }, true
+		case <-timer.C:
+			return nil, false
+		}
+	}
+	select {
+	case slots <- struct{}{}:
+		return normal, true
+	case <-timer.C:
+		return nil, false
+	}
+}
+
+// inPanelNetworks reports whether ip is in one of the networks of PA (false without networks).
+func inPanelNetworks(ip string) bool {
+	parsed := net.ParseIP(ip)
+	for _, network := range panelAccess.Load().networks {
+		if parsed != nil && network.Contains(parsed) {
+			return true
+		}
+	}
+	return false
+}
+
 // passwordMatches reports whether password is the panel's (or internalAuth), comparing in constant time. It
 // waits for a PBKDF2 slot as long as needed.
 func passwordMatches(password string) bool {
-	matches, _ := checkPassword(password, 0)
+	matches, _ := checkPassword(password, 0, false)
 	return matches
 }
 
-// checkPassword is passwordMatches waiting at most wait for a PBKDF2 slot (0: as long as needed). busy reports
-// that there was none in time, and then matches is false.
-func checkPassword(password string, wait time.Duration) (matches bool, busy bool) {
+// checkPassword is passwordMatches waiting at most wait for a PBKDF2 slot (0: as long as needed), the reserved one
+// too with priority. busy reports that there was none in time, and then matches is false.
+func checkPassword(password string, wait time.Duration, priority bool) (matches bool, busy bool) {
 	if subtle.ConstantTimeCompare([]byte(password), []byte(internalAuth)) == 1 {
 		return true, false
 	}
-	return derivePasswordCheck(password, wait, true)
+	return derivePasswordCheck(password, wait, true, priority)
 }
 
 // checkLogin is checkPassword for a login: both the username and the password must match. Only a pair that
 // already matched skips the PBKDF2, so a wrong username costs the same as a wrong password.
-func checkLogin(user string, password string, wait time.Duration) (matches bool, busy bool) {
+func checkLogin(user string, password string, wait time.Duration, priority bool) (matches bool, busy bool) {
 	userMatches := subtle.ConstantTimeCompare([]byte(user), []byte(panelUser.Get())) == 1
 	hash := panelPasswordHash.Get()
 	sum := sha256.Sum256([]byte(hash + "\x00" + user + "\x00" + password))
 	if last := verifiedLogin.Load(); userMatches && last != nil && last.hash == hash && subtle.ConstantTimeCompare(last.sum[:], sum[:]) == 1 {
 		return true, false
 	}
-	passwordOK, busy := derivePasswordCheck(password, wait, false)
+	passwordOK, busy := derivePasswordCheck(password, wait, false, priority)
 	if passwordOK && userMatches {
 		verifiedLogin.Store(&passwordCheck{hash, sum})
 	}
@@ -766,8 +896,8 @@ func checkLogin(user string, password string, wait time.Duration) (matches bool,
 }
 
 // derivePasswordCheck compares password with panelPasswordHash. With useCache, the last password that matched is
-// accepted without a PBKDF2.
-func derivePasswordCheck(password string, wait time.Duration, useCache bool) (matches bool, busy bool) {
+// accepted without a PBKDF2; with priority, the reserved PBKDF2 slot may be used.
+func derivePasswordCheck(password string, wait time.Duration, useCache bool, priority bool) (matches bool, busy bool) {
 	// PBKDF2 uses the password as an HMAC key, padded with zeros: "x" and "x\x00" would match the same hash. No
 	// password can have a NUL (the panel rejects control characters, and an environment variable can't hold one).
 	if strings.IndexByte(password, 0) != -1 {
@@ -782,19 +912,12 @@ func derivePasswordCheck(password string, wait time.Duration, useCache bool) (ma
 	if !ok {
 		return false, false
 	}
-	if wait == 0 {
-		passwordHashSlots <- struct{}{}
-	} else {
-		timer := time.NewTimer(wait)
-		defer timer.Stop()
-		select {
-		case passwordHashSlots <- struct{}{}:
-		case <-timer.C:
-			return false, true
-		}
+	release, acquired := acquirePasswordSlot(wait, priority)
+	if !acquired {
+		return false, true
 	}
 	derived, err := derivePasswordKey(password, salt, iterations, len(key))
-	<-passwordHashSlots
+	release()
 	if err != nil || subtle.ConstantTimeCompare(derived, key) != 1 {
 		return false, false
 	}
@@ -856,27 +979,35 @@ const (
 // charsDecodedByValidator lists, per action, the parameters whose character replacements its validator undoes
 // itself; undoCharReplacements undoes them in all the others.
 var charsDecodedByValidator = map[string]map[string]bool{
-	"addRewrite": {"a": true, "b": true}, "addMIME": {"b": true}, "addHeader": {"b": true}, "addPreprocessor": {"b": true},
+	"addRewrite": {"a": true, "b": true}, "addMIME": {"b": true}, "addHeader": {"b": true},
 	"addIndex": {"a": true}, "delRewrite": {"a": true}, "delIndex": {"a": true},
 }
 
-// credentialParams are the parameters of the panel actions that carry a password besides those of set<KEY> (b):
-// the current password of the dangerous actions (dangerousActionPasswordOK) and the new username or password.
-var credentialParams = map[string]map[string]bool{
-	"setU": {"a": true}, "setP": {"a": true}, "addPreprocessor": {"c": true}, "delPreprocessor": {"b": true}, "delSite": {"b": true},
-	"cfgC": {"b": true}, "cfgPC": {"b": true},
+// literalActions are the panel actions whose parameters are all used exactly as sent, without undoing the
+// character replacements: those that need the current password (with set<KEY> and cfg<KEY>, which all take theirs
+// as sent), and those that change the replacements or the error templates. A replacement whose token is a site's or
+// an extension's name, or part of a path, would otherwise change what a password confirms: delSite deleted another
+// site, delPreprocessor another extension's preprocessor (its files then served as text), and addPreprocessor saved
+// another program. hardUpload doesn't come here: none of its parameters are replaced.
+var literalActions = map[string]bool{
+	"addPreprocessor": true, "delPreprocessor": true, "delSite": true,
+	"addCharsReplace": true, "delCharsReplace": true, "addHttpCodeResponse": true, "delHttpCodeResponse": true,
+	"closeSessions": true,
 }
 
 // undoCharReplacements turns the character replacements of §2.1 of the API ("-.-" for ";" and the rest) back
-// into their characters in every parameter of a panel action, once, before the action reads them. The
-// credentials are never touched: the current password (b of the settings, and the parameter of the dangerous
-// actions) and the new username or password are used exactly as they come, as a token can't be told from text
-// typed on purpose. (hardUpload doesn't come here: none of its parameters are replaced.)
+// into their characters in the parameters of a panel action, once, before the action reads them. The actions of
+// literalActions, set<KEY> and cfg<KEY> are left as they come, and so are the site and the subdomain (s, d) of
+// every action: a host name has no character that needs a replacement, and a token can't be told from a name typed
+// on purpose.
 func undoCharReplacements(request *customNetHttp.Request, apiPath string) {
+	if literalActions[apiPath] || strings.HasPrefix(apiPath, "set") || strings.HasPrefix(apiPath, "cfg") {
+		return
+	}
 	globalMutex.RLock() // charReplacements
 	defer globalMutex.RUnlock()
 	for name, values := range request.Form {
-		if charsDecodedByValidator[apiPath][name] || credentialParams[apiPath][name] || (strings.HasPrefix(apiPath, "set") && name == "b") {
+		if name == "s" || name == "d" || charsDecodedByValidator[apiPath][name] {
 			continue
 		}
 		for i := range values {
@@ -938,6 +1069,7 @@ func addSite(domain string) (bool, string) {
 		deleteSiteLocked(domain, "")
 		return false, "Error creating"
 	}
+	forgetDormantLocked(domain, "") // A site created from the panel starts anew, its subdomains too
 	return true, "Site added"
 }
 
@@ -968,6 +1100,7 @@ func addSubdomain(domain string, subdomain string) (bool, string) {
 		deleteSiteLocked(domain, subdomain)
 		return false, "Error creating"
 	}
+	forgetDormantLocked(domain, subdomain) // A subdomain created from the panel starts anew
 	return true, "Subdomain added"
 }
 
@@ -981,7 +1114,7 @@ func currentPasswordOK(responseWriter customNetHttp.ResponseWriter, request *cus
 		reqMsg(responseWriter, 429)
 		return false
 	}
-	matches, busy := checkPassword(password, passwordSlotWait)
+	matches, busy := checkPassword(password, passwordSlotWait, true) // The request has a session: the reserved slot too
 	finishLoginAttempt(clientIP, !matches && !busy)
 	if busy {
 		responseWriter.Header().Set("Retry-After", "2")
@@ -1145,10 +1278,17 @@ func setSitesDir(value string, currentSession string) (bool, string) {
 	if info, err := os.Stat(resolved); err != nil || !info.IsDir() {
 		return false, "Sites directory not found"
 	}
+	// Listed before anything changes: one whose sites can't be listed (permissions that only let it be crossed)
+	// would leave the server without sites until "M" is set back.
+	if _, err := os.ReadDir(resolved); err != nil {
+		return false, "Sites directory can't be read"
+	}
 	if sameDir(resolved, sitesDir.Get()) {
 		return false, "Sites directory unchanged"
 	}
-	if err := configFileProblem(resolved); err != nil {
+	// The turbo.config there and every directory it leads to, before anything changes: resetSettings below empties
+	// the configuration in use, and a chain that can't be followed left the sites with the defaults.
+	if err := configFileProblem(resolved, sameDir(resolved, startDir)); err != nil {
 		return false, "The sites directory is not changed. " + configErrorMessage(err, false)
 	}
 	settingsUpdateMutex.Lock()
@@ -1200,9 +1340,11 @@ func setSitesDir(value string, currentSession string) (bool, string) {
 }
 
 // dangerousActionPasswordOK checks the current password that an action able to run programs on the server, to
-// serve the source of a site's scripts, or to delete a site's files or a certificate needs besides the session
-// (addPreprocessor, delPreprocessor, hardUpload, delSite, and cfgC and cfgPC with a=0), sent in param of values: missing, 400; wrong, it counts as a failed login, as in set<KEY>.
-// It reports whether to go on.
+// serve the source of a site's scripts, to delete a site's files or a certificate, to change what every site
+// serves or what the panel's actions read, or to close every session needs besides the session (addPreprocessor,
+// delPreprocessor, hardUpload, delSite, cfgC and cfgPC with a=0, add/del of HttpCodeResponse and CharsReplace, and
+// closeSessions), sent in param of values: missing, 400; wrong, it counts as a failed login, as in set<KEY>. A
+// stolen session alone can do none of these. It reports whether to go on.
 func dangerousActionPasswordOK(responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request, values map[string][]string, param string) bool {
 	password, sent := values[param]
 	if !sent || len(password) == 0 {
@@ -1262,7 +1404,11 @@ func consoleActionsAPI(apiPath string, currentSession string, responseWriter cus
 					return true
 				}
 				if apiPath == "M" { // Nothing of the new directory is read before the password matched
+					credentials := panelUser.Get() + "\x00" + panelPasswordHash.Get()
 					if applied, message := setSitesDir(argumentList[0], currentSession); applied {
+						if panelUser.Get()+"\x00"+panelPasswordHash.Get() != credentials { // Those of the new directory: as with setU and setP
+							withGlobalLock(func() { renewCredentialsSessionLocked(responseWriter, request) })
+						}
 						respond(responseWriter, message)
 					} else {
 						badReq(responseWriter, request, message)
@@ -1304,8 +1450,8 @@ func consoleActionsAPI(apiPath string, currentSession string, responseWriter cus
 						}
 					}
 					ok, msg := defaultSettingValidators["."][apiPath](argumentList...)
-					if ok && (apiPath == "U" || apiPath == "P") { // New credentials: the other sessions end
-						closeOtherSessions(currentSession)
+					if ok && (apiPath == "U" || apiPath == "P") { // New credentials: every session ends, and this client gets a new one
+						renewCredentialsSessionLocked(responseWriter, request)
 					}
 					return ok, msg
 				})
@@ -1334,10 +1480,8 @@ func consoleActionsAPI(apiPath string, currentSession string, responseWriter cus
 					return true
 				}
 				look := newDiskLook()
-				if apiPath == "Preprocessor" { // The disk is looked at before taking the lock
-					var value string
-					withReadLock(func() { value = replaceURIChars(request.Form["b"][0]) })
-					if executable, problem := preprocessorCommand(value); problem == "" {
+				if apiPath == "Preprocessor" { // The disk is looked at before taking the lock; the path is used as sent (literalActions)
+					if executable, problem := preprocessorCommand(request.Form["b"][0]); problem == "" {
 						look.stat(executable)
 						if looked := look.stats[executable]; looked.err != nil {
 							badReq(responseWriter, request, "Preprocessor not found")
@@ -1431,6 +1575,9 @@ func consoleActionsAPI(apiPath string, currentSession string, responseWriter cus
 			_, sourceParamExists := request.Form["s"]
 			_, destinationParamExists := request.Form["d"]
 			if sourceParamExists && destinationParamExists {
+				if apiPath != "Denied" && !dangerousActionPasswordOK(responseWriter, request, request.Form, "b") {
+					return true
+				}
 				kind := "#" // The key of the handler: responses
 				switch apiPath[0] {
 				case 'C':
@@ -1507,9 +1654,12 @@ func consoleActionsAPI(apiPath string, currentSession string, responseWriter cus
 				if isSubdomain {
 					what = "Subdomain"
 				}
-				var exists bool
-				withReadLock(func() { exists = siteExists(request.Form["s"][0], request.Form["d"][0]) })
-				if !exists {
+				var exists, kept bool
+				withReadLock(func() {
+					exists = siteExists(request.Form["s"][0], request.Form["d"][0])
+					_, kept = dormantSites[request.Form["s"][0]][request.Form["d"][0]] // Its folder isn't there: what is kept of it
+				})
+				if !exists && !kept {
 					badReq(responseWriter, request, what+" not found")
 					return true
 				}
@@ -1532,6 +1682,9 @@ func consoleActionsAPI(apiPath string, currentSession string, responseWriter cus
 		case "Denied", "HttpCodeResponse", "CharsReplace":
 			_, sourceParamExists := request.Form["s"]
 			if sourceParamExists {
+				if apiPath != "Denied" && !dangerousActionPasswordOK(responseWriter, request, request.Form, "b") {
+					return true
+				}
 				kind := "#" // The key of the handler: responses
 				switch apiPath[0] {
 				case 'C':
@@ -1666,6 +1819,18 @@ func consoleActionsAPI(apiPath string, currentSession string, responseWriter cus
 				responseWriter.WriteHeader(status)
 			}
 			respond(responseWriter, message)
+			return true
+
+		case "closeSessions":
+			// Every session ends, the request's own too, and its client gets a new one, as when the credentials
+			// change: a copy of a token (a cookie taken from the same IP) is then worth nothing. It needs the
+			// password, so that a stolen session can't close the administrator's.
+			if !dangerousActionPasswordOK(responseWriter, request, request.Form, "b") {
+				return true
+			}
+			withGlobalLock(func() { renewCredentialsSessionLocked(responseWriter, request) })
+			slog.Info("Every session of the panel closed from the panel", "ip", ipAddr(request.RemoteAddr))
+			respond(responseWriter, "Every session closed: this one goes on with a new token")
 			return true
 
 		case "sites":

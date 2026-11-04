@@ -132,12 +132,12 @@ func TestR_RealisticRace(t *testing.T) {
 			// templates while the server reads them (Server header, Error, ErrorD).
 			// The credentials alternate between two values so that each set* really
 			// writes (with the same value they would answer 400 and change nothing).
-			newUser, newPassword := "Turbo2", "Admin2"
+			newUser, newPassword := "Turbo2", "AdminPassword2"
 			if user == newUser {
 				newUser = "Turbo"
 			}
 			if password == newPassword {
-				newPassword = "Admin"
+				newPassword = "AdminPassword1"
 			}
 			for _, change := range []struct {
 				path    string
@@ -147,8 +147,9 @@ func TestR_RealisticRace(t *testing.T) {
 				{"/admin:inside:setU?a=" + newUser + "&b=" + password, &user, newUser},
 				{"/admin:inside:setP?a=" + newPassword + "&b=" + password, &password, newPassword},
 			} {
-				if code, body, err := post(base, change.path, tok); err == nil && code == 200 {
+				if code, body, renewed, err := postSession(base, change.path, tok); err == nil && code == 200 {
 					*change.current = change.value
+					tok = renewed // setU and setP renew the session
 					credentialsWritten.Add(1)
 				} else {
 					if credentialsRejected.Add(1) == 1 {
@@ -157,7 +158,7 @@ func TestR_RealisticRace(t *testing.T) {
 				}
 			}
 			post(base, "/admin:inside:setM?b="+password+"&a="+url.QueryEscape(dir), tok)
-			post(base, "/admin:inside:addHttpCodeResponse?s=404&d=Not+found+"+strconv.Itoa(i), tok)
+			post(base, "/admin:inside:addHttpCodeResponse?s=404&d=Not+found+"+strconv.Itoa(i)+"&b="+password, tok)
 			time.Sleep(20 * time.Millisecond)
 		}
 	}()

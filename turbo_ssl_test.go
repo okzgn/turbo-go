@@ -14,6 +14,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -366,5 +367,118 @@ func TestW_SSL_RenewalSubdomains(t *testing.T) {
 	}
 	if !strings.Contains(string(calls), "turbo.certificates/old.r.test") {
 		t.Errorf("the renewal does not use the subdomain's own folder:\n%s", calls)
+	}
+}
+
+// Review of 57cbb3c, S6, and production review, M-01: the error lines that anyone can make the servers or the CGIs
+// write, one per connection or per frame (failed TLS handshakes, bogus HTTP/2 prefaces, GOAWAY frames with an
+// error, a client gone from a CGI), are written once at once and then at most once a minute per kind, with the
+// count and the last one; kinds don't hide one another.
+func TestRL_S6_ConnectionErrorsCounted(t *testing.T) {
+	logs := captureLog(t)
+	errorLog := &aggregatedLog{}
+	t.Cleanup(func() { errorLog.flush() })
+	kinds := map[string]func(n int) string{
+		"handshake": func(n int) string {
+			return "http: TLS handshake error from 192.0.2.1:" + strconv.Itoa(1000+n) + ": EOF"
+		},
+		"preface": func(n int) string {
+			return "http2: server: error reading preface from client 192.0.2.1:" + strconv.Itoa(n) + ": bogus greeting"
+		},
+		"goaway": func(n int) string {
+			return "http2: received GOAWAY [FrameHeader GOAWAY len=8], starting graceful shutdown"
+		},
+		"cgi": func(n int) string {
+			return "cgi: copy error: write tcp 127.0.0.1:80->192.0.2.1:" + strconv.Itoa(n) + ": broken pipe"
+		},
+	}
+	for i := 0; i < 1000; i++ {
+		for _, line := range kinds {
+			errorLog.Write([]byte(line(i) + "\n"))
+		}
+	}
+	if got := strings.Count(logs.String(), "\n"); got != len(kinds) {
+		t.Errorf("1000 lines of each of %d kinds in a moment: %d lines written; expected one per kind\n%s", len(kinds), got, logs.String())
+	}
+	errorLog.flush() // What the timer does a minute later
+	if got := strings.Count(logs.String(), "count=999"); got != len(kinds) {
+		t.Errorf("after the minute: %d lines with the 999 counted; expected one per kind\n%s", got, logs.String())
+	}
+	errorLog.mutex.Lock()
+	pending := errorLog.timer != nil
+	errorLog.mutex.Unlock()
+	if pending {
+		t.Error("the timer is still set after writing the lines counted")
+	}
+}
+
+// M-01: the kinds are the first words of a line, without the addresses and ports, and their number is bounded.
+func TestRP_M01_ErrorKinds(t *testing.T) {
+	for line, kind := range map[string]string{
+		"http: TLS handshake error from 192.0.2.1:1234: EOF":                        "http: TLS handshake error",
+		"http2: server: error reading preface from client [2001:db8::1]:443: bogus": "http2: server: error reading",
+		"timeout waiting for SETTINGS frames from 192.0.2.1:9":                      "timeout waiting for SETTINGS",
+		"http: panic serving 192.0.2.1:9: boom":                                     "http: panic serving",
+	} {
+		if got := aggregatedLogKind(line); got != kind {
+			t.Errorf("aggregatedLogKind(%q) = %q; expected %q", line, got, kind)
+		}
+	}
+	logs := captureLog(t)
+	errorLog := &aggregatedLog{}
+	t.Cleanup(func() { errorLog.flush() })
+	for i := 0; i < 500; i++ { // 500 lines of kinds that differ in their words: at most aggregatedLogKinds are kept apart
+		word := string(rune('a'+i%26)) + string(rune('a'+i/26%26))
+		errorLog.Write([]byte("cgi: bogus header " + word + ": X\n"))
+	}
+	errorLog.mutex.Lock()
+	kept := len(errorLog.kinds)
+	errorLog.mutex.Unlock()
+	if kept > aggregatedLogKinds {
+		t.Errorf("%d kinds kept apart; expected at most %d", kept, aggregatedLogKinds)
+	}
+	if lines := strings.Count(logs.String(), "\n"); lines > aggregatedLogKinds {
+		t.Errorf("500 lines of other kinds: %d written at once; expected at most %d", lines, aggregatedLogKinds)
+	}
+}
+
+// Production review, M-04: an "S" of 1 in turbo.config is kept when the certificate can't be loaded then (a copy that
+// brings @ before the .pem files, a key that can't be read yet): without a certificate there is no redirect, saving
+// keeps it, and a later look at the configuration (every 30 s) loads the certificate.
+func TestRP_M04_HTTPSKeptUntilCertificateLoads(t *testing.T) {
+	dir := initForTest(t)
+	base := startServer(t)
+	if err := os.MkdirAll(dir+"w.test/@", 0755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(dir+"w.test/@/index.html", []byte("w"), 0644)
+	httpsListening.Store(true) // As if the HTTPS address were open: the redirect depends only on the certificate
+	t.Cleanup(func() { httpsListening.Store(false) })
+	loadConfig(t, dir, `{"^":{"v":"2"},"w.test":{"":{"!":{"S":"1"},"-":{"index.html":"1"}}}}`)
+	globalMutex.RLock()
+	enabled := siteSSLConfig["w.test"]["S"]
+	globalMutex.RUnlock()
+	if enabled != 1 || certificateFor("w.test") != nil {
+		t.Fatalf("S of the file without the certificate files: %v, certificate %v; expected 1, kept, without a certificate", enabled, certificateFor("w.test") != nil)
+	}
+	if res, _, err := rawGet(base, "w.test", "/"); err != nil || res.StatusCode != 200 {
+		t.Errorf("w.test over HTTP without a certificate: %v %v; expected 200, without a redirect", res, err)
+	}
+	if !saveDefaultConfig() {
+		t.Fatal("saving failed")
+	}
+	site, _ := savedConfig(t, dir)["w.test"][""].(map[string]interface{})
+	if ssl, _ := site["!"].(map[string]interface{}); ssl["S"] != "1" {
+		t.Errorf("w.test saved without its certificate: %v; expected S = \"1\"", site)
+	}
+
+	writeTestCertificate(t, dir+"w.test/", 90*24*time.Hour, "w.test")
+	updateSettings(true)
+	if certificateFor("w.test") == nil {
+		t.Fatal("the certificate wasn't loaded at the next look at the configuration")
+	}
+	res, _, err := rawGet(base, "w.test", "/")
+	if err != nil || res.StatusCode < 300 || res.StatusCode > 399 || !strings.HasPrefix(res.Header.Get("Location"), "https://w.test") {
+		t.Errorf("w.test over HTTP with its certificate: %v %v; expected a redirect to HTTPS", res, err)
 	}
 }

@@ -67,3 +67,24 @@ func TestN38_OptionsAsterisk(t *testing.T) {
 		t.Errorf("OPTIONS *: %d; expected 200", res.StatusCode)
 	}
 }
+
+// Review of 57cbb3c, S3: a target that doesn't start with "/" (an opaque one, such as x:@evil.test, or "*" outside
+// OPTIONS) gets 400. Before, it was taken as the path and went after the host of a redirection: with W on,
+// Location: http://www.localhost@evil.test.
+func TestRL_S3_TargetWithoutSlash(t *testing.T) {
+	initForTest(t)
+	globalMutex.Lock()
+	siteSSLConfig["localhost"]["W"] = true // localhost redirects to www.localhost
+	globalMutex.Unlock()
+	addr := strings.TrimPrefix(startServer(t), "http://")
+	for _, target := range []string{"x:@evil.test", "*"} {
+		res, _ := sendRaw(t, addr, "GET "+target+" HTTP/1.1\r\nHost: localhost\r\n\r\n")
+		if res.StatusCode != 400 || res.Header.Get("Location") != "" {
+			t.Errorf("GET %s: %d, Location %q; expected 400", target, res.StatusCode, res.Header.Get("Location"))
+		}
+	}
+	res, _ := sendRaw(t, addr, "GET http://localhost/a HTTP/1.1\r\nHost: localhost\r\n\r\n")
+	if res.StatusCode != 301 || res.Header.Get("Location") != "http://www.localhost/a" {
+		t.Errorf("GET in absolute form: %d, Location %q; expected 301 to http://www.localhost/a", res.StatusCode, res.Header.Get("Location"))
+	}
+}

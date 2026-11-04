@@ -4,8 +4,16 @@ package main
 // dereference a nil FileInfo (#1, #2, #35, #62).
 
 import (
+	"io"
+	"net"
+	"net/url"
 	"os"
+	"strings"
+	"syscall"
 	"testing"
+	"time"
+
+	"turbo/customNetHttp"
 )
 
 // #1, #2: extChars(".") must not panic and must reject the extension.
@@ -188,5 +196,64 @@ func TestP17_PreprocessorLongExtension(t *testing.T) {
 	globalMutex.Unlock()
 	if _, problem := preprocessorCommand(value); added && problem == "" {
 		t.Fatal("a preprocessor with an extension of more than 12 characters can run")
+	}
+}
+
+// Review of 57cbb3c, S16: a CGI still running when the grace of a stop runs out is ended, with what it started, and
+// Turbo waits for it to be gone. Before, without systemd (which kills the service's processes), it went on after
+// Turbo.
+func TestRL_S16_ShutdownEndsRunningCGIs(t *testing.T) {
+	dir := initForTest(t)
+	os.WriteFile(dir+"localhost/@/x.cgi", []byte("x"), 0644)
+	globalMutex.Lock()
+	subdomainContentCheckers["?"](true, map[string]interface{}{"cgi": toolPath("cgiecho")}, false, "localhost", "")
+	globalMutex.Unlock()
+	if ok, msg := defaultSettingValidators["."]["WT"]("30s", "Admin"); !ok && !strings.Contains(msg, "unchanged") {
+		t.Fatal(msg)
+	}
+	server := &customNetHttp.Server{ConnState: connHandler, Handler: customNetHttp.HandlerFunc(serverHandlerFn(""))}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go server.Serve(listener)
+	previousServers, previousGrace := servers, shutdownGrace
+	servers, shutdownGrace = []*customNetHttp.Server{nil, server}, 300*time.Millisecond
+	t.Cleanup(func() {
+		servers, shutdownGrace = previousServers, previousGrace
+		server.Close()
+	})
+
+	// A client that waits as long as it takes: one that went away would end the CGI itself.
+	mark := dir + "cgi-done"
+	client, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	query := url.Values{"sleep": {"4000"}, "mark": {mark}, "child": {"4000"}, "childmark": {mark + "-child"}}.Encode()
+	io.WriteString(client, "GET /x.cgi?"+query+" HTTP/1.1\r\nHost: localhost\r\n\r\n")
+	running := func() int64 {
+		cgiSlots.mutex.Lock()
+		defer cgiSlots.mutex.Unlock()
+		return cgiSlots.running
+	}
+	for deadline := time.Now().Add(5 * time.Second); running() == 0; time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the CGI didn't start")
+		}
+	}
+	time.Sleep(200 * time.Millisecond) // Its child started too
+
+	start := time.Now()
+	shutdown(syscall.SIGTERM)
+	if elapsed := time.Since(start); elapsed > 4*time.Second {
+		t.Errorf("the stop took %v", elapsed)
+	}
+	if n := running(); n != 0 {
+		t.Errorf("%d CGIs running after the stop", n)
+	}
+	if markAppears(mark, 5*time.Second) || markAppears(mark+"-child", 100*time.Millisecond) { // Alive, they'd have written them at 4 s
+		t.Error("the CGI, or what it started, went on after the stop")
 	}
 }

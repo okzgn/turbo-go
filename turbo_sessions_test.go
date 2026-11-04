@@ -3,11 +3,12 @@ package main
 // T10 (N25, N27, N30, I16): an expired session isn't valid even if the cleanup
 // hasn't run yet; the renewal doesn't undo a sign-out; signing out with the
 // cookie requires the same origin; a foreign cookie with the same name doesn't
-// block the panel; setP and setU close the other sessions; and only the
-// requests from the same origin renew the session.
+// block the panel; setP and setU close every session and give the request a
+// new one; and only the requests from the same origin renew the session.
 
 import (
 	"crypto/tls"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -130,20 +131,30 @@ func TestN27_ForeignCookieFirst(t *testing.T) {
 	}
 }
 
-// I16: setP and setU close the other sessions and keep the request's own.
+// I16, and production review M-08: setP and setU close every session, the request's own too, and open a new one
+// for its client, whose token comes in the answer (the cookie, and the "ok" header): a copy of the old token is
+// worth nothing.
 func TestI16_PasswordChangeClosesOtherSessions(t *testing.T) {
 	initForTest(t)
-	for _, change := range []string{"/admin:inside:setP?a=NewPass&b=Admin", "/admin:inside:setU?a=Other&b=NewPass"} {
+	for _, change := range []string{"/admin:inside:setP?a=NewPassword1&b=Admin", "/admin:inside:setU?a=Other&b=NewPassword1"} {
 		mine := newSessionWith(t, "198.51.100.65")
 		other := newSessionWith(t, "198.51.100.66")
-		if rec := apiFrom(serverHandlerFn(""), "198.51.100.65", mine, change); rec.code != 200 {
+		rec := apiFrom(serverHandlerFn(""), "198.51.100.65", mine, change)
+		if rec.code != 200 {
 			t.Fatalf("%s: %d %q", change, rec.code, rec.body.String())
 		}
+		renewed := rec.Header().Get(sessionHeaderName)
 		if _, found := sessionExpiry("198.51.100.66", other); found {
 			t.Errorf("%s: the other session is still open", change)
 		}
-		if _, found := sessionExpiry("198.51.100.65", mine); !found {
-			t.Errorf("%s: the session of the request itself was closed", change)
+		if _, found := sessionExpiry("198.51.100.65", mine); found {
+			t.Errorf("%s: the old token of the request still works", change)
+		}
+		if _, found := sessionExpiry("198.51.100.65", renewed); renewed == "" || !found {
+			t.Errorf("%s: no new session in the answer (ok: %q)", change, renewed)
+		}
+		if cookies := strings.Join(rec.Header()["Set-Cookie"], " | "); !strings.Contains(cookies, sessionCookieName+"="+renewed+";") {
+			t.Errorf("%s: the cookie doesn't carry the new token: %q", change, cookies)
 		}
 	}
 }
@@ -151,7 +162,7 @@ func TestI16_PasswordChangeClosesOtherSessions(t *testing.T) {
 // newSessionWith signs in with the credentials in use (they change during the test).
 func newSessionWith(t *testing.T, ip string) string {
 	t.Helper()
-	for _, credentials := range [][2]string{{"Turbo", "Admin"}, {"Turbo", "NewPass"}, {"Other", "NewPass"}} {
+	for _, credentials := range [][2]string{{"Turbo", "Admin"}, {"Turbo", "NewPassword1"}, {"Other", "NewPassword1"}} {
 		if rec := loginFrom(serverHandlerFn(""), ip, credentials[0], credentials[1]); rec.code == 200 {
 			return strings.TrimPrefix(rec.body.String(), "ok")
 		}
@@ -179,7 +190,8 @@ func TestI16_RenewOnlySameOrigin(t *testing.T) {
 
 // N76: when the credentials change by setM (those of the other directory's
 // turbo.config) or by a reload of the file, the sessions opened with the old
-// ones are closed, as with setU and setP; the one that did setM stays open.
+// ones are closed, as with setU and setP; the client that did setM gets a new
+// one (production review, M-08).
 func TestN76_SessionsEndWhenCredentialsChange(t *testing.T) {
 	initForTest(t)
 	base := startServer(t)
@@ -190,16 +202,18 @@ func TestN76_SessionsEndWhenCredentialsChange(t *testing.T) {
 	}
 	other := filepath.ToSlash(t.TempDir()) + "/"
 	os.WriteFile(other+"turbo.config", []byte(`{"^":{"v":"2"},".":{"U":"Turbo","PH":"`+hash+`"}}`), 0600)
-	if code, body := setM(t, base, first, other, "Admin"); code != 200 {
+	code, body, renewed, _ := postSession(base, "/admin:inside:setM?"+url.Values{"a": {other}, "b": {"Admin"}}.Encode(), first)
+	if code != 200 {
 		t.Fatalf("setM: %d %q", code, body)
 	}
 	alive := func(token string) bool { // Without a session, the response is the HTML redirect to the login
 		code, body, _ := post(base, "/admin:inside:sites", token)
 		return code == 200 && strings.HasPrefix(body, "{")
 	}
-	if !alive(first) || alive(second) {
-		t.Errorf("after setM with other credentials: the session that did it is alive = %v, the other one is alive = %v; expected true and false", alive(first), alive(second))
+	if renewed == first || !alive(renewed) || alive(first) || alive(second) {
+		t.Errorf("after setM with other credentials: the new session of the one that did it is alive = %v, its old token = %v, the other one = %v; expected true, false and false", alive(renewed), alive(first), alive(second))
 	}
+	first = renewed
 	// A reload that changes the user closes them all
 	os.WriteFile(other+"turbo.config", []byte(`{"^":{"v":"2"},".":{"U":"Other","PH":"`+hash+`"}}`), 0600)
 	future := time.Now().Add(time.Minute)
@@ -209,5 +223,62 @@ func TestN76_SessionsEndWhenCredentialsChange(t *testing.T) {
 	}
 	if alive(first) {
 		t.Error("the session is still alive after a reload that changes the user")
+	}
+}
+
+// Production review, M-08: closeSessions, with the password, closes every session, the request's own too (a copy of
+// its token, taken from the same IP, is worth nothing), and gives its client a new one; without the password, a
+// stolen session can't close the administrator's.
+func TestRP_M08_CloseEverySession(t *testing.T) {
+	initForTest(t)
+	mine := newSession(t, "198.51.100.76")
+	other := newSession(t, "198.51.100.77")
+	for _, c := range []struct {
+		query string
+		code  int
+		body  string
+	}{{"", 400, "the current password (b)"}, {"?b=WrongPassword", 400, "Wrong current password"}} {
+		if rec := apiFrom(serverHandlerFn(""), "198.51.100.76", mine, "/admin:inside:closeSessions"+c.query); rec.code != c.code || !strings.Contains(rec.body.String(), c.body) {
+			t.Errorf("closeSessions%s: %d %q; expected %d %q", c.query, rec.code, rec.body.String(), c.code, c.body)
+		}
+	}
+	if _, found := sessionExpiry("198.51.100.77", other); !found {
+		t.Fatal("closeSessions without the password closed a session")
+	}
+	rec := apiFrom(serverHandlerFn(""), "198.51.100.76", mine, "/admin:inside:closeSessions?b=Admin")
+	if rec.code != 200 {
+		t.Fatalf("closeSessions: %d %q", rec.code, rec.body.String())
+	}
+	renewed := rec.Header().Get(sessionHeaderName)
+	_, mineAlive := sessionExpiry("198.51.100.76", mine)
+	_, otherAlive := sessionExpiry("198.51.100.77", other)
+	_, renewedAlive := sessionExpiry("198.51.100.76", renewed)
+	if mineAlive || otherAlive || renewed == "" || !renewedAlive {
+		t.Errorf("after closeSessions: old token alive %v, other session alive %v, new token %q alive %v; expected only the new one", mineAlive, otherAlive, renewed, renewedAlive)
+	}
+	if cookies := strings.Join(rec.Header()["Set-Cookie"], " | "); !strings.Contains(cookies, sessionCookieName+"="+renewed+";") {
+		t.Errorf("the cookie doesn't carry the new token: %q", cookies)
+	}
+}
+
+// Production review, M-08: a session can't be renewed past sessionMaxLifetime from its login.
+func TestRP_M08_SessionMaxLifetime(t *testing.T) {
+	initForTest(t)
+	const ip = "198.51.100.78"
+	token := newSession(t, ip)
+	key := sessionKey(ip, token)
+	now := time.Now().Unix()
+	globalMutex.RLock()
+	deadline := sessionDeadlines[key]
+	globalMutex.RUnlock()
+	if deadline < now+sessionMaxLifetime-60 || deadline > now+sessionMaxLifetime+60 {
+		t.Fatalf("deadline of a new session: %d s from now; expected %d", deadline-now, sessionMaxLifetime)
+	}
+	withGlobalLock(func() { sessionDeadlines[key] = now + 3 }) // Its login was almost sessionMaxLifetime ago
+	if rec := apiFrom(serverHandlerFn(""), ip, token, "/admin:inside:sites"); rec.code != 200 || !strings.HasPrefix(rec.body.String(), "{") {
+		t.Fatalf("sites: %d %.80q", rec.code, rec.body.String())
+	}
+	if expiry, _ := sessionExpiry(ip, token); expiry > now+3 {
+		t.Errorf("a request renewed the session %d s past its deadline", expiry-(now+3))
 	}
 }

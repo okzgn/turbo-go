@@ -112,3 +112,53 @@ func TestN90_HTTP2HostFieldDifferentFromAuthority(t *testing.T) {
 		}
 	}
 }
+
+// rawCGIEnv sends request as it is to the server at addr and returns the environment that cgiecho saw.
+func rawCGIEnv(t *testing.T, addr string, request string) map[string]string {
+	t.Helper()
+	res, body := sendRaw(t, addr, request)
+	if res.StatusCode != 200 {
+		t.Fatalf("%q: %d %q", request, res.StatusCode, body)
+	}
+	return cgiEnv(body)
+}
+
+// Review of 57cbb3c, S2: a request header with "_" in its name doesn't reach the CGI, as in Apache: X_Forwarded_For
+// became the same HTTP_X_FORWARDED_FOR as the X-Forwarded-For that a proxy in front sets, and the client's won
+// as often as not.
+func TestRL_S2_UnderscoreHeadersDontReachCGI(t *testing.T) {
+	dir := initForTest(t)
+	os.WriteFile(dir+"localhost/@/x.cgi", []byte("x"), 0644)
+	globalMutex.Lock()
+	subdomainContentCheckers["?"](true, map[string]interface{}{"cgi": toolPath("cgiecho")}, false, "localhost", "")
+	globalMutex.Unlock()
+	addr := strings.TrimPrefix(startServer(t), "http://")
+	for i := 0; i < 20; i++ { // The order in which they were turned into variables was the map's
+		env := rawCGIEnv(t, addr, "GET /x.cgi?env=HTTP_X_FORWARDED_FOR,HTTP_X_CUSTOM HTTP/1.1\r\nHost: localhost\r\nX-Forwarded-For: 203.0.113.7\r\nX_Forwarded_For: 127.0.0.1\r\nX_Custom: 1\r\nConnection: close\r\n\r\n")
+		if env["HTTP_X_FORWARDED_FOR"] != "203.0.113.7" || env["HTTP_X_CUSTOM"] != "" {
+			t.Fatalf("attempt %d: HTTP_X_FORWARDED_FOR=%q, HTTP_X_CUSTOM=%q; expected the proxy's and nothing", i, env["HTTP_X_FORWARDED_FOR"], env["HTTP_X_CUSTOM"])
+		}
+	}
+}
+
+// Review of 57cbb3c, S4: the CGI gets in HTTP_HOST and SERVER_NAME the host that chose the site, in lower case,
+// without a final dot, with its port only if it is a number: before, it got whatever came around the name
+// ("[localhost]x'()").
+func TestRL_S4_CanonicalHostForCGI(t *testing.T) {
+	dir := initForTest(t)
+	os.WriteFile(dir+"localhost/@/x.cgi", []byte("x"), 0644)
+	globalMutex.Lock()
+	subdomainContentCheckers["?"](true, map[string]interface{}{"cgi": toolPath("cgiecho")}, false, "localhost", "")
+	globalMutex.Unlock()
+	addr := strings.TrimPrefix(startServer(t), "http://")
+	for host, want := range map[string][2]string{
+		"[localhost]x'()": {"localhost", "localhost"},
+		"LocalHost.:8080": {"localhost:8080", "localhost"},
+		"localhost:x":     {"localhost", "localhost"},
+	} {
+		env := rawCGIEnv(t, addr, "GET /x.cgi?env=SERVER_NAME HTTP/1.1\r\nHost: "+host+"\r\nConnection: close\r\n\r\n")
+		if env["HTTP_HOST"] != want[0] || env["SERVER_NAME"] != want[1] {
+			t.Errorf("Host %q: HTTP_HOST=%q, SERVER_NAME=%q; expected %q and %q", host, env["HTTP_HOST"], env["SERVER_NAME"], want[0], want[1])
+		}
+	}
+}

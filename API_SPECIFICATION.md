@@ -16,10 +16,11 @@ The Turbo backend provides an **RPC/REST-style API over HTTP POST**. All interac
 * **Parameters:** The action parameters (`s`, `d`, `a`, `b`…) can go in the URL query or in an `application/x-www-form-urlencoded` body. The GUI sends them in the body, so the current password (`b`) never appears in the URL that `turbo.visits` records; API clients should do the same. The exception is `hardUpload` (§9), whose site and subdomain (`s`, `d`, not sensitive) go in the URL, and its password in the multipart body.
 * **Session Handling:** After a successful login, the server sets the session cookie (`Path=/; HttpOnly; SameSite=Strict`), which the browser sends by itself: `turbo_session` over HTTP, and `__Host-turbo_session` over HTTPS (with `Secure` and no `Domain`, so browsers only take it from the panel's host and another subdomain can't put one in its place). API clients can instead send the token in the `ok: <token>` header. Every session cookie of the request is tried (a cookie with the same name set by another subdomain may come first), and then the `ok` header. The token is **not** accepted as a URL parameter. Both cookies are removed from the `Cookie` header passed to CGI preprocessors.
 * **Same Origin:** A `POST` to `/admin:inside:` authenticated with the cookie must come from the panel's own origin: the browser must send `Sec-Fetch-Site: same-origin` (or `none`) or, without `Sec-Fetch-Site`, an `Origin` header equal to `<scheme>://<Host>`. Otherwise the server responds `403`. Requests authenticated with the `ok` header don't need it.
-* **Panel Response Headers:** Responses under `/admin:` carry `X-Frame-Options: DENY`, `Cache-Control: no-store`, `X-Content-Type-Options: nosniff` and a `Content-Security-Policy`: `frame-ancestors 'none'` on the panel's pages, and on everything else (API answers, errors with the error template) one without scripts, frames, forms or plugins (`default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`). On a host of `PA`, every answer outside the panel's pages carries that one too, so an error template never runs scripts on the panel's origin. JSON answers (`sites`, `subdomains`, `subdomainData`, the `WAIT` of `cfgC` and `cfgPC`) are `application/json; charset=utf-8`, and text messages `text/plain; charset=utf-8`.
+* **Panel Response Headers:** Responses under `/admin:` carry `X-Frame-Options: DENY`, `Cache-Control: no-store`, `X-Content-Type-Options: nosniff` and a `Content-Security-Policy`: `frame-ancestors 'none'` on the panel's pages, and on everything else (API answers, errors with the error template) one without scripts, frames, forms or plugins (`default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`). Every error that Turbo answers with the error template carries that one too, on every host, before or after reading the request, so an error template never runs scripts: with `PA` empty (the default) the sites share the panel's origin. On a host of `PA`, so does every answer outside the panel's pages. JSON answers (`sites`, `subdomains`, `subdomainData`, the `WAIT` of `cfgC` and `cfgPC`) are `application/json; charset=utf-8`, and text messages `text/plain; charset=utf-8`.
 * **Missing Session:** a request to `/admin:inside:` without a valid session gets the same HTML redirect as always (§3.2) and the header `X-Turbo-Login: required`, which is what clients should look at: the content of a valid answer (an error template, a header or a rewrite of a site) may contain any text.
-* **Where the Panel Answers:** The global `PA` setting (see `setPA`, §5) can limit `/admin:` to a list of hosts and/or CIDR networks: the request's `Host` must be one of the hosts (if there are any) and the client's IP must be in one of the networks (if there are any). Otherwise, `/admin:` responds `404`. Empty (the default) means no restriction, and then the panel shares the origin of every site served by Turbo: the recommended setup is a host of its own for the panel, one that serves no site. A `PA` host that serves a site is refused (§5), and so is a new site, subdomain or alias that would serve a `PA` host (`400` with the reason).
-* **Session Lifecycle:** Tokens are assigned to the client's IP address and expire after **600 seconds (10 minutes)** of inactivity. Each request to `/admin:inside:` of the panel's own origin (or without `Sec-Fetch-Site`, as API clients send them) resets the timer; one from another origin, such as a resource loaded by another page, doesn't. Changing the username or the password (`setU`, `setP`) closes every other session, and so does `setM` when the `turbo.config` of the new directory brings other credentials; a reload of `turbo.config` that changes them closes every session. Without a valid session, `/admin:inside:` returns the HTML redirect to `/admin:` (see §3.2).
+* **Where the Panel Answers:** The global `PA` setting (see `setPA`, §5) can limit `/admin:` to a list of hosts and/or CIDR networks: the request's `Host` must be one of the hosts (if there are any) and the client's IP must be in one of the networks (if there are any). Otherwise, `/admin:` responds `404`. Empty (the default) means no restriction, and then the panel shares the origin of every site served by Turbo: the recommended setup is a host of its own for the panel, one that serves no site. With networks and no host, the panel answers only when the `Host` is an IP address or `localhost`, never a name: a page whose name resolves to Turbo (DNS rebinding) would otherwise reach the panel from the browser of someone in those networks, on its own origin. A `PA` host that serves a site is refused (§5), and so is a new site, subdomain or alias that would serve a `PA` host (`400` with the reason).
+* **Session Lifecycle:** Tokens are assigned to the client's IP address and expire after **600 seconds (10 minutes)** of inactivity, and **12 hours** after the login at most, however they are used. Each request to `/admin:inside:` of the panel's own origin (or without `Sec-Fetch-Site`, as API clients send them) resets the timer, up to that limit; one from another origin, such as a resource loaded by another page, doesn't. Changing the username or the password (`setU`, `setP`) closes every session, the request's own too, and opens a new one for its client: the answer sets the new cookie and carries the new token in its `ok` header, which API clients must send from then on (a copy of the old token is worth nothing). So do `setM`, when the `turbo.config` of the new directory brings other credentials, and `closeSessions` (§3.3); a reload of `turbo.config` that changes them closes every session. Without a valid session, `/admin:inside:` returns the HTML redirect to `/admin:` (see §3.2).
+* **What the Session Alone Can Do:** read the state (`sites`, `subdomains`, `subdomainData`); add and delete sites and subdomains, rewrites, MIME types, headers, indexes, aliases and denied IPs (`delSite` aside); and the `cfg<KEY>` that don't delete a certificate (those of a site, and `cfgPC` with `a=1`). Every other action also needs the current password: `set<KEY>`, `addPreprocessor` and `delPreprocessor`, `delSite`, `hardUpload`, `cfgC` and `cfgPC` with `a=0`, `addHttpCodeResponse` and `delHttpCodeResponse` (a template is the error page of every site), `addCharsReplace` and `delCharsReplace` (a replacement changes what the actions read) and `closeSessions`.
 
 ---
 
@@ -28,7 +29,7 @@ The Turbo backend provides an **RPC/REST-style API over HTTP POST**. All interac
 To prevent special characters and URL delimiters from interfering with or corrupting HTTP requests (especially in rewrite rules or headers), the backend requires certain characters to be encoded using a predefined substitution:
 
 ### 2.1. Immutable (Fixed) Substitutions
-Every form parameter (such as `a`, `s`, `d`) is processed on the server by the URI character-replacement function, except the credentials: the current password (`b` of `set<KEY>`, `delPreprocessor`, `delSite`, `cfgC` and `cfgPC`, and `c` of `addPreprocessor`) and the new username or password (`a` of `setU` and `setP`) are used exactly as sent. `hardUpload` takes all its parameters as sent. The following substitutions must be applied client-side before sending the other parameters, and they can't be changed or deleted:
+The server undoes the character replacements (the fixed ones below and those added with `addCharsReplace`, §7.3) only in the parameters of the actions that need the session alone (§1.2), and never in the site and the subdomain (`s` and `d`) of any action: in practice, `a` and `b` of `addRewrite`, `addMIME`, `addHeader`, `addIndex` and `addAlias`, and `a` of their `del<Type>`. The actions that need the current password, `cfg<KEY>` and `hardUpload` take every parameter exactly as sent: send them URL-encoded, as an `application/x-www-form-urlencoded` body does by itself. A replacement then can't change what the administrator confirms with the password (an extension, the program of a preprocessor, the site to delete). The following substitutions must be applied client-side before sending the parameters that the server decodes, and they can't be changed or deleted:
 
 | Original Character | Expected Transmission Token |
 |---|---|
@@ -36,7 +37,7 @@ Every form parameter (such as `a`, `s`, `d`) is processed on the server by the U
 | `#` (Hash / pound sign) | `-,-` |
 | `&` (Ampersand) | `-_-` |
 
-*Note: Administrators can dynamically add additional character replacements via the `addCharsReplace` endpoint (§7.3). The server undoes them all in one pass, the longest tokens first, and values read from `turbo.config` are not decoded again (they are saved decoded).*
+*Note: Administrators can add more character replacements with `addCharsReplace` (§7.3), which needs the current password. The server undoes them all in one pass, the longest tokens first, and values read from `turbo.config` are not decoded again (they are saved decoded).*
 
 *Limit: a text where a replaced character is next to the start or the end of a token can't always be told apart: `-,#` and `#,-` are both sent as `-,-,-`, and the server reads `#,-`. A client can check it before sending: undo the replacements of what it is going to send and compare with the original. The panel doesn't send such a text and says so.*
 
@@ -63,8 +64,8 @@ Validates the user's credentials and generates a unique token bound to the clien
   ok<token>
   ```
 * **Incorrect Credentials:** HTTP 403 with an empty body.
-* **Too Many Failed Logins:** after 5 failures from the same IP within 10 minutes, every login from that IP (even with the right credentials) gets HTTP 429 with `Retry-After` in seconds, without checking the password: 1 minute the first time, then 2, 4, 8 and at most 15 minutes. Logins still being checked count towards the 5: simultaneous logins beyond them get 429 with `Retry-After: 2`. A correct login clears the count. A wrong current password of a `set<KEY>` (§5) or of an action that needs it (`addPreprocessor`, `delPreprocessor`, `hardUpload`, `delSite`, `cfgC` and `cfgPC` with `a=0`) counts as a failed login, and while the IP is blocked, those actions get the same 429 without checking it.
-* **Server Busy:** if the password can't be checked within 2 seconds because too many checks are running, HTTP 503 with `Retry-After: 2`. The same applies to the current password (`b`) of `set<KEY>` (§5).
+* **Too Many Failed Logins:** after 5 failures from the same IP (an IPv4 address, or an IPv6 /64) within 10 minutes, every login from that IP (even with the right credentials) gets HTTP 429 with `Retry-After` in seconds, without checking the password: 1 minute the first time, then 2, 4, 8 and at most 15 minutes. The /64s of an IPv6 /48 also share a count of 20 failures within 10 minutes, with the same blocks for all of them. Logins still being checked count towards the limits: simultaneous logins beyond them get 429 with `Retry-After: 2`. A correct login clears the count of its IP (not that of its /48). A wrong current password of a `set<KEY>` (§5) or of an action that needs it (§1.2) counts as a failed login, and while the IP is blocked, those actions get the same 429 without checking it.
+* **Server Busy:** if the password can't be checked within 2 seconds because too many checks are running, HTTP 503 with `Retry-After: 2`. One of the checks that run at a time is kept for the current password of a request with a session and for the logins from the networks of `PA`, so a flood of logins from elsewhere doesn't keep the administrator out. The same 503 applies to the current password (`b`) of `set<KEY>` (§5) and of the actions that need it.
 
 ### 3.2. Log Out
 Invalidates the current token in RAM memory (other sessions from the same IP stay active) and expires the session cookie (`Max-Age=0`). With the cookie, the request must come from the panel's own origin, as the actions do (§1.2); otherwise, `403` and the session stays open.
@@ -76,6 +77,13 @@ Invalidates the current token in RAM memory (other sessions from the same IP sta
   ```html
   <meta http-equiv='refresh' content='0; URL=/admin:'/>
   ```
+
+### 3.3. Close Every Session
+Closes every session of the panel, the request's own too (and any copy of its token), and opens a new one for its client, as changing the credentials does. The panel's **Close every session**.
+
+* **Endpoint:** `POST /admin:inside:closeSessions`
+* **Parameters:** `b`, the current password, as sent. Missing: HTTP 400 `"Missing data: the current password (b)"`; wrong: HTTP 400 `"Wrong current password"`, which counts as a failed login (§3.1).
+* **Successful Response (HTTP 200 OK):** `"Every session closed: this one goes on with a new token"`, with the new cookie and the new token in the `ok` response header.
 
 ---
 
@@ -100,6 +108,9 @@ Returns the general configuration, root site maps, denied IPs, custom HTTP respo
         "E": "admin%40site1.com",
         "A": ""
       }
+    },
+    "~": {
+      "old-site.com": ["", "www"]
     },
     "_": {
       ";": { "f": "-.-" },
@@ -132,7 +143,7 @@ Returns the general configuration, root site maps, denied IPs, custom HTTP respo
     }
   }
   ```
-  *(Note: Fixed entries, which cannot be deleted, are returned as `{"f": <value>}`. Text values in the `!` block are URL-encoded, e.g. `@` → `%40`).*
+  *(Note: Fixed entries, which cannot be deleted, are returned as `{"f": <value>}`. Text values in the `!` block are URL-encoded, e.g. `@` → `%40`. `~` lists the sites whose folder isn't there, with their subdomains in the same case (`""` is the site itself): Turbo keeps their settings, also in `turbo.config`, for when the folder comes back, until `delSite` deletes them).*
 
 ### 4.2. Get List of Subdomains for a Site
 Returns a JSON object with all subdomains belonging to a specific root domain, including the alias (if applicable) and the SSL/Redirect configuration for each.
@@ -211,8 +222,8 @@ Modifies the server's global parameters and operational limits. They change the 
 
 | Endpoint | Parameter `a` | Parameter `b` | Description / Validation |
 |---|---|---|---|
-| `setU` | New Username | Current Password | Changes the username (1-24 bytes in UTF-8: `ñ` or `é` count as 2). |
-| `setP` | New Password | Current Password | Changes the password (1-24 bytes in UTF-8: `ñ` or `é` count as 2). |
+| `setU` | New Username | Current Password | Changes the username (1-24 bytes in UTF-8: `ñ` or `é` count as 2). Every session ends, and the answer brings a new one (§1.2). |
+| `setP` | New Password | Current Password | Changes the password: 12 to 64 bytes in UTF-8 (`ñ` or `é` count as 2); otherwise, 400 `"The password must have 12 to 64 bytes"`. A shorter password already in use (`Admin`, `TURBO_PASSWORD`, `turbo.config`) keeps working. Every session ends, and the answer brings a new one (§1.2). |
 | `setM` | Directory Path | Current Password | Changes the base site directory (it must exist) and reloads the configuration. The path may be relative to the working directory or use `{TURBO_CURRENT_DIR}`, and is saved as written; the same directory written another way is "Sites directory unchanged". If that directory has a `turbo.config` that is not valid JSON, it responds 400 with where the error is. |
 | `setC` | (Ignored; `overwrite` to confirm, see below) | Current Password | Dumps the current in-RAM configuration to disk (`turbo.config`), including the username and the password hash (never the plain password). |
 | `setPA` | Hosts / CIDR networks | Current Password | Where the panel answers: comma-separated host names and/or CIDR networks (at most 32 entries and 1,024 chars); with both, a request needs both. Empty or `*` = no restriction (`*` only alone). A host that serves a site (directly, through a wildcard or as an alias) is refused with 400 `"The panel host <host> serves the site <site>: …"`, and so are host wildcards (`*.example.com`, which never match) and a value that would leave out the request that sets it (its host or its IP), with the reason. An IP without `/` is a host, compared with the `Host` header (an IPv6 one as `[::1]` or `::1`); to limit the client's IP, use `/32` or `/128`. |
@@ -233,9 +244,9 @@ Modifies the server's global parameters and operational limits. They change the 
 * *`setPA`: Host entries are compared with the request's `Host` header, which the client chooses: they give the panel an origin of its own, apart from the sites, but do not limit who can reach it. CIDR networks, compared with the client's IP, are what limit access. A `turbo.config` whose `PA` host serves a site still loads, with a warning in the log.*
 * *Per-IP limit (`CIL`, `CIS`, `CII`): "IP" is an IPv4 address, or the /64 of an IPv6 address (the block a client usually gets), also for the failed-login limit. Each IP may make `CII` requests per `CIS` window on average, counted from its first request, the current one included: after `t` ms, `CII` × (⌊`t`/`CIS`⌋ + 1) requests in all, so what it didn't use in one window it can use in a later one, until the count starts again. The request beyond that gets 429 and blocks the IP for 5 s. The count starts again `CIL` ms after it began. Times are measured with the monotonic clock, so moving the system clock doesn't block anyone. Turbo keeps up to 200,000 IPs; beyond that, new IPs share a single count (as one client) until the old ones are forgotten, and the IPs already known are not affected. `CGL` counts fixed seconds, so a burst across two of them can reach twice `CGL`; spreading the server among clients is what `CII`/`CIS` do.*
 * *`CIS`/`CII` and `RT`/`RHT`: their conditions are checked whichever of them is changed (a change that would break them gets 400), and compared exactly (66.5 is more than 66). In `turbo.config` they are checked once all the settings are read: if they are not met, `CII` (or `RHT`) gets its default value, with a warning in the log; if the default doesn't fit either, so does `CIS` (or `RHT` becomes `0s`, which uses `RT`).*
-* *`setM`: errors come in this order: missing `b`, wrong current password (nothing of the new directory is read before), a directory that doesn't exist (400 `"Sites directory not found"`), the same directory written another way (400 `"Sites directory unchanged"`) and a `turbo.config` there that can't be read or is not valid JSON (400 with where the error is). The `turbo.config` of the new directory is always read, also with the same date as the one in use. If it has none, the global settings, the credentials and the lists in use (`@`, `_`, `#`) stay, and are written there with the next `setC`; the answer says so. If it has one, it applies whole, and the answer says what it changed of `PA` and of the credentials. Going back to the start directory doesn't follow the pointer that `setC` left there.*
+* *`setM`: errors come in this order: missing `b`, wrong current password (nothing of the new directory is read before), a directory that doesn't exist (400 `"Sites directory not found"`), one that can't be listed (400 `"Sites directory can't be read"`), the same directory written another way (400 `"Sites directory unchanged"`) and a `turbo.config` there that can't be used, or whose `M` leads to a directory that doesn't exist or can't be listed, to a `turbo.config` that can't be used, or back to a directory on the way (400 with where the error is): all of it is checked before anything changes. The `turbo.config` of the new directory is always read, also with the same date as the one in use. If it has none, the global settings, the credentials and the lists in use (`@`, `_`, `#`) stay, and are written there with the next `setC`; the answer says so. If it has one, it applies whole, and the answer says what it changed of `PA` and of the credentials. Going back to the start directory doesn't follow the pointer that `setC` left there.*
 * *Reloading `turbo.config`: when the file changes (it is checked every 30 s), it applies whole and replaces what came from it: what the file no longer has stops applying, and changes made with `set<KEY>`, `add<KEY>` or `del<KEY>` and not saved with `setC` are lost. The fixed character replacements and responses always stay.*
-* *`PA`, `U`, `PH` and `P` in `turbo.config`: if one of them can't be used (another type, a `PA` that `setPA` would refuse, a username or a password out of 1-24 bytes, a hash that isn't Turbo's), the file is invalid: Turbo doesn't start, and a reload or a `setM` to that directory keeps the configuration in use.*
+* *`PA`, `U`, `PH` and `P` in `turbo.config`: if one of them can't be used (another type, a `PA` that `setPA` would refuse, a username out of 1-24 bytes or a password out of 1-64, a hash that isn't Turbo's), the file is invalid: Turbo doesn't start, and a reload or a `setM` to that directory keeps the configuration in use. So is a site, or a list of a site (`!`, `=`, `$`, `.`, `?`, `-`, `&`), that isn't a JSON object, and a whole `turbo.config` whose `M` names a directory that doesn't exist or can't be listed: skipped, the site would be served without its settings, its scripts as text.*
 * *`setC`: If `turbo.config` was written by a later version of Turbo (a later schema), saving would lose its new settings, so the server responds HTTP 400 with an explanation; send `a=overwrite` to confirm and overwrite it. The first time a file from an earlier schema is saved, the original is kept as `turbo.config.v<schema>.bak`, and so is a file of a later schema overwritten with `a=overwrite`. A `turbo.config` changed outside Turbo since Turbo read or saved it (an edit not reloaded yet, or one the reload refused) is first copied to `turbo.config.<date>.bak`. If the site directory is not the startup directory, a minimal `turbo.config` pointing to it is also written in the startup directory.*
 
 ---
@@ -259,6 +270,7 @@ The backend handles folder creation on disk and modifications to the in-RAM maps
 | `addAlias` | Web Domain | Subdomain | Alias Domain | - |
 
 *Notes:*
+* *`addHeader`: a header that only differs in case from one of the site replaces it ("Header changed"): both would go out, either one first.*
 * *`addSite` and `addSubdomain`: the names Turbo keeps for its own folders and files in the sites directory (`turbo.dev`, `turbo.panel`, `turbo.certificates`, `turbo.config`, `turbo.visits`, `turbo.denials`) can't be sites, nor can a name whose settings would share a key with another site, or the host of an alias (400 with the reason).*
 * *`addRewrite`: The rewrite must start with `/` (internal path), `http://` or `https://`. Targets with `http://` or `https://` are answered with a `302` redirect: to the exact target when it has a path or a query, or to the target domain followed by the original URI when it is only a domain. The source (`a`) is compared with the decoded request path (`/a b` matches `/a%20b`); a source that ends in `/` also takes the folder named without it (`/private/` takes `/private`, which would serve its index), and on Windows and macOS, whose file systems ignore case, a path in another case (`/PRIVATE/`), and an internal target is a URL path too: it is decoded and must stay inside the site (a target with a `..` segment, even one that stays inside, or with `\`, an encoded `/` or `\`, `%00`, control characters, invalid UTF-8 or a segment ending in `.` or a space, is answered with 404).*
 * *`addPreprocessor`: The executable path (at most 128 chars as written, without the `cgi>` prefix; it may use `{TURBO_CURRENT_DIR}`, kept as written and replaced when it runs) must exist; the `cgi>` prefix is optional and other prefixes are rejected. In `turbo.config`, an entry that can't be used (not a string, a wrong extension, a path too long or empty, another prefix, a missing executable) is kept with a warning in the log, and its extension answers 500: the files are never served as text. The CGI gets the URL path of the script (after the rewrite) in `SCRIPT_NAME`, an empty `PATH_INFO`, the original URI in `REQUEST_URI`, the file on disk in `SCRIPT_FILENAME` and the site's `@` in `DOCUMENT_ROOT`. `QUERY_STRING` has the client's query first and then the rewrite's, so an application that reads the last value of a repeated parameter (PHP does) gets the rewrite's. A header the site sets (`addHeader`) wins over the CGI's header with the same name. The headers about the connection that a CGI writes (`Transfer-Encoding`, `Connection`, `Keep-Alive`, `Upgrade`…) are dropped, and so are a `Content-Length` written twice and a header whose value has control characters (other than a tab): Turbo frames the response.*
@@ -280,6 +292,8 @@ The backend handles folder creation on disk and modifications to the in-RAM maps
 
 *All three parameters are required (except `a` in `delSite`): if one is missing, the response is `400` "Missing data".*
 
+*`delSite` also deletes a site or subdomain whose folder isn't there: Turbo keeps its settings (and `turbo.config` keeps them) for when the folder comes back, and only deleting it removes them; a folder with its name, later, is a new site. Neither one nor the other existing, the response is `400` "Site not found" (or "Subdomain not found").*
+
 ---
 
 ## 7. Global Security and Interface API
@@ -288,24 +302,32 @@ The backend handles folder creation on disk and modifications to the in-RAM maps
 A denied IP is blocked until the given date: its requests are answered with HTTP 429 and a `Retry-After` header (seconds left), and its new connections are closed.
 
 * **`POST /admin:inside:addDenied`**
-  * `s`: IP address (IPv4 or IPv6). Loopback addresses (`127.x.x.x`, `::1`) and the address the request comes from (`400` "Current IP": the panel would lock itself out) are not accepted.
+  * `s`: IP address (IPv4 or IPv6). An IPv6 address denies its whole /64, the client that the rate limits count (its addresses change by themselves). Loopback addresses (`127.x.x.x`, `::1`) and the address the request comes from, or for IPv6 one of its /64 (`400` "Current IP": the panel would lock itself out), are not accepted.
   * `d`: UNIX timestamp for block expiration (`0` or a past date removes an existing block).
 * **`POST /admin:inside:delDenied`**
   * `s`: IP address to unblock from the denied IP list.
 
 ### 7.2. HTTP Status Code Responses
+A template is the error page of every site, so both actions need the current password in `b` (as sent; missing, wrong or with the IP blocked, as in `set<KEY>`, §5), and every parameter goes as sent (§2.1). An error page never runs scripts: it carries a `Content-Security-Policy` without them on every host (§1.2).
+
 * **`POST /admin:inside:addHttpCodeResponse`**
   * `s`: HTTP status code (between `400` and `599`, or `0` for a universal fallback).
   * `d`: Response template, 1 to 2,048 characters. Line breaks and the `{TURBO_RESPONSE_CODE}` macro are supported.
+  * `b`: The current password.
 * **`POST /admin:inside:delHttpCodeResponse`**
   * `s`: HTTP status code to revert to the system's default behavior.
+  * `b`: The current password.
 
 ### 7.3. Global Character Replacement in URIs
+A replacement changes what the actions of the session alone read (§2.1), so both actions need the current password in `b` (as sent; missing, wrong or with the IP blocked, as in `set<KEY>`, §5), and every parameter goes as sent.
+
 * **`POST /admin:inside:addCharsReplace`**
-  * `s`: Character sequence to replace (e.g.: `;`), 1 to 4 bytes.
+  * `s`: Character sequence to replace (e.g.: `;`), 1 to 4 bytes, without letters or digits (`"Letters and digits are never replaced"`: with them, a token could turn a name into another one).
   * `d`: Target encoded token (e.g.: `-.-`): 2 to 16 characters, without any replaced character (its own included), not containing another token nor inside one; and `s` can't be inside another token. Otherwise, HTTP 400. The fixed substitutions of §2.1 can't be changed (`"Fixed replacement"`). In `turbo.config`, a replacement that breaks these rules is dropped with a warning.
+  * `b`: The current password.
 * **`POST /admin:inside:delCharsReplace`**
   * `s`: Character sequence to stop replacing (the fixed substitutions of §2.1 cannot be deleted).
+  * `b`: The current password.
 
 ---
 

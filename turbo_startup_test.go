@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -109,5 +110,20 @@ func TestI03_GracefulShutdown(t *testing.T) {
 	}
 	if code := <-answered; code != 200 {
 		t.Errorf("the request in progress ended with %d; expected 200", code)
+	}
+}
+
+// Review of 57cbb3c, F6: a TURBO_USER that can't be "U" (more than 24 characters) stops Turbo from starting: it is
+// saved as "U", and the turbo.config would be refused once the variable is unset.
+func TestRL_F6_InvalidTurboUser(t *testing.T) {
+	p := startTurbo(t, t.TempDir(), "TURBO_USER="+strings.Repeat("u", 25), "TURBO_PASSWORD=Another-1")
+	select {
+	case err := <-p.done:
+		p.done <- err
+		if err == nil || !strings.Contains(p.out.String(), "TURBO_USER must have 1 to 24 characters") {
+			t.Errorf("exit %v with:\n%s", err, p.out.String())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatalf("Turbo started with a TURBO_USER of 25 characters\n%s", p.out.String())
 	}
 }

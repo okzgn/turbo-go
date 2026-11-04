@@ -104,8 +104,9 @@ func TestI17_DangerousActionsPasswordKeepsTokens(t *testing.T) {
 	initForTest(t)
 	base := startServer(t)
 	tok := login(t, base)
-	const password = "ab-.-cd"
-	if code, body, _ := post(base, "/admin:inside:setP?a="+password+"&b=Admin", tok); code != 200 {
+	const password = "abcd-.-efghij"
+	code, body, tok, _ := postSession(base, "/admin:inside:setP?a="+password+"&b=Admin", tok)
+	if code != 200 {
 		t.Fatalf("setP: %d %q", code, body)
 	}
 	for _, path := range []string{

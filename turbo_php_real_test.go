@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -37,11 +38,14 @@ $_SESSION["n"] = ($_SESSION["n"] ?? 0) + 1;
 echo $_SESSION["n"];`,
 	"slow.php":  `<?php sleep(6); echo "late";`,
 	"bg.php":    `<?php pclose(popen("sleep 4 &", "w")); echo "leaves a process";`,
-	"fatal.php": `<?php this_function_does_not_exist(); echo "never";`,
+	"fatal.php": `<?php ini_set("display_errors", "0"); this_function_does_not_exist(); echo "never";`, // As php.ini-production, whatever the php.ini of the machine
 	"big.php":   `<?php echo str_repeat("x", 5 * 1024 * 1024);`,
 }
 
 func TestV02_PHPReal(t *testing.T) {
+	if runtime.GOOS == "windows" { // Without php.ini display_errors is on, and the scripts use sh and sleep
+		t.Skip("checked on Linux: PHP's defaults and the commands of the scripts differ on Windows")
+	}
 	php, err := exec.LookPath("php-cgi")
 	if err != nil {
 		t.Skip("php-cgi is not installed")

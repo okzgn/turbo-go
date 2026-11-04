@@ -185,13 +185,13 @@ func TestP28_TokenInVisitsLog(t *testing.T) {
 // password in plain text.
 func TestP29_CredentialsNotPersisted(t *testing.T) {
 	dir := initForTest(t)
-	defaultSettingValidators["."]["P"]("NewPassword", "Admin")
-	if ok, msg := defaultSettingValidators["."]["C"]("", "NewPassword"); !ok {
+	defaultSettingValidators["."]["P"]("NewPassword1", "Admin")
+	if ok, msg := defaultSettingValidators["."]["C"]("", "NewPassword1"); !ok {
 		t.Fatalf("setC: %q", msg)
 	}
 	b, _ := os.ReadFile(dir + "turbo.config")
 	s := string(b)
-	if strings.Contains(s, "NewPassword") {
+	if strings.Contains(s, "NewPassword1") {
 		t.Error("plain-text password in turbo.config")
 	}
 	if !strings.Contains(s, `"PH"`) || !strings.Contains(s, `"U"`) {
@@ -200,8 +200,8 @@ func TestP29_CredentialsNotPersisted(t *testing.T) {
 	// Restart: the state goes back to Turbo/Admin and turbo.config is read.
 	resetTestState(dir)
 	updateSettings(false)
-	if !passwordMatches("NewPassword") || passwordMatches("Admin") {
-		t.Errorf("after restarting: NewPassword=%v Admin=%v; expected only NewPassword", passwordMatches("NewPassword"), passwordMatches("Admin"))
+	if !passwordMatches("NewPassword1") || passwordMatches("Admin") {
+		t.Errorf("after restarting: NewPassword1=%v Admin=%v; expected only NewPassword1", passwordMatches("NewPassword1"), passwordMatches("Admin"))
 	}
 }
 
@@ -209,14 +209,16 @@ func TestP29_CredentialsNotPersisted(t *testing.T) {
 func TestC_CredentialsEnvPriority(t *testing.T) {
 	dir := initForTest(t)
 	defaultSettingValidators["."]["U"]("Other", "Admin")
-	defaultSettingValidators["."]["P"]("FromFile", "Admin")
+	if ok, msg := defaultSettingValidators["."]["P"]("FromFilePassword", "Admin"); !ok {
+		t.Fatal(msg)
+	}
 	saveDefaultConfig() // Takes the locks itself (T20)
 	resetTestState(dir)
 	setPanelPassword("FromEnv")
 	userFromEnv, passwordFromEnv = true, true
 	updateSettings(false)
-	if panelUser.Get() != "Turbo" || !passwordMatches("FromEnv") || passwordMatches("FromFile") {
-		t.Errorf("U=%q FromEnv=%v FromFile=%v; expected the credentials from the environment", panelUser.Get(), passwordMatches("FromEnv"), passwordMatches("FromFile"))
+	if panelUser.Get() != "Turbo" || !passwordMatches("FromEnv") || passwordMatches("FromFilePassword") {
+		t.Errorf("U=%q FromEnv=%v FromFilePassword=%v; expected the credentials from the environment", panelUser.Get(), passwordMatches("FromEnv"), passwordMatches("FromFilePassword"))
 	}
 }
 
@@ -501,8 +503,12 @@ func TestW_PanelAccessHosts(t *testing.T) {
 	if ok, msg := defaultSettingValidators["."]["PA"]("127.0.0.0/8", "Admin"); !ok { // by the client's IP
 		t.Fatalf("PA: %q", msg)
 	}
-	if c := adminCode("other.test"); c != 200 {
-		t.Errorf("/admin: from 127.0.0.1 with PA=127.0.0.0/8 -> %d; expected 200", c)
+	// Production review, M-10: with networks only, the panel answers on IP addresses and localhost, not on a name,
+	// which a page of another site could make resolve to Turbo (DNS rebinding) from the browser of someone in them.
+	for host, want := range map[string]int{"127.0.0.1": 200, "[::1]": 200, "localhost": 200, "LocalHost": 200, "other.test": 404, "127.0.0.1.nip.io": 404} {
+		if c := adminCode(host); c != want {
+			t.Errorf("/admin: on %s from 127.0.0.1 with PA=127.0.0.0/8 -> %d; expected %d", host, c, want)
+		}
 	}
 	saveDefaultConfig() // Takes the locks itself (T20)
 	if raw := savedConfig(t, dir); raw["."]["PA"] != "127.0.0.0/8" {
@@ -728,13 +734,20 @@ func TestW_CredentialsUnchanged(t *testing.T) {
 	tok := login(t, base)
 	for _, c := range []struct{ path, want string }{
 		{"/admin:inside:setU?a=Turbo&b=Admin", "User unchanged"},
-		{"/admin:inside:setP?a=Admin&b=Admin", "Password unchanged"},
+		{"/admin:inside:setP?a=Admin&b=Admin", "The password must have 12 to 64 bytes"}, // Production review, M-09
 	} {
 		if code, body, err := post(base, c.path, tok); err != nil || code != 400 || body != c.want {
 			t.Errorf("%s: %d %q %v; expected 400 %q", c.path, code, body, err, c.want)
 		}
 	}
-	if code, body, _ := post(base, "/admin:inside:setU?a=Turbo2&b=Admin", tok); code != 200 {
+	code, body, tok, _ := postSession(base, "/admin:inside:setP?a=LongerPassword&b=Admin", tok)
+	if code != 200 {
+		t.Fatalf("setP with a longer password: %d %q", code, body)
+	}
+	if code, body, err := post(base, "/admin:inside:setP?a=LongerPassword&b=LongerPassword", tok); err != nil || code != 400 || body != "Password unchanged" {
+		t.Errorf("setP with the same password: %d %q %v; expected 400 \"Password unchanged\"", code, body, err)
+	}
+	if code, body, _ := post(base, "/admin:inside:setU?a=Turbo2&b=LongerPassword", tok); code != 200 {
 		t.Errorf("setU with another user: %d %q", code, body)
 	}
 }

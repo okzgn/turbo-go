@@ -280,6 +280,42 @@ func (h *h2) read(stream uint32) (body string, goaway bool, code uint32) {
 	}
 }
 
+// readHeaders reads frames until the HEADERS of the stream and returns its fields. Use it on a new connection:
+// the block then decodes with an empty HPACK table, as the server's is when it writes it.
+func (h *h2) readHeaders(stream uint32) map[string]string {
+	for {
+		header := make([]byte, 9)
+		if _, err := io.ReadFull(h.br, header); err != nil {
+			h.t.Fatalf("reading frames: %v", err)
+		}
+		n := int(header[0])<<16 | int(header[1])<<8 | int(header[2])
+		payload := make([]byte, n)
+		if _, err := io.ReadFull(h.br, payload); err != nil {
+			h.t.Fatal(err)
+		}
+		kind, flags, id := header[3], header[4], binary.BigEndian.Uint32(header[5:])&0x7fffffff
+		switch {
+		case kind == 4 && flags&1 == 0: // The server's SETTINGS
+			h.frame(4, 1, 0, nil)
+		case kind == 7: // GOAWAY
+			h.t.Fatalf("GOAWAY waiting for the headers of stream %d", stream)
+		case kind == 1 && id == stream:
+			if flags&0x4 == 0 || flags&0x28 != 0 {
+				h.t.Fatalf("HEADERS with flags %#x: only a single block without padding or priority is read", flags)
+			}
+			decoded, err := customNetHttp.NewDecoder(4096, nil).DecodeFull(payload)
+			if err != nil {
+				h.t.Fatal(err)
+			}
+			fields := make(map[string]string, len(decoded))
+			for _, field := range decoded {
+				fields[field.Name] = field.Value
+			}
+			return fields
+		}
+	}
+}
+
 // P2, P3 and P5: over HTTP/2, a :path above TurboMaxURILength gives 414 and a list of
 // headers above TurboMaxHeaderBytes (bytes of name and value plus 32 per field, as
 // HTTP/2 counts them; C6) gives 431, both with the template; the limit is exact.
@@ -1230,4 +1266,40 @@ func FuzzHTTP2Headers(f *testing.F) {
 			t.Errorf("operations %x: the handler got %d bytes of headers with MHB = %d", operations, size, maxHeaderBytes)
 		}
 	})
+}
+
+// Review of 57cbb3c, F2: the empty lines that a client may send after the body of a POST (which Go discards) don't
+// end the headers of the next request: with MHB = 600, one of 3 000 bytes behind them gets 431, as without them.
+// Before, any request that fit in the read buffer got through.
+func TestRL_F2_HeaderLimitAfterPOSTEmptyLines(t *testing.T) {
+	initForTest(t)
+	withLimit(t, &customNetHttp.TurboMaxHeaderBytes, 600)
+	addr := forkServer(t, false, func(w customNetHttp.ResponseWriter, r *customNetHttp.Request) {
+		io.Copy(io.Discard, r.Body)
+		io.WriteString(w, "ok")
+	})
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(5 * time.Second))
+	// Reading the body (without a limit) fills the read buffer with the rest: the next request is all there.
+	io.WriteString(c, "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 1000\r\n\r\n"+strings.Repeat("b", 1000)+"\r\n\r\n"+
+		"GET / HTTP/1.1\r\nHost: x\r\nX-Padding: "+strings.Repeat("r", 3000)+"\r\n\r\n")
+	br := bufio.NewReader(c)
+	var codes []int
+	for range 2 {
+		res, err := http.ReadResponse(br, nil)
+		if err != nil {
+			codes = append(codes, 0)
+			break
+		}
+		io.Copy(io.Discard, res.Body)
+		res.Body.Close()
+		codes = append(codes, res.StatusCode)
+	}
+	if len(codes) != 2 || codes[0] != 200 || codes[1] != 431 {
+		t.Errorf("POST, empty lines and a GET with 3000 bytes of headers, MHB = 600: %v; expected [200 431]", codes)
+	}
 }

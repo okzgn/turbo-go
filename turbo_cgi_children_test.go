@@ -101,6 +101,11 @@ func TestN70_CGISilentThenWritesAndExits(t *testing.T) {
 	base, _ := childCGISetup(t, "30s")
 	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
 	const requests, parallel = 72, 24
+	// A slot for each request at once: the automatic CGP is max(16, 4 x CPUs), and with 4 CPUs (a hosted CI runner)
+	// the requests beyond 16 waited for a slot and some got 503, which isn't what this test looks at.
+	previousCGP := cgiProcesses.Load()
+	cgiProcesses.Store(parallel)
+	t.Cleanup(func() { cgiProcesses.Store(previousCGP) })
 	var failed atomic.Int32
 	var wg sync.WaitGroup
 	slots := make(chan struct{}, parallel)

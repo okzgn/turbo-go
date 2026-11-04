@@ -28,6 +28,7 @@ package customNetHttp
 // kernel32 directly: without new dependencies.
 
 import (
+	"log/slog"
 	"os/exec"
 	"sync"
 	"syscall"
@@ -85,26 +86,42 @@ func turboCGIPrepare(cmd *exec.Cmd) *turboCGIGroup {
 	return group
 }
 
+// turboJobWarning makes the failure to put a CGI in a Job Object logged once.
+var turboJobWarning sync.Once
+
+// turboJobFailed logs, the first time, that a CGI couldn't go in a Job Object:
+// ended, only the CGI itself is killed, not the processes it started.
+func turboJobFailed(step string, err error) {
+	turboJobWarning.Do(func() {
+		slog.Warn("A CGI couldn't go in a Job Object: when it is ended, the processes it started go on (logged once)", "step", step, "error", err)
+	})
+}
+
 // started creates the Job Object and puts the process, already started, in it.
-// If something fails, the CGI goes on without a Job Object, as before.
+// If something fails, the CGI goes on without a Job Object, as before, and the
+// first failure is logged.
 func (g *turboCGIGroup) started(cmd *exec.Cmd) {
-	job, _, _ := turboCreateJobObject.Call(0, 0)
+	job, _, callErr := turboCreateJobObject.Call(0, 0)
 	if job == 0 {
+		turboJobFailed("CreateJobObject", callErr)
 		return
 	}
 	limits := turboJobLimits{LimitFlags: turboJobObjectLimitKillOnJobClose}
-	if ok, _, _ := turboSetInformationJobObject.Call(job, turboJobObjectExtendedLimitInformation, uintptr(unsafe.Pointer(&limits)), unsafe.Sizeof(limits)); ok == 0 {
+	if ok, _, callErr := turboSetInformationJobObject.Call(job, turboJobObjectExtendedLimitInformation, uintptr(unsafe.Pointer(&limits)), unsafe.Sizeof(limits)); ok == 0 {
 		syscall.CloseHandle(syscall.Handle(job))
+		turboJobFailed("SetInformationJobObject", callErr)
 		return
 	}
 	process, err := syscall.OpenProcess(turboProcessSetQuotaAndTerminate, false, uint32(cmd.Process.Pid))
 	if err != nil {
 		syscall.CloseHandle(syscall.Handle(job))
+		turboJobFailed("OpenProcess", err)
 		return
 	}
 	defer syscall.CloseHandle(process)
-	if ok, _, _ := turboAssignProcessToJobObject.Call(job, uintptr(process)); ok == 0 {
+	if ok, _, callErr := turboAssignProcessToJobObject.Call(job, uintptr(process)); ok == 0 {
 		syscall.CloseHandle(syscall.Handle(job))
+		turboJobFailed("AssignProcessToJobObject", callErr)
 		return
 	}
 	g.mutex.Lock()

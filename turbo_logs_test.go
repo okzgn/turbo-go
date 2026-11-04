@@ -112,3 +112,16 @@ func TestN110_LogThatCannotBeOpenedIsWarned(t *testing.T) {
 		t.Error("the log that can be opened now is not used")
 	}
 }
+
+// Review of 57cbb3c, S5: a field with a C1 control character, a Unicode line separator or invalid UTF-8 is written
+// quoted and escaped, as one with an ASCII control character; other characters go as they are.
+func TestRL_S5_LogFieldQuotesWhatDoesNotPrint(t *testing.T) {
+	for field, quoted := range map[string]bool{
+		"/a\u0085b": true, "/a b": true, "/a\x9bb": true, "/a\xffb": true, "/a b": true, "/a\tb": true,
+		"/año/中": false, "/plain": false,
+	} {
+		if got := logField(field); (got != field) != quoted {
+			t.Errorf("logField(%q) = %q; quoted: %v expected", field, got, quoted)
+		}
+	}
+}

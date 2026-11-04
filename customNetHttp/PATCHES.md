@@ -71,31 +71,31 @@ Each patch cites its tests with the file they are in (in the repository root).
 
 ### P1. Errors before the handler in HTTP/1 with Turbo's template
 
-- **What it does:** the responses that `conn.serve` writes before reaching any handler (400 for a malformed request or a `statusError`, 431, 501 for an unknown `Transfer-Encoding`; the 414 of P3; and the 400 of a plain HTTP request to the TLS port) use Turbo's error template (`TurboErrorTemplates`) and carry `Server`, `X-Content-Type-Options: nosniff` and `Connection: close`. The 417 of an unknown `Expect` goes out through `Error`, and so with the template (P9).
-- **Where:** `1.net.http.server.go`, `(*conn).serve`; `turboConnError` and `turboErrorTemplate` in `0.turbo.patches.go`.
-- **Why:** Turbo's error responses use a template configurable from the panel; Go writes a fixed text that can't be changed from outside.
-- **Patch:** `patches/01-P1-http1-errors.patch`. **Test:** `TestT21_P1_HTTP1Errors` (`turbo_patches_test.go`).
+- **What it does:** the responses that `conn.serve` writes before reaching any handler (400 for a malformed request or a `statusError`, 431, 501 for an unknown `Transfer-Encoding`; the 414 of P3; and the 400 of a plain HTTP request to the TLS port) use Turbo's error template (`TurboErrorTemplates`) and carry `Server`, `X-Content-Type-Options: nosniff`, `Connection: close` and a `Content-Security-Policy` that allows no scripts (`turboErrorCSP`): the host of the request may be the panel's, and isn't always known yet. The 417 of an unknown `Expect` goes out through `Error`, and so with the template (P9).
+- **Where:** `1.net.http.server.go`, `(*conn).serve`; `turboConnError`, `turboErrorCSP` and `turboErrorTemplate` in `0.turbo.patches.go`.
+- **Why:** Turbo's error responses use a template configurable from the panel; Go writes a fixed text that can't be changed from outside. The template may be HTML, and the panel's session can set it without the password: on the panel's origin, its scripts must not run.
+- **Patch:** `patches/01-P1-http1-errors.patch`. **Tests:** `TestT21_P1_HTTP1Errors` (`turbo_patches_test.go`), `TestRM1_ErrorsBeforeHandlerWithoutScripts` (`turbo_panel_host_test.go`).
 
 ### P2. HTTP/2 431 with the template
 
-- **What it does:** `http2handleHeaderListTooLong` responds with the template (`turboWriteError`) instead of Go's fixed HTML.
+- **What it does:** `http2handleHeaderListTooLong` responds with the template (`turboWriteError`, which adds the `Content-Security-Policy` of P1) instead of Go's fixed HTML.
 - **Where:** `1.net.http.h2_bundle.go`; `turboWriteError` in `0.turbo.patches.go`.
 - **Why:** that of P1, in HTTP/2.
-- **Patch:** `patches/02-P2-http2-errors.patch`. **Test:** `TestT21_P2_HTTP2Limits` (`turbo_patches_test.go`).
+- **Patch:** `patches/02-P2-http2-errors.patch`. **Tests:** `TestT21_P2_HTTP2Limits` (`turbo_patches_test.go`), `TestRM1_ErrorsBeforeHandlerWithoutScripts` (`turbo_panel_host_test.go`).
 
 ### P3. URI length limit (`TurboMaxURILength`, setting `MUB`)
 
-- **What it does:** in HTTP/1, `readRequest` returns `errTurboURITooLong` as soon as it reads the request line if the URI exceeds `TurboMaxURILength`, and `conn.serve` responds 414 with the template. In HTTP/2, `processHeaders` replaces the handler with a 414 with the template if `:path` exceeds `TurboMaxURILength` (a 431 for truncated headers takes precedence, and a `:path` longer than `MUB` doesn't count towards `MHB`: see P5). In HTTP/1 `RequestURI` is measured as it arrives, so in an absolute-form request (`GET http://host/x`) the scheme and the host count too. In HTTP/2, a malformed `:path` (empty, or one Go can't read as a URI) is rejected earlier by Go as a stream error: `RST_STREAM` with `PROTOCOL_ERROR`, with no response, neither 400 nor 414.
+- **What it does:** in HTTP/1, `readRequest` returns `errTurboURITooLong` as soon as it reads the request line if the URI exceeds `TurboMaxURILength`, and `conn.serve` responds 414 with the template. In HTTP/2, `processHeaders` replaces the handler with a 414 with the template (`turboWriteError`, with the `Content-Security-Policy` of P1) if `:path` exceeds `TurboMaxURILength` (a 431 for truncated headers takes precedence, and a `:path` longer than `MUB` doesn't count towards `MHB`: see P5). In HTTP/1 `RequestURI` is measured as it arrives, so in an absolute-form request (`GET http://host/x`) the scheme and the host count too. In HTTP/2, a malformed `:path` (empty, or one Go can't read as a URI) is rejected earlier by Go as a stream error: `RST_STREAM` with `PROTOCOL_ERROR`, with no response, neither 400 nor 414.
 - **Where:** `1.net.http.request.go` (`readRequest`), `1.net.http.server.go` (`(*conn).serve`), `1.net.http.h2_bundle.go` (`(*http2serverConn).processHeaders`); `turboErrorHandler` and `errTurboURITooLong` in `0.turbo.patches.go`.
 - **Why:** Go doesn't limit the URI separately.
 - **Patch:** `patches/03-P3-uri-limit.patch`. **Tests:** `TestT21_P1_HTTP1Errors` (`turbo_patches_test.go`), `TestT21_P2_HTTP2Limits` (`turbo_patches_test.go`), `TestP25_LimitsValueCopy` (`turbo_limits_test.go`).
 
 ### P4. Exact maximum size of the HTTP/1 headers (`TurboMaxHeaderBytes`, setting `MHB`)
 
-- **What it does:** `(*Server).maxHeaderBytes` returns `TurboMaxHeaderBytes`, read once per request (`conn.turboReadLimit`, which the `StateActive` check also uses), without looking at `Server.MaxHeaderBytes`; `initialReadLimitSize` doesn't add Go's 4096 bytes of margin. The limit also holds for the following requests of a connection: the wait between requests (the `Peek` of `serve`) already reads with it, and the bytes that are in the buffer when a request starts to be read (from that wait, or from the previous request under *pipelining*) count towards it (`turboHeadersInBuffer`); before, after the first request the real limit was `MHB` + 4096.
+- **What it does:** `(*Server).maxHeaderBytes` returns `TurboMaxHeaderBytes`, read once per request (`conn.turboReadLimit`, which the `StateActive` check also uses), without looking at `Server.MaxHeaderBytes`; `initialReadLimitSize` doesn't add Go's 4096 bytes of margin. The limit also holds for the following requests of a connection: the wait between requests (the `Peek` of `serve`) already reads with it, and the bytes that are in the buffer when a request starts to be read (from that wait, or from the previous request under *pipelining*) count towards it (`turboHeadersInBuffer`, which doesn't take the empty lines that may come after the body of a POST for the end of the headers); before, after the first request the real limit was `MHB` + 4096.
 - **Where:** `1.net.http.server.go`.
 - **Why:** so that `MHB` is the exact number of bytes of the header and applies without restarting.
-- **Patch:** `patches/04-P4-http1-headers.patch`. **Tests:** `TestT21_P1_HTTP1Errors` and `TestN46_HTTP1KeepAliveHeaderLimit` (`turbo_patches_test.go`), `TestP25_LimitsValueCopy` (`turbo_limits_test.go`).
+- **Patch:** `patches/04-P4-http1-headers.patch`. **Tests:** `TestT21_P1_HTTP1Errors`, `TestN46_HTTP1KeepAliveHeaderLimit` and `TestRL_F2_HeaderLimitAfterPOSTEmptyLines` (`turbo_patches_test.go`), `TestP25_LimitsValueCopy` (`turbo_limits_test.go`).
 
 ### P5. HTTP/2 header limits (`TurboMaxHeaderBytes`)
 
@@ -127,9 +127,9 @@ Each patch cites its tests with the file they are in (in the repository root).
 
 ### P9. `Error` and `NotFound` with Turbo's template
 
-- **What it does:** `Error` responds with the template of the code (`{TURBO_RESPONSE_CODE}`; HTML if it starts with `<`) and the detail on the next line, escaped with `html.EscapeString` if the template is HTML; `NotFound` adds no text of its own. The internal responses of `ServeFile` and `ServeContent` (400, 403, 404, 416, 500) use them too. The headers are set before `WriteHeader`, so that they reach the response.
-- **Where:** `1.net.http.server.go`: `Error`, `NotFound`; `turboErrorTemplate` in `0.turbo.patches.go`.
-- **Patch:** `patches/09-P9-error-template.patch`. **Tests:** `TestT21_P9_ErrorTemplate` (`turbo_patches_test.go`), `TestC8_HTMLTemplateDetailEscaped` (`turbo_patches_test.go`), `TestW_ErrorHeaders` (`turbo_serving_test.go`).
+- **What it does:** `Error` responds with the template of the code (`{TURBO_RESPONSE_CODE}`; HTML if it starts with `<`) and the detail on the next line, escaped with `html.EscapeString` if the template is HTML; `NotFound` adds no text of its own. The internal responses of `ServeFile` and `ServeContent` (400, 403, 404, 416, 500) use them too. Every response of `Error` carries the `Content-Security-Policy` without scripts of the errors (`turboErrorCSP`), on every host: an error page needs none, and with `PA` empty the sites share the panel's origin, where a template with a script would run. The headers are set before `WriteHeader`, so that they reach the response.
+- **Where:** `1.net.http.server.go`: `Error`, `NotFound`; `turboErrorTemplate` and `turboErrorCSP` in `0.turbo.patches.go`.
+- **Patch:** `patches/09-P9-error-template.patch`. **Tests:** `TestT21_P9_ErrorTemplate` (`turbo_patches_test.go`), `TestC8_HTMLTemplateDetailEscaped` (`turbo_patches_test.go`), `TestW_ErrorHeaders` (`turbo_serving_test.go`), `TestRP_M02_ErrorTemplatesWithoutScriptsOnAnyHost` (`turbo_panel_host_test.go`).
 
 ### P10. Forms with `MBB` (`TurboMaxBodySize`), `TurboMaxFormParts` and `TurboMaxFormHeaders`; multipart in memory only
 

@@ -6,11 +6,14 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"maps"
 	"net"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -182,13 +185,14 @@ func TestA3_PanelRejectsControlChars(t *testing.T) {
 	if code, body, _ := post(base, "/admin:inside:setPA?"+url.Values{"a": {"127.0.0.0/8,::1/128"}, "b": {"Admin"}}.Encode(), tok); code != 200 {
 		t.Fatalf("setPA: %d %q", code, body)
 	}
-	if code, body, _ := post(base, "/admin:inside:setP?"+url.Values{"a": {"Another"}, "b": {"Admin"}}.Encode(), tok); code != 200 {
+	code, body, tok, _ := postSession(base, "/admin:inside:setP?"+url.Values{"a": {"AnotherPassword"}, "b": {"Admin"}}.Encode(), tok)
+	if code != 200 {
 		t.Fatalf("setP: %d %q", code, body)
 	}
 	for _, path := range []string{
 		"addHeader?" + url.Values{"s": {"localhost"}, "d": {""}, "a": {"X-Header"}, "b": {"value\x01broken"}}.Encode(),
 		"addRewrite?" + url.Values{"s": {"localhost"}, "d": {""}, "a": {"/x"}, "b": {"/y\x1b"}}.Encode(),
-		"setU?" + url.Values{"a": {"us\x7fer"}, "b": {"Another"}}.Encode(),
+		"setU?" + url.Values{"a": {"us\x7fer"}, "b": {"AnotherPassword"}}.Encode(),
 		"addHttpCodeResponse?" + url.Values{"s": {"404"}, "d": {"no\x00"}}.Encode(),
 		"addCharsReplace?" + url.Values{"s": {"\x02"}, "d": {"x"}}.Encode(),
 	} {
@@ -198,10 +202,10 @@ func TestA3_PanelRejectsControlChars(t *testing.T) {
 		}
 	}
 	// A template may span lines.
-	if code, body, _ := post(base, "/admin:inside:addHttpCodeResponse?"+url.Values{"s": {"404"}, "d": {"<p>\r\n\tNot here</p>"}}.Encode(), tok); code != 200 {
+	if code, body, _ := post(base, "/admin:inside:addHttpCodeResponse?"+url.Values{"s": {"404"}, "d": {"<p>\r\n\tNot here</p>"}, "b": {"AnotherPassword"}}.Encode(), tok); code != 200 {
 		t.Errorf("template with line breaks: %d %q", code, body)
 	}
-	if code, body, _ := post(base, "/admin:inside:setC?a=&b=Another", tok); code != 200 {
+	if code, body, _ := post(base, "/admin:inside:setC?a=&b=AnotherPassword", tok); code != 200 {
 		t.Fatalf("setC: %d %q", code, body)
 	}
 	if data, _ := os.ReadFile(dir + "turbo.config"); !json.Valid(data) {
@@ -213,7 +217,7 @@ func TestA3_PanelRejectsControlChars(t *testing.T) {
 	if err := updateSettings(false); err != nil {
 		t.Fatal(err)
 	}
-	if passwordMatches("Admin") || !passwordMatches("Another") {
+	if passwordMatches("Admin") || !passwordMatches("AnotherPassword") {
 		t.Error("after reloading, the password is not the saved one")
 	}
 	if panelAccess.Load().setting != "127.0.0.0/8,::1/128" {
@@ -557,6 +561,91 @@ func TestN86_PointerWithoutTarget(t *testing.T) {
 	}
 }
 
+// Review of 57cbb3c, A2: a whole turbo.config whose "M" names a folder without turbo.config applies there, with its
+// sites, which are those of that folder. Before, it was applied here (against that folder) and emptied when
+// following "M": every site was left with the defaults, its scripts served as text. The folders of the directory
+// that "M" leaves aren't its sites.
+func TestRA2_WholeConfigAppliesWhereMPoints(t *testing.T) {
+	dirA := initForTest(t)
+	dirC := filepath.ToSlash(t.TempDir()) + "/"
+	if err := os.MkdirAll(dirC+"example.test/@", 0755); err != nil {
+		t.Fatal(err)
+	}
+	whole := `{"^":{"v":"2"},".":{"M":"` + dirC + `","U":"admin2"},"example.test":{"":{"?":{"cgi":"` + toolPath("cgiecho") + `"},".":{"X-Kept":"1"}}}}`
+	if err := os.WriteFile(dirA+"turbo.config", []byte(whole), 0600); err != nil {
+		t.Fatal(err)
+	}
+	resetTestState(dirA)
+	if err := updateSettings(false); err != nil {
+		t.Fatal(err)
+	}
+	check := func(when string) {
+		t.Helper()
+		globalMutex.RLock()
+		active, preprocessor, header := siteExists("example.test", ""), preprocessors["example.test"]["cgi"], customHeaders["example.test"]["X-Kept"]
+		folderOfA := siteExists("localhost", "")
+		globalMutex.RUnlock()
+		if !sameDir(sitesDir.Get(), dirC) || panelUser.Get() != "admin2" || !active || preprocessor == "" || header != "1" || folderOfA {
+			t.Errorf("%s: sites %q, user %q, example.test active %v with preprocessor %q and header %q, localhost of the directory left active %v; expected %s, admin2, the site with its settings and no localhost",
+				when, sitesDir.Get(), panelUser.Get(), active, preprocessor, header, folderOfA, dirC)
+		}
+	}
+	check("at start")
+	updateSettings(true)
+	check("after a reload")
+
+	// Saving writes it whole there, and leaves here a pointer to it (and a copy of the whole one).
+	if !saveDefaultConfig() {
+		t.Fatal("saving failed")
+	}
+	site, _ := savedConfig(t, dirC)["example.test"][""].(map[string]interface{})
+	if preprocessorsSaved, _ := site["?"].(map[string]interface{}); preprocessorsSaved["cgi"] != toolPath("cgiecho") {
+		t.Errorf("turbo.config saved in %s: example.test is %v; expected its preprocessor", dirC, site)
+	}
+	if !isSitesDirPointerMap(savedConfig(t, dirA)) {
+		t.Errorf("turbo.config of %s after saving: %v; expected a pointer to %s", dirA, savedConfig(t, dirA), dirC)
+	}
+}
+
+// Review of 57cbb3c, A2: with a turbo.config of its own in the folder that "M" names, that one must be usable before
+// anything is applied: it can't be read, or its pointers lead back here. Turbo doesn't start with it and a reload
+// keeps the configuration in use; before, the reload had already emptied it.
+func TestRA2_UnusableTargetOfMKeepsConfigInUse(t *testing.T) {
+	for _, scenario := range []string{"invalid turbo.config", "pointer back here"} {
+		dirA := initForTest(t)
+		dirC := filepath.ToSlash(t.TempDir()) + "/"
+		inUse := `{"^":{"v":"2"},"localhost":{"":{"?":{"cgi":"` + toolPath("cgiecho") + `"},"-":{"index.html":"1"}}}}`
+		loadConfig(t, dirA, inUse)
+		target := `{broken`
+		if scenario == "pointer back here" {
+			target = `{"^":{"v":"2"},".":{"M":"` + dirA + `"}}`
+		}
+		if err := os.WriteFile(dirC+"turbo.config", []byte(target), 0600); err != nil {
+			t.Fatal(err)
+		}
+		pointing := strings.Replace(inUse, `{"^":{"v":"2"},`, `{"^":{"v":"2"},".":{"M":"`+dirC+`"},`, 1)
+		if err := os.WriteFile(dirA+"turbo.config", []byte(pointing), 0600); err != nil {
+			t.Fatal(err)
+		}
+		withGlobalLock(func() { configFileModTime = 3 }) // Changed since it was read
+		err := updateSettings(true)
+		if err == nil || !strings.Contains(err.Error(), dirC) {
+			t.Errorf("%s: reload with %q: %v; expected an error that names %s", scenario, pointing, err, dirC)
+		}
+		globalMutex.RLock()
+		active, preprocessor := siteExists("localhost", ""), preprocessors["localhost"]["cgi"]
+		globalMutex.RUnlock()
+		if !sameDir(sitesDir.Get(), dirA) || !active || preprocessor == "" {
+			t.Errorf("%s: after the reload, sites %q, localhost active %v with preprocessor %q; expected the configuration in use", scenario, sitesDir.Get(), active, preprocessor)
+		}
+
+		resetTestState(dirA) // A start with that turbo.config
+		if err := updateSettings(false); err == nil {
+			t.Errorf("%s: Turbo starts with a turbo.config whose \"M\" can't be followed", scenario)
+		}
+	}
+}
+
 // N115: a turbo.config without "M" and with nothing else ({}, only "^", or an empty ".") points nowhere: it is an
 // empty configuration, valid for parseSiteConfig, and has to load as one, at start and in a reload. The check of
 // N86 took it for a pointer whose target doesn't exist. Found by FuzzConfigReload.
@@ -612,5 +701,86 @@ func TestN88_ControlCharsInPanelSettings(t *testing.T) {
 		} else {
 			t.Logf("%s: %v", name, err)
 		}
+	}
+}
+
+// Review of 57cbb3c, F4: from the panel, a header that only differs in case from one of the site replaces it. Before,
+// both stayed, and each response carried either value, as the map gave them.
+func TestRL_F4_HeaderInOtherCaseReplaces(t *testing.T) {
+	initForTest(t)
+	globalMutex.Lock()
+	subdomainContentCheckers["."](true, map[string]interface{}{"X-Test": "1"}, false, "localhost", "")
+	applied, message := subdomainContentCheckers["."](true, map[string]interface{}{"x-test": "2"}, false, "localhost", "")
+	headers := maps.Clone(customHeaders["localhost"])
+	globalMutex.Unlock()
+	if !applied || message != "Header changed" || len(headers) != 1 || headers["x-test"] != "2" {
+		t.Errorf("x-test after X-Test: %v %q, headers %v; expected only x-test: 2", applied, message, headers)
+	}
+}
+
+// Review of 57cbb3c, F5: the date of a denied IP may be a JSON integer, and an entry of "@", "_" or "#" that can't be
+// used is logged. Before, an integer date denied nothing, without a word.
+func TestRL_F5_ListEntriesOfTheFile(t *testing.T) {
+	dir := initForTest(t)
+	logs := captureLog(t)
+	future := strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)
+	loadConfig(t, dir, `{"^":{"v":"2"},"@":{"203.0.113.5":`+future+`,"203.0.113.6":true,"not-an-ip":"`+future+`"}}`)
+	if deniedUntil("203.0.113.5") == 0 {
+		t.Error("a denied IP with its date as a JSON integer isn't denied")
+	}
+	for _, expected := range []string{"wrong type", "turbo.config denied IP discarded"} {
+		if !strings.Contains(logs.String(), expected) {
+			t.Errorf("no %q in the log:\n%s", expected, logs.String())
+		}
+	}
+}
+
+// Production review, M-03: a site of turbo.config, or a list of one, that isn't a JSON object makes the file invalid,
+// with a message that points at the site: Turbo doesn't start with it, and a reload keeps the configuration in use.
+// Before, the site was active without its preprocessors, its scripts served as text.
+func TestRP_M03_MalformedSiteSectionsInvalid(t *testing.T) {
+	dir := initForTest(t)
+	inUse := `{"^":{"v":"2"},"localhost":{"":{"?":{"cgi":"` + toolPath("cgiecho") + `"},"-":{"index.html":"1"}}}}`
+	loadConfig(t, dir, inUse)
+	for _, section := range []string{`{"":{"?":null}}`, `{"":{"?":"php"}}`, `{"":null}`, `{"":{"=":[]}}`, `{"www":"x","":{}}`} {
+		broken := "{\n\"^\":{\"v\":\"2\"},\n\"localhost\":" + section + "\n}\n"
+		if err := os.WriteFile(dir+"turbo.config", []byte(broken), 0600); err != nil {
+			t.Fatal(err)
+		}
+		withGlobalLock(func() { configFileModTime = 3 }) // Changed since it was read
+		err := updateSettings(true)
+		if !errors.As(err, &configSiteError{}) {
+			t.Errorf("reload with the site %s: %v; expected a site section that can't be used", section, err)
+		} else if message := configErrorMessage(err, false); !strings.Contains(message, "site section") || !strings.Contains(message, "Line 3") {
+			t.Errorf("the message for the site %s doesn't point at it:\n%s", section, message)
+		}
+		globalMutex.RLock()
+		active, preprocessor := siteExists("localhost", ""), preprocessors["localhost"]["cgi"]
+		globalMutex.RUnlock()
+		if !active || preprocessor == "" {
+			t.Errorf("after the reload with the site %s: localhost active %v with preprocessor %q; expected the configuration in use", section, active, preprocessor)
+		}
+	}
+	resetTestState(dir) // A start with the last one
+	if err := updateSettings(false); err == nil {
+		t.Error("Turbo starts with a site section that isn't an object")
+	}
+}
+
+// Production review, M-03: a preprocessor of turbo.config with a control character is kept, marked, and its extension
+// answers 500 (before, the entry was dropped and the files of the extension were served as text).
+func TestRP_M03_PreprocessorWithControlCharsAnswers500(t *testing.T) {
+	dir := initForTest(t)
+	base := startServer(t)
+	if err := os.WriteFile(dir+"localhost/@/script.cgi", []byte("SOURCE OF THE SCRIPT"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	logs := captureLog(t)
+	loadConfig(t, dir, `{"^":{"v":"2"},"localhost":{"":{"?":{"cgi":"`+toolPath("cgiecho")+`\u0001"}}}}`)
+	if code, body, err := get(base, "/script.cgi", nil); err != nil || code != 500 || strings.Contains(body, "SOURCE OF THE SCRIPT") {
+		t.Errorf("/script.cgi with a preprocessor that has a control character: %d %.80q %v; expected 500", code, body, err)
+	}
+	if !strings.Contains(logs.String(), "answers 500") {
+		t.Errorf("no log line for the preprocessor with a control character:\n%s", logs.String())
 	}
 }

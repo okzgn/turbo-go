@@ -110,6 +110,13 @@ grep '^Cap' /proc/self/status
 ( : >>/usr/local/bin/turbo ) 2>/dev/null && echo "binary: written" || echo "binary: no"
 ( : >/home/server/turbo.dev/written ) 2>/dev/null && echo "turbo.dev: written" || echo "turbo.dev: no"
 ( : >/tmp/turbo-systemd-test ) 2>/dev/null && echo "tmp: written" || echo "tmp: no"
+echo "home: $(ls -A /home 2>/dev/null | tr '\n' ' ')"
+if command -v unshare >/dev/null; then
+	( unshare -U true ) 2>/dev/null && echo "namespace: created" || echo "namespace: refused"
+else
+	echo "namespace: refused (no unshare to try)"
+fi
+echo "umask: $(umask)"
 CGI
 chmod 0755 /home/server/cgi/test.sh
 printf '{"^":{"v":"2"},"localhost":{"":{"?":{"test":"/home/server/cgi/test.sh","slow":"/home/server/cgi/slow.sh"},"-":{"index.html":"1"},"!":{"S":"1"}}}}' >/home/server/turbo.config
@@ -125,6 +132,7 @@ if [ -n "${CERTBOT_WRAPPER:-}" ]; then
 		>/etc/systemd/system/turbo.service.d/certbot-test.conf
 fi
 chown -R turbo:turbo /home/server
+chmod 0750 /home/server
 install -d -o root -g root -m 0755 /home/server/turbo.dev
 install -d -o root -g root -m 0755 /etc/turbo
 install -o root -g root -m 0600 /dev/null /etc/turbo/credentials
@@ -157,6 +165,9 @@ check "the CGI writes the binary" "$(echo "$OUTPUT" | grep '^binary:')" "binary:
 check "the CGI writes turbo.dev" "$(echo "$OUTPUT" | grep '^turbo.dev:')" "turbo.dev: no"
 check "the CGI writes in its /tmp" "$(echo "$OUTPUT" | grep '^tmp:')" "tmp: written"
 check "its /tmp is private" "$([ -e /tmp/turbo-systemd-test ] && echo "visible in /tmp" || echo private)" "private"
+check "the CGI sees only /home/server in /home" "$(echo "$OUTPUT" | grep '^home:')" "home: server "
+check "the CGI can't create a user namespace" "$(echo "$OUTPUT" | grep '^namespace:')" "namespace: refused.*"
+check "umask of the CGI" "$(echo "$OUTPUT" | grep '^umask:')" "umask: 0027"
 
 if [ -n "${CERTBOT_WRAPPER:-}" ]; then
 	echo "== Certbot with NoNewPrivileges ($CERTBOT_DOMAIN)"
@@ -178,7 +189,11 @@ echo "== Journal"
 check "messages with level and time" "$(journalctl -u turbo -o cat --no-pager | grep -c 'level=INFO' | awk '{print ($1 > 0) ? "yes" : "no"}')" "yes"
 
 echo "== systemd-analyze security"
-systemd-analyze security turbo --no-pager 2>/dev/null | tail -1
+EXPOSURE_LINE="$(systemd-analyze security turbo --no-pager 2>/dev/null | tail -1)"
+echo "$EXPOSURE_LINE"
+EXPOSURE="$(echo "$EXPOSURE_LINE" | grep -oE '[0-9]+\.[0-9]+' | head -1)"
+# 1.7 with the reference unit (6.2 before its hardening): a change that loosens it shows here
+check "exposure level at most 3.0" "$(awk -v e="${EXPOSURE:-99}" 'BEGIN { print (e + 0 <= 3.0) ? "ok" : e }')" "ok"
 
 echo "== Restart after a crash"
 kill -9 "$PID"

@@ -293,3 +293,26 @@ func FuzzConfigReload(f *testing.F) {
 		}
 	})
 }
+
+// Review of 57cbb3c, S9: while a turbo.config is applied, the denied IPs in use stay denied, and the file's list is
+// published once, whole, at the end. Before, an empty list was published first (a denied client got through in
+// the meantime), and each IP of the file published a copy of the whole list, O(n²) under the global lock.
+func TestRL_S9_DeniedIPsReplacedAtOnce(t *testing.T) {
+	initForTest(t)
+	future := strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)
+	withGlobalLock(func() { adminAddHandlers["@"]("203.0.113.5", future) })
+	withGlobalLock(func() {
+		clearFileSettings() // As applySiteConfig does first
+		if deniedUntil("203.0.113.5") == 0 {
+			t.Error("the denied IP in use stopped being denied while the file is applied")
+		}
+		adminAddHandlers["@"]("203.0.113.6", future)
+		if deniedUntil("203.0.113.6") != 0 {
+			t.Error("a denied IP of the file was published before the whole list")
+		}
+		publishLoadedDeniedIPs()
+	})
+	if deniedUntil("203.0.113.5") != 0 || deniedUntil("203.0.113.6") == 0 {
+		t.Errorf("after applying: 203.0.113.5 until %d, 203.0.113.6 until %d; expected only the file's", deniedUntil("203.0.113.5"), deniedUntil("203.0.113.6"))
+	}
+}

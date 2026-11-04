@@ -6,8 +6,10 @@ package main
 // the v1 rewrites with "%" are decoded.
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -102,5 +104,23 @@ func TestN22_V1RewriteDecoded(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "/bad%zz") {
 		t.Errorf("no warning of the discarded rewrite:\n%s", logs.String())
+	}
+}
+
+// Review of 57cbb3c, F7: the rewrite sources of a v1 turbo.config are decoded once each, always with the same
+// result. Before, a decoded source added while the map was being walked could be decoded again, or not, depending on
+// the order of the map: /a%2541 ended up as /a%41 or as /aA.
+func TestRL_F7_V1RewriteSourcesDecodedOnce(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		var raw map[string]map[string]interface{}
+		if err := json.Unmarshal([]byte(`{"localhost":{"":{"=":{"/a%2541":"/x","/b%41":"/y"}}}}`), &raw); err != nil {
+			t.Fatal(err)
+		}
+		decodeV1RewriteSources(raw)
+		site, _ := raw["localhost"][""].(map[string]interface{})
+		rewrites, _ := site["="].(map[string]interface{})
+		if got := sortedKeys(rewrites); !reflect.DeepEqual(got, []string{"/a%41", "/bA"}) {
+			t.Fatalf("attempt %d: sources %v; expected [/a%%41 /bA]", i, got)
+		}
 	}
 }

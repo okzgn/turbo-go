@@ -102,7 +102,7 @@ func TestB5_SetPasswordDoesNotBlock(t *testing.T) {
 	done := make(chan time.Duration, 1)
 	go func() {
 		start := time.Now()
-		post(base, "/admin:inside:setP?a=NewPass&b=Admin", tok)
+		post(base, "/admin:inside:setP?a=NewPassword1&b=Admin", tok)
 		done <- time.Since(start)
 	}()
 	time.Sleep(10 * time.Millisecond)
@@ -111,7 +111,7 @@ func TestB5_SetPasswordDoesNotBlock(t *testing.T) {
 	if worst > latencyLimit() {
 		t.Errorf("GET / took %v during setP (which took %v)", worst, took)
 	}
-	if !passwordMatches("NewPass") {
+	if !passwordMatches("NewPassword1") {
 		t.Error("setP did not change the password")
 	}
 }

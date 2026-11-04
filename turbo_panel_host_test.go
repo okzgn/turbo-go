@@ -13,6 +13,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"turbo/customNetHttp"
 )
 
 // postHost sends a POST to the panel with the given Host and session.
@@ -226,5 +228,80 @@ func TestN89_ErrorTemplateWithoutScriptsOnPanelOrigin(t *testing.T) {
 	}
 	if res.StatusCode != 200 || !strings.Contains(body, `name="u"`) || !scriptsAllowed(res.Header.Get("Content-Security-Policy")) {
 		t.Errorf("the panel's page: %d, Content-Security-Policy %q", res.StatusCode, res.Header.Get("Content-Security-Policy"))
+	}
+}
+
+// Review of 57cbb3c, M1: the errors that the fork answers before Turbo's handler (a URI or headers too long, a
+// malformed request, an unknown Transfer-Encoding, a plain HTTP request to the TLS port; over HTTP/1 and over
+// HTTP/2) carry a Content-Security-Policy without scripts too. Their host may be the panel's, and the error
+// template, which the panel's session can set without the password, may be HTML: before, its scripts ran on the
+// panel's origin, which N89 only covered for the errors of Turbo's handler.
+func TestRM1_ErrorsBeforeHandlerWithoutScripts(t *testing.T) {
+	initForTest(t)
+	withLimit(t, &customNetHttp.TurboMaxURILength, 40)
+	withLimit(t, &customNetHttp.TurboMaxHeaderBytes, 600)
+	globalMutex.Lock()
+	ok, msg := defaultSettingValidators["."]["PA"]("panel.test", internalAuth)
+	setHTTPResponses(func(responses map[int]string) { responses[0] = "<p>error</p><script>alert(1)</script>" })
+	globalMutex.Unlock()
+	if !ok {
+		t.Fatal(msg)
+	}
+	withoutScripts := func(what string, policy string) {
+		t.Helper()
+		if !strings.Contains(policy, "default-src 'none'") || strings.Contains(policy, "script-src") {
+			t.Errorf("%s: Content-Security-Policy %q; expected one that allows no scripts", what, policy)
+		}
+	}
+
+	addr := strings.TrimPrefix(startServer(t), "http://")
+	tlsAddr := forkServer(t, true, okHandler)
+	for _, c := range []struct{ what, addr, request string }{
+		{"URI too long", addr, "GET /" + strings.Repeat("u", 40) + " HTTP/1.1\r\nHost: panel.test\r\n\r\n"},
+		{"headers too long", addr, "GET / HTTP/1.1\r\nHost: panel.test\r\nX-Padding: " + strings.Repeat("r", 700) + "\r\n\r\n"},
+		{"malformed Host", addr, "GET / HTTP/1.1\r\nHost: panel test\r\n\r\n"},
+		{"unknown Transfer-Encoding", addr, "POST / HTTP/1.1\r\nHost: panel.test\r\nTransfer-Encoding: bogus\r\n\r\n"},
+		{"plain HTTP to the TLS port", tlsAddr, "GET / HTTP/1.1\r\nHost: panel.test\r\n\r\n"},
+	} {
+		res, body := sendRaw(t, c.addr, c.request)
+		if !strings.Contains(body, "<script>") {
+			t.Errorf("HTTP/1, %s: %s %q; expected the error template", c.what, res.Status, body)
+		}
+		withoutScripts("HTTP/1, "+c.what, res.Header.Get("Content-Security-Policy"))
+	}
+
+	// Each on a connection of its own, so that the block of headers decodes with an empty HPACK table.
+	h := dialH2(t, tlsAddr)
+	if fields := h.readHeaders(h.request("/" + strings.Repeat("u", 40))); fields[":status"] != "414" {
+		t.Errorf("HTTP/2, :path too long: %v; expected 414", fields)
+	} else {
+		withoutScripts("HTTP/2, :path too long", fields["content-security-policy"])
+	}
+	h = dialH2(t, tlsAddr)
+	if fields := h.readHeaders(h.request("/", "x-padding", strings.Repeat("r", 601-39-len("x-padding")-5*32))); fields[":status"] != "431" {
+		t.Errorf("HTTP/2, headers too long: %v; expected 431", fields)
+	} else {
+		withoutScripts("HTTP/2, headers too long", fields["content-security-policy"])
+	}
+}
+
+// Production review, M-02: an error page never runs scripts, on any host. With PA empty (the default) the panel shares
+// its origin with the sites, and a template with a script would run there and reach the panel.
+func TestRP_M02_ErrorTemplatesWithoutScriptsOnAnyHost(t *testing.T) {
+	initForTest(t)
+	base := startServer(t)
+	tok := login(t, base)
+	template := "<p>Not here</p><script>document.title = 'ran'</script>"
+	if code, body, _ := post(base, "/admin:inside:addHttpCodeResponse?"+url.Values{"s": {"404"}, "d": {template}, "b": {"Admin"}}.Encode(), tok); code != 200 {
+		t.Fatalf("addHttpCodeResponse: %d %q", code, body)
+	}
+	for _, host := range []string{"localhost", "other.test", "127.0.0.1"} {
+		res, body, err := rawGet(base, host, "/missing")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if policy := res.Header.Get("Content-Security-Policy"); res.StatusCode != 404 || !strings.Contains(body, "Not here") || !strings.Contains(policy, "default-src 'none'") {
+			t.Errorf("404 on %s: %d, Content-Security-Policy %q, body %.80q; expected the template, without scripts", host, res.StatusCode, policy, body)
+		}
 	}
 }

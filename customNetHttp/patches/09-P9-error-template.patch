@@ -10,13 +10,14 @@ index 5b9f791..0b50dba 100644
  
  	// Delete the Content-Length header, which might be for some other content.
  	// Assuming the error string fits in the writer's buffer, we'll figure
-@@ -2353,14 +2354,14 @@ func Error(w ResponseWriter, error string, code int) {
+@@ -2353,14 +2354,15 @@ func Error(w ResponseWriter, error string, code int) {
  
  	// There might be content type already set, but we reset it to
  	// text/plain for the error message.
 -	h.Set("Content-Type", "text/plain; charset=utf-8")
 +	h.Set("Content-Type", contentType) // turbo:P9
  	h.Set("X-Content-Type-Options", "nosniff")
++	h.Set("Content-Security-Policy", turboErrorCSP) // turbo:P9: no scripts in an error page, on any host
  	w.WriteHeader(code)
 -	fmt.Fprintln(w, error)
 +	io.WriteString(w, body) // turbo:P9

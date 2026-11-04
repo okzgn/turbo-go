@@ -88,26 +88,29 @@ func TestB9_AllTextParametersReplaced(t *testing.T) {
 	initForTest(t)
 	base := startServer(t)
 	tok := login(t, base)
-	if code, body, _ := post(base, "/admin:inside:addCharsReplace?"+url.Values{"s": {"Q"}, "d": {"zz"}}.Encode(), tok); code != 200 {
+	// Production review, B2: the replacements, which need the password now, apply to the actions that need only
+	// the session; those that take the password, and the replacements and the responses themselves, take their
+	// values as sent.
+	if code, body, _ := post(base, "/admin:inside:addCharsReplace?"+url.Values{"s": {"|"}, "d": {"zz"}, "b": {"Admin"}}.Encode(), tok); code != 200 {
 		t.Fatalf("addCharsReplace: %d %q", code, body)
 	}
-	if code, body, _ := post(base, "/admin:inside:addHttpCodeResponse?"+url.Values{"s": {"404"}, "d": {"-,- does not exist"}}.Encode(), tok); code != 200 {
+	if code, body, _ := post(base, "/admin:inside:addHttpCodeResponse?"+url.Values{"s": {"404"}, "d": {"-,- does not exist"}, "b": {"Admin"}}.Encode(), tok); code != 200 {
 		t.Fatalf("addHttpCodeResponse: %d %q", code, body)
 	}
-	if got := (*httpResponses.Load())[404]; got != "# does not exist" {
-		t.Errorf("saved template %q; expected \"# does not exist\"", got)
+	if got := (*httpResponses.Load())[404]; got != "-,- does not exist" {
+		t.Errorf("saved template %q; expected it as sent, \"-,- does not exist\"", got)
 	}
-	if code, body, _ := post(base, "/admin:inside:addHeader?"+url.Values{"s": {"localhost"}, "d": {""}, "a": {"X-zz"}, "b": {"1"}}.Encode(), tok); code != 200 {
+	if code, body, _ := post(base, "/admin:inside:addHeader?"+url.Values{"s": {"localhost"}, "d": {""}, "a": {"X-Test"}, "b": {"1zz2"}}.Encode(), tok); code != 200 {
 		t.Fatalf("addHeader: %d %q", code, body)
 	}
 	globalMutex.RLock()
-	_, replaced := customHeaders["localhost"]["X-Q"]
+	value := customHeaders["localhost"]["X-Test"]
 	globalMutex.RUnlock()
-	if !replaced {
-		t.Error("the header name X-zz was not saved as X-Q")
+	if value != "1|2" {
+		t.Errorf("the header value 1zz2 was saved as %q; expected 1|2", value)
 	}
-	if code, body, _ := post(base, "/admin:inside:delHeader?"+url.Values{"s": {"localhost"}, "d": {""}, "a": {"X-zz"}}.Encode(), tok); code != 200 {
-		t.Errorf("delHeader X-zz: %d %q", code, body)
+	if code, body, _ := post(base, "/admin:inside:delHeader?"+url.Values{"s": {"localhost"}, "d": {""}, "a": {"X-Test"}}.Encode(), tok); code != 200 {
+		t.Errorf("delHeader X-Test: %d %q", code, body)
 	}
 }
 

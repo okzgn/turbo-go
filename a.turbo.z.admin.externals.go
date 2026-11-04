@@ -24,9 +24,11 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"log/slog"
 	"net/url"
 	"os"
@@ -127,7 +129,8 @@ func decodeV1RewriteSources(raw map[string]map[string]interface{}) {
 			if !isMap {
 				continue
 			}
-			for source, target := range rewrites {
+			for _, source := range sortedKeys(rewrites) { // A copy of the sources: a decoded one added below isn't decoded again
+				target := rewrites[source]
 				if strings.IndexByte(source, '%') == -1 {
 					continue
 				}
@@ -199,47 +202,76 @@ func (configSelfPointerError) Error() string {
 	return `only has "M" and points to its own directory: it is what saving left instead of the whole configuration when "M" named the start directory another way`
 }
 
-// configPointerError is a turbo.config that only points to another sites directory that can't be followed.
-type configPointerError struct{ target, reason string }
+// configPointerError is a turbo.config that only points to another sites directory that can't be followed, or
+// (whole) a whole one whose "M" names a sites directory with a turbo.config that can't be followed.
+type configPointerError struct {
+	target, reason string
+	whole          bool
+}
 
 func (e configPointerError) Error() string {
+	if e.whole {
+		return `"M" names ` + e.target + ", " + e.reason + ": following it would leave the sites without their settings (their scripts served as text) and empty the configuration in use. Make that directory available, with a usable turbo.config if it has one, or change \"M\""
+	}
 	return `only has "M", which points to ` + e.target + ", " + e.reason + ": applying it would leave the default configuration (the default user and password, and the panel on any host). Make that directory available again with its turbo.config, or restore the whole configuration here (a .bak copy)"
 }
 
-// pointerTargetProblem says why a turbo.config that only points to another sites directory (isSitesDirPointerMap)
-// can't be followed. It walks the pointers, without applying any, up to the turbo.config with the configuration:
-// a directory on the way that doesn't exist, has no turbo.config or an invalid one, or pointers that point at
-// each other (more than the reload follows, counting the redirects already followed) are the problem. Following
-// it would apply each pointer, with the defaults, before finding that out.
-func pointerTargetProblem(raw map[string]map[string]interface{}, redirects int) error {
+// sitesDirChainProblem says, before anything is applied, why the sites directories that a turbo.config read in
+// baseDir leads to can't be followed: through the "M" of a pointer (isSitesDirPointerMap), or the "M" of a whole one
+// that names another directory, whose turbo.config then applies whole or, without one, in which this one applies
+// (reloadOptions.carried). Every directory on the way must exist and be listable, and every turbo.config on it be
+// usable; a pointer must lead to a configuration, unless withoutConfigKept (setM keeps the settings in use for a
+// directory without turbo.config); and the chain can't come back to a directory on it, nor go further than the reload
+// follows (counting the redirects already followed). Followed, it emptied the configuration in use (resetSettings)
+// before finding that out, and left the sites with the defaults, their scripts served as text.
+func sitesDirChainProblem(raw map[string]map[string]interface{}, baseDir string, redirects int, withoutConfigKept bool) error {
 	first, _ := raw["."]["M"].(string)
-	value, via := first, ""
-	for ; ; redirects++ {
+	whole := !isSitesDirPointerMap(raw)
+	current, currentDir, value, via := raw, baseDir, first, ""
+	visited := []string{baseDir}
+	for ; value != ""; redirects++ { // Without "M" (a pointer without it is an empty configuration), nothing to follow
 		reason := func(what string) error {
 			if via != "" {
 				what = "and from there it leads to " + via + ", " + what
 			}
-			return configPointerError{first, what}
+			return configPointerError{target: first, reason: what, whole: whole}
 		}
 		resolved, err := resolveSitesDir(value)
-		switch {
-		case redirects >= 2:
-			return configPointerError{first, "and the turbo.config files point to each other"}
-		case err != nil || !dirExists(resolved):
+		if err != nil {
 			return reason("which does not exist")
+		}
+		if sameDir(resolved, currentDir) { // A whole turbo.config that names its own directory (a pointer can't: pointsToItself)
+			return nil
+		}
+		for _, seen := range visited {
+			if sameDir(resolved, seen) {
+				return reason("whose turbo.config leads back to a directory on the way")
+			}
+		}
+		if redirects >= 2 {
+			return configPointerError{target: first, reason: "and the turbo.config files point to each other", whole: whole}
+		}
+		if _, err := os.ReadDir(resolved); err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				return reason("which does not exist")
+			}
+			return reason("which can't be listed")
 		}
 		target, err := parseSiteConfig(resolved + configFileName)
 		switch {
 		case err != nil:
 			return reason("whose turbo.config can't be used")
-		case target.raw == nil:
+		case target.raw == nil && isSitesDirPointerMap(current) && !withoutConfigKept:
 			return reason("which has no turbo.config")
-		case !isSitesDirPointerMap(target.raw):
-			return nil
+		case target.raw == nil:
+			return nil // A whole turbo.config applies there (carried); setM keeps the settings in use there
 		}
-		value, _ = target.raw["."]["M"].(string)
+		visited = append(visited, resolved)
+		current, currentDir = target.raw, resolved
+		value, _ = current["."]["M"].(string)
 		via = value
 	}
+	return nil
 }
 
 // resolveSitesDir turns a sites directory as written (TURBO_DIR, "M" or setM) into the one Turbo uses:
@@ -293,6 +325,14 @@ func sameDirWith(a string, b string, stat func(string) (os.FileInfo, error)) boo
 		return strings.EqualFold(resolvedA, resolvedB)
 	}
 	return resolvedA == resolvedB
+}
+
+// sameFile reports whether two paths name the same file, following symbolic links (two turbo.config files that are
+// links to one), and false if either can't be looked at.
+func sameFile(a string, b string) bool {
+	infoA, errA := os.Stat(a)
+	infoB, errB := os.Stat(b)
+	return errA == nil && errB == nil && os.SameFile(infoA, infoB)
 }
 
 // indexOrder returns the index names of each "<site>\x00<subdomain>" in the order they appear in turbo.config.
@@ -381,7 +421,7 @@ func saveDefaultConfig() bool {
 			configFileModTime = info.ModTime().UnixNano()
 		}
 	})
-	if !sameDir(baseDir, startDir) { // Turbo starts reading startDir: leave there where the sites are
+	if !sameDir(baseDir, startDir) && !sameFile(startDir+configFileName, configPath) { // Turbo starts reading startDir: leave there where the sites are
 		pointerPath := startDir + configFileName
 		if original, err := os.ReadFile(pointerPath); err == nil && !isSitesDirPointer(original) { // #nosec G304 -- turbo.config of the start directory
 			// A whole configuration is about to become a pointer: keep it, whatever its schema
@@ -407,11 +447,12 @@ func backupBeforeSave(configPath string, schema int, always bool) bool {
 	if err != nil {
 		return true // Nothing to keep
 	}
-	var backupPath string
+	var backupPath, message string
+	level := slog.LevelInfo
 	switch {
 	case !json.Valid(original):
 		backupPath = configPath + ".invalid." + time.Now().Format("20060102-150405") + ".bak"
-		slog.Warn("turbo.config is not valid JSON: it is copied before saving", "backup", backupPath)
+		message, level = "turbo.config is not valid JSON: it is copied before saving", slog.LevelWarn
 	case schema != configSchema: // Older, or later and saving was confirmed: its settings would be lost
 		backupPath = configPath + ".v" + strconv.Itoa(schema) + ".bak"
 		if _, err := os.Lstat(backupPath); err == nil { // #nosec G703 -- turbo.config backup next to the original. A copy from an earlier upgrade: keep it too
@@ -419,15 +460,45 @@ func backupBeforeSave(configPath string, schema int, always bool) bool {
 		}
 	case always:
 		backupPath = configPath + "." + time.Now().Format("20060102-150405") + ".bak"
-		slog.Info("turbo.config copied before replacing it", "backup", backupPath)
+		message = "turbo.config copied before replacing it"
 	default:
 		return true
 	}
-	if err = os.WriteFile(backupPath, original, 0600); err != nil { // #nosec G703 -- turbo.config backup next to the original, path under the sites directory chosen by the administrator (TURBO_DIR or M)
+	if backupPath, err = writeBackup(backupPath, original); err != nil {
 		slog.Error("Can't save the copy of turbo.config", "file", backupPath, "error", err)
 		return false
 	}
+	if message != "" {
+		slog.Log(context.Background(), level, message, "backup", backupPath)
+	}
 	return true
+}
+
+// writeBackup writes a copy of turbo.config at path or, if a file is already there (two saves within the same
+// second), at path with "-2", "-3"… before ".bak": a copy never replaces another. It returns where it wrote it.
+func writeBackup(path string, data []byte) (string, error) {
+	base := strings.TrimSuffix(path, ".bak")
+	for attempt := 1; ; attempt++ {
+		candidate := path
+		if attempt > 1 {
+			candidate = base + "-" + strconv.Itoa(attempt) + ".bak"
+		}
+		file, err := os.OpenFile(candidate, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600) // #nosec G304 G703 -- turbo.config backup next to the original, path under the sites directory chosen by the administrator (TURBO_DIR or M)
+		if errors.Is(err, os.ErrExist) && attempt < 100 {
+			continue
+		}
+		if err != nil {
+			return candidate, err
+		}
+		_, err = file.Write(data)
+		if closeErr := file.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			os.Remove(candidate) // #nosec G104 G703 -- the partial copy just written next to turbo.config; the error that matters is the write's
+		}
+		return candidate, err
+	}
 }
 
 // createTempFile creates the temporary file of writeFileAtomic (a variable so that tests can make it fail).
@@ -493,10 +564,10 @@ func jsonString(s string) string {
 }
 
 // createDefaultConfig is the JSON of the configuration in use: for turbo.config (withSubdomains, each site with
-// its subdomains and everything of them; includeCredentials, the username and the password hash) or for the
-// panel (the sites with their settings only; includeFixedKeys marks the fixed character replacements and
-// responses as {"f": value}). Every list goes in a fixed order, so the file doesn't change from one save to the
-// next without a change in it.
+// its subdomains and everything of them, also the sites whose folder isn't there, with the settings kept for
+// them; includeCredentials, the username and the password hash) or for the panel (the active sites with their
+// settings only; includeFixedKeys marks the fixed character replacements and responses as {"f": value}). Every
+// list goes in a fixed order, so the file doesn't change from one save to the next without a change in it.
 func createDefaultConfig(withSubdomains bool, includeFixedKeys bool, includeCredentials bool) string {
 	credentials := ""
 	if includeCredentials {
@@ -504,13 +575,21 @@ func createDefaultConfig(withSubdomains bool, includeFixedKeys bool, includeCred
 	}
 	var jsonBuilder strings.Builder
 	delimiter := ""
-	for _, siteKey := range sortedKeys(sitesMap) {
+	sites := sortedKeys(sitesMap)
+	if withSubdomains {
+		sites = sortedKeyUnion(sitesMap, dormantSites)
+	}
+	for _, siteKey := range sites {
 		jsonBuilder.WriteString(delimiter + jsonString(siteKey) + ":")
 		if !withSubdomains {
 			jsonBuilder.WriteString("{" + createSiteSettingsList(siteKey) + "}")
 		} else {
 			jsonBuilder.WriteString(createSubdomainsList(true, siteKey))
 		}
+		delimiter = ","
+	}
+	if !withSubdomains { // The panel's list also has the sites kept without their folder, which it can delete
+		jsonBuilder.WriteString(delimiter + dormantSitesList())
 		delimiter = ","
 	}
 
@@ -555,14 +634,45 @@ func createDefaultConfig(withSubdomains bool, includeFixedKeys bool, includeCred
 	return "{" + jsonBuilder.String() + "},\".\":{\"M\":" + jsonString(sitesDirValue.Get()) + ",\"PA\":" + jsonString(panelAccess.Load().setting) + ",\"RT\":\"" + serverTimeLimits.Load().RT.String() + "\",\"RHT\":\"" + serverTimeLimits.Load().RHT.String() + "\",\"WT\":\"" + serverTimeLimits.Load().WT.String() + "\",\"IT\":\"" + serverTimeLimits.Load().IT.String() + "\",\"MUB\":\"" + strconv.FormatInt(maxURILength.Load(), 10) + "\",\"MHB\":\"" + strconv.FormatInt(maxHeaderBytes.Load(), 10) + "\",\"MBB\":\"" + strconv.FormatInt(maxBodySize.Load(), 10) + "\",\"CIL\":\"" + strconv.FormatInt(serverRequestLimits.CIL.Load()/int64(time.Millisecond), 10) + "\",\"CIS\":\"" + strconv.FormatInt(serverRequestLimits.CIS.Load()/int64(time.Millisecond), 10) + "\",\"CII\":\"" + strconv.FormatInt(serverRequestLimits.CII.Load(), 10) + "\",\"CGL\":\"" + strconv.FormatInt(globalRequestLimit.Load(), 10) + "\",\"CGP\":\"" + strconv.FormatInt(cgiProcesses.Load(), 10) + "\"" + panelCertSettingsJSON(!includeCredentials) + credentials + "}}"
 }
 
+// dormantSitesList is the "~" entry of the panel's list of sites: the sites and subdomains whose folder isn't there
+// (dormantSites), whose settings turbo.config keeps until they are deleted, as {"site": ["", "subdomain"…]} in
+// byte order. Callers hold the global lock.
+func dormantSitesList() string {
+	var jsonBuilder strings.Builder
+	jsonBuilder.WriteString(`"~":{`)
+	for siteIndex, domain := range sortedKeys(dormantSites) {
+		if siteIndex > 0 {
+			jsonBuilder.WriteString(",")
+		}
+		jsonBuilder.WriteString(jsonString(domain) + ":[")
+		for subdomainIndex, subdomain := range sortedKeys(dormantSites[domain]) {
+			if subdomainIndex > 0 {
+				jsonBuilder.WriteString(",")
+			}
+			jsonBuilder.WriteString(jsonString(subdomain))
+		}
+		jsonBuilder.WriteString("]")
+	}
+	jsonBuilder.WriteString("}")
+	return jsonBuilder.String()
+}
+
 // createSubdomainsList is the JSON of the subdomains of a site (the root is ""): everything of each one (withData,
-// for turbo.config) or, for the panel, their settings and the root's aliases.
+// for turbo.config, also of those whose folder isn't there) or, for the panel, the active ones' settings and the
+// root's aliases.
 func createSubdomainsList(withData bool, domain string) string {
 	var jsonBuilder strings.Builder
 	delimiter := ""
-	for _, subdomain := range sortedKeys(sitesMap[domain]) {
+	subdomains := sortedKeys(sitesMap[domain])
+	if withData {
+		subdomains = sortedKeyUnion(sitesMap[domain], dormantSites[domain])
+	}
+	for _, subdomain := range subdomains {
 		jsonBuilder.WriteString(delimiter + jsonString(subdomain) + ":")
+		_, active := sitesMap[domain][subdomain]
 		switch {
+		case withData && !active:
+			jsonBuilder.WriteString(dormantSites[domain][subdomain]) // Its folder isn't there: the settings kept for it
 		case withData:
 			jsonBuilder.WriteString(createSubdomainData(domain, subdomain))
 		case subdomain != "":
@@ -698,10 +808,15 @@ func configErrorMessage(err error, starting bool) string {
 		headline = "turbo.config does not give a valid schema"
 	} else if errors.As(err, &configSelfPointerError{}) {
 		headline = "turbo.config only points to its own directory (the configuration is missing)"
-	} else if errors.As(err, &configPointerError{}) {
+	} else if pointerErr := (configPointerError{}); errors.As(err, &pointerErr) {
 		headline = "turbo.config only points to another sites directory that can't be used"
+		if pointerErr.whole {
+			headline = `The "M" of turbo.config names a sites directory whose turbo.config can't be used`
+		}
 	} else if errors.As(err, &configSettingError{}) {
 		headline = "turbo.config has a panel setting that can't be used"
+	} else if errors.As(err, &configSiteError{}) {
+		headline = "turbo.config has a site section that can't be used"
 	}
 	if fileErr.data == nil {
 		headline = "Can't read turbo.config"
@@ -734,21 +849,19 @@ func parseConfig(configBytes []byte, raw *map[string]map[string]interface{}) err
 	return nil
 }
 
-// configFileProblem returns the error of the turbo.config in dir, if there is one that can't be read or isn't
-// valid JSON.
-func configFileProblem(dir string) error {
-	for redirects := 0; ; redirects++ { // A pointer is followed as the reload follows it
-		config, err := parseSiteConfig(dir + configFileName)
-		if err != nil || config.raw == nil || !isSitesDirPointerMap(config.raw) || redirects == 2 {
-			return err
-		}
-		value, _ := config.raw["."]["M"].(string)
-		next, err := resolveSitesDir(value)
-		if err != nil || sameDir(next, dir) {
-			return nil
-		}
-		dir = putSlash(next)
+// configFileProblem returns, for setM, the error of the turbo.config in dir, if there is one that can't be used, or
+// of the sites directories it leads to (sitesDirChainProblem), as the reload of setM would follow them; with
+// ignorePointer, a pointer there isn't followed.
+func configFileProblem(dir string, ignorePointer bool) error {
+	config, err := parseSiteConfig(dir + configFileName)
+	if err != nil || config.raw == nil || (ignorePointer && isSitesDirPointerMap(config.raw)) {
+		return err
 	}
+	if problem := sitesDirChainProblem(config.raw, dir, 0, true); problem != nil {
+		data, _ := os.ReadFile(dir + configFileName) // #nosec G304 -- turbo.config of the sites directory chosen by the administrator, for the message
+		return &configFileError{path: dir + configFileName, data: data, err: problem}
+	}
+	return nil
 }
 
 // configSettingError is a turbo.config whose "PA", "U", "PH" or "P" can't be used. Like invalid JSON, Turbo
@@ -760,6 +873,41 @@ type configSettingError struct {
 }
 
 func (e configSettingError) Error() string { return `"` + e.key + `" can't be used: ` + e.reason }
+
+// configSiteError is a site of turbo.config whose section, or one of its lists, isn't a JSON object. Skipped, the
+// site would come from the disk without its settings (its preprocessors, its rewrites…), its scripts served as text,
+// so the whole file counts as invalid, as with the settings that guard the panel.
+type configSiteError struct{ domain, where string }
+
+func (e configSiteError) Error() string {
+	return e.where + ` can't be used: a JSON object is expected (a site, and its lists "!", "=", "$", ".", "?", "-" and "&", are objects)`
+}
+
+// siteSectionsProblem checks that every site of turbo.config, each of its subdomains and each of their lists is a
+// JSON object (configSiteError).
+func siteSectionsProblem(raw map[string]map[string]interface{}) error {
+	for _, domain := range sortedKeys(raw) {
+		switch domain {
+		case "_", "@", "#", ".", "^": // Not sites
+			continue
+		}
+		for _, subdomain := range sortedKeys(raw[domain]) {
+			where := strconv.Quote(domain) + " > " + strconv.Quote(subdomain)
+			section, isMap := raw[domain][subdomain].(map[string]interface{})
+			if !isMap {
+				return configSiteError{domain, where}
+			}
+			for _, key := range subdomainContentOrder {
+				if value, present := section[key]; present {
+					if _, isMap := value.(map[string]interface{}); !isMap {
+						return configSiteError{domain, where + " > " + strconv.Quote(key)}
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
 
 // panelSettingsProblem checks the settings of "." that guard the panel (see configSettingError). The username
 // and the password are not checked when TURBO_USER or TURBO_PASSWORD replace them.
@@ -777,7 +925,7 @@ func panelSettingsProblem(settings map[string]interface{}) error {
 		}
 	}
 	if value, present := settings["U"]; present && !userFromEnv {
-		if text, isString := value.(string); !isString || len(text) < 1 || len(text) > 24 || !textAllowed(text, false) {
+		if text, isString := value.(string); !isString || !panelUserValid(text) {
 			return configSettingError{"U", "a string of 1 to 24 characters, without control characters, is expected"}
 		}
 	}
@@ -793,8 +941,8 @@ func panelSettingsProblem(settings map[string]interface{}) error {
 			return configSettingError{"PH", "is not a Turbo password hash"}
 		}
 	} else if value, present := settings["P"]; present { // Only read without "PH"
-		if text, isString := value.(string); !isString || len(text) < 1 || len(text) > 24 || !textAllowed(text, false) {
-			return configSettingError{"P", "a string of 1 to 24 characters, without control characters, is expected"}
+		if text, isString := value.(string); !isString || len(text) < 1 || len(text) > maxPasswordBytes || !textAllowed(text, false) {
+			return configSettingError{"P", "a string of 1 to " + strconv.Itoa(maxPasswordBytes) + " bytes, without control characters, is expected"}
 		}
 	}
 	return nil
@@ -802,19 +950,31 @@ func panelSettingsProblem(settings map[string]interface{}) error {
 
 // dropControlChars removes from a turbo.config read from disk the keys and values with control characters or
 // invalid UTF-8, which the panel doesn't accept, logging where they were. Response templates ("#") may
-// have tabs and line breaks.
+// have tabs and line breaks. The program of a site's preprocessor ("?") is kept, with those characters replaced by
+// U+FFFD: a path that doesn't exist makes its extension answer 500, while without the entry its files would be
+// served as text, their source included.
 func dropControlChars(raw map[string]map[string]interface{}) {
-	var walk func(values map[string]interface{}, where string, whitespace bool)
-	walk = func(values map[string]interface{}, where string, whitespace bool) {
+	var walk func(values map[string]interface{}, where string, whitespace bool, depth int, preprocessors bool)
+	walk = func(values map[string]interface{}, where string, whitespace bool, depth int, preprocessors bool) {
 		for key, value := range values {
 			text, isString := value.(string)
+			if textAllowed(key, false) && isString && preprocessors && !textAllowed(text, false) {
+				slog.Warn("turbo.config preprocessor with control characters or invalid UTF-8: its extension answers 500 until it is fixed", "where", strconv.Quote(where+key))
+				values[key] = strings.Map(func(r rune) rune {
+					if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) {
+						return utf8.RuneError
+					}
+					return r
+				}, strings.ToValidUTF8(text, string(utf8.RuneError)))
+				continue
+			}
 			if !textAllowed(key, false) || (isString && !textAllowed(text, whitespace)) {
 				slog.Warn("turbo.config value discarded: control characters or invalid UTF-8", "where", strconv.Quote(where+key))
 				delete(values, key)
 				continue
 			}
 			if nested, isMap := value.(map[string]interface{}); isMap {
-				walk(nested, where+key+" > ", whitespace)
+				walk(nested, where+key+" > ", whitespace, depth+1, preprocessors || (depth == 2 && key == "?"))
 			}
 		}
 	}
@@ -824,7 +984,12 @@ func dropControlChars(raw map[string]map[string]interface{}) {
 			delete(raw, section)
 			continue
 		}
-		walk(values, section+" > ", section == "#")
+		depth := 1 // A site: subdomains at depth 1, their lists at 2, the entries of a list at 3
+		switch section {
+		case "_", "@", "#", ".", "^": // Not sites: no preprocessors in them
+			depth = 0
+		}
+		walk(values, section+" > ", section == "#", depth, false)
 	}
 }
 
@@ -849,6 +1014,8 @@ func describeConfigError(path string, data []byte, err error) string {
 		offset, cause = int64(bytes.Index(data, []byte(`"M"`))+1), err.Error()
 	} else if settingErr := (configSettingError{}); errors.As(err, &settingErr) {
 		offset, cause = int64(bytes.Index(data, []byte(`"`+settingErr.key+`"`))+1), err.Error()
+	} else if siteErr := (configSiteError{}); errors.As(err, &siteErr) {
+		offset, cause = int64(bytes.Index(data, []byte(jsonString(siteErr.domain)))+1), err.Error()
 	} else if errors.As(err, &typeErr) {
 		offset, cause = typeErr.Offset, "an object {...} was expected and there is a value of type "+typeErr.Value
 	}

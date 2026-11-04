@@ -167,3 +167,21 @@ func TestN64_ComplementQueryOnceForCGI(t *testing.T) {
 		t.Errorf("QUERY_STRING=%q; expected \"a=1&y=2\"", cgiEnv(body)["QUERY_STRING"])
 	}
 }
+
+// Review of 57cbb3c, F9: {REWRITE_COMPLEMENT} in the path keeps a "?" of the decoded path (%3F), encoded again;
+// only the request's query, which a redirection adds after, is left out of the path. Before, it was cut at that "?":
+// /blog/a%3Fb became /new/a.
+func TestRL_F9_RewriteComplementWithEncodedQuestionMark(t *testing.T) {
+	for _, c := range []struct{ template, match, uri, want string }{
+		{"N/new/{REWRITE_COMPLEMENT}", "/blog/", "/blog/a%3Fb", "N/new/a%3Fb"},
+		{"N/new/{REWRITE_COMPLEMENT}", "/blog/", "/blog/a%3Fb?x=1", "N/new/a%3Fb"},
+		{"Sexample.test/new/{REWRITE_COMPLEMENT}", "/blog/", "/blog/a%3Fb?x=1", "Sexample.test/new/a%3Fb?x=1"},
+		{"Sexample.test/new/{REWRITE_COMPLEMENT}", "/blog/", "/blog/a/b?x=1", "Sexample.test/new/a/b?x=1"},
+	} {
+		req := &customNetHttp.Request{RequestURI: c.uri, Header: customNetHttp.Header{}}
+		path, _ := url.PathUnescape(cutAt(c.uri, '?'))
+		if got := shortcutWords(req, c.template, "example.com", "*", "example.com", "foo", "", "", c.match, path); got != c.want {
+			t.Errorf("%s with %s → %q; expected %q", c.template, c.uri, got, c.want)
+		}
+	}
+}

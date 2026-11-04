@@ -92,15 +92,27 @@ func turboErrorTemplate(code int, detail string) (contentType, body string) {
 	return "text/" + kind + "; charset=utf-8", strings.ReplaceAll(v, "{TURBO_RESPONSE_CODE}", strconv.Itoa(code)) + "\n" + detail + "\n"
 }
 
-// turboWriteError responds with Turbo's error template. As Go's Error does,
-// it sets the headers before WriteHeader and deletes Content-Length.
-// turbo:P2 turbo:P9
+// turboErrorCSP is the Content-Security-Policy of every error response with
+// Turbo's template: those written before Turbo's handler (turboWriteError,
+// turboConnError) and those of Error. The host of the request may be the
+// panel's, where a template with scripts would run on the panel's origin, or,
+// without a host of its own for the panel, any host; and it isn't always known
+// yet (a URI too long is answered before the headers are read). An error page
+// needs no scripts: the template keeps its styles and data: images.
+// turbo:P1 turbo:P2 turbo:P3 turbo:P9
+const turboErrorCSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+
+// turboWriteError responds with Turbo's error template, for the errors of
+// HTTP/2 that happen before Turbo's handler is reached. As Go's Error does,
+// it sets the headers before WriteHeader and deletes Content-Length; it adds
+// turboErrorCSP. turbo:P2 turbo:P3
 func turboWriteError(w ResponseWriter, detail string, code int) {
 	contentType, body := turboErrorTemplate(code, detail)
 	h := w.Header()
 	h.Del("Content-Length")
 	h.Set("Content-Type", contentType)
 	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Content-Security-Policy", turboErrorCSP)
 	w.WriteHeader(code)
 	io.WriteString(w, body)
 }
@@ -143,11 +155,11 @@ func (l *turboRSTLimiter) exceeded(now time.Time, limit int) bool {
 }
 
 // turboConnError writes to the connection a whole HTTP/1.1 error response
-// with Turbo's template and closes the connection, for the errors that
-// happen before any handler is reached. turbo:P1
+// with Turbo's template and turboErrorCSP, and closes the connection, for the
+// errors that happen before any handler is reached. turbo:P1
 func turboConnError(w io.Writer, detail string, code int) {
 	contentType, body := turboErrorTemplate(code, detail)
-	io.WriteString(w, "HTTP/1.1 "+strconv.Itoa(code)+" "+StatusText(code)+"\r\nContent-Type: "+contentType+"\r\nX-Content-Type-Options: nosniff\r\nServer: "+TurboServerName+"\r\nConnection: close\r\n\r\n"+body)
+	io.WriteString(w, "HTTP/1.1 "+strconv.Itoa(code)+" "+StatusText(code)+"\r\nContent-Type: "+contentType+"\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: "+turboErrorCSP+"\r\nServer: "+TurboServerName+"\r\nConnection: close\r\n\r\n"+body)
 }
 
 // Limits of the headers a CGI writes: each line and the whole block.
@@ -183,10 +195,13 @@ func turboMaxHeaderStringLen() int {
 
 // turboHeadersInBuffer reports whether the header block of the request that
 // starts in the buffer ends within its first limit bytes. With more bytes in
-// the buffer than the limit, the request can only be read if it does.
-// turbo:P4
+// the buffer than the limit, the request can only be read if it does. The
+// empty lines before the request (those a client may send after the body of
+// a POST, which Go discards) aren't its end: they would let any request that
+// fits in the buffer through. turbo:P4
 func turboHeadersInBuffer(br *bufio.Reader, limit int64) bool {
 	data, _ := br.Peek(br.Buffered())
+	data = bytes.TrimLeft(data, "\r\n")
 	data = data[:min(int64(len(data)), limit)]
 	return bytes.Contains(data, []byte("\r\n\r\n")) || bytes.Contains(data, []byte("\n\n"))
 }

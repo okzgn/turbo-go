@@ -2,7 +2,24 @@
 
 [Español](CHANGELOG.es.md)
 
-v2.4 is the next release after v2.3.rc3. If you upgrade from **v2.3.rc3**, every stage of v2.4 applies: read [Upgrading from v2.3.rc3](#upgrading-from-v23rc3) first.
+v2.4.1 is the next release after v2.4. If you upgrade from **v2.4**, read [Upgrading from v2.4](#upgrading-from-v24) first. If you upgrade from **v2.3.rc3**, every stage of v2.4 and of v2.4.1 applies: read [Upgrading from v2.3.rc3](#upgrading-from-v23rc3) first, and then [Upgrading from v2.4](#upgrading-from-v24).
+
+Published binaries are static and built with the latest Go 1.26 patch. Check the download with `SHA256SUMS`, in the folder of the download: `sha256sum -c --ignore-missing SHA256SUMS` (`--ignore-missing` checks only the binaries you downloaded; without it, `sha256sum` fails for the others).
+
+## Upgrading from v2.4
+
+**Recommendation: upgrade as soon as possible.** v2.4.1 fixes security issues: a client could hold every CGI slot and leave the PHP of every site answering 503, a stolen panel session could change what the administrator later confirms with the password or reach the panel through an error template, and a site could lose its settings when its folder couldn't be read, its scripts then served as text. Details are in the repository's security advisory, published together with this version.
+
+Before upgrading, back up the sites folder, `turbo.config` included, and review the breaking changes of v2.4.1, especially:
+- the response templates and the character replacements need the current password, the actions that need it take their values as sent (an API client sends them URL-encoded, without the tokens of the replacements), and a replacement can't be for letters or digits;
+- every error page carries a `Content-Security-Policy` without scripts, on every host;
+- a new password has 12 to 64 bytes;
+- changing the credentials, or closing every session, ends the session of the request too: the answer brings a new one, which an API client takes from its `ok` header; and a session lasts 12 hours at most;
+- a `PA` with networks and no host lets the panel answer only on an IP address or `localhost`;
+- `turbo.config` with a site that isn't a JSON object, or a whole one whose `M` names a directory that doesn't exist or can't be listed, is invalid: Turbo doesn't start with it;
+- the reference systemd unit restricts more what Turbo and its CGIs can do: reinstall it following its comments, and check that your CGIs still work.
+
+The commit "v2.4." `57cbb3c` of `main` is v2.4; stage 6 (the third review) wasn't in it, and comes with v2.4.1.
 
 ## Upgrading from v2.3.rc3
 
@@ -18,7 +35,7 @@ Before upgrading:
    - it tries indexes in random order;
    - it does not apply the panel restriction (`PA`).
 4. **Give the panel a host of its own** in `PA`, one that serves no site (see the README, also for HTTPS on that host), and change the default credentials. v2.3.rc3 doesn't save the password in `turbo.config`: after the upgrade it is `Admin` again (or `TURBO_PASSWORD`) until you change it.
-5. **Review the breaking changes** of each stage, especially:
+5. **Review the breaking changes** of each stage of v2.4, and then those of v2.4.1 ([Upgrading from v2.4](#upgrading-from-v24)), especially:
    - Turbo does not start if `turbo.config` is not valid JSON or can't be read, if its `PA`, `U` or `PH` can't be used, or if it only points to its own directory or to one it can't use, and says why;
    - a preprocessor of `turbo.config` that can't be used makes its extension answer 500;
    - changing the sites directory to one without `turbo.config` keeps the settings in use;
@@ -37,16 +54,91 @@ Before upgrading:
    - the per-IP limits and the failed-login block count each IPv6 /64 as one client, and at most `CGP` CGI processes run at once (by default 4 per CPU, at least 16; beyond, 503): raise `CII`/`CIS` or `CGP` if your traffic needs it;
    - the reference systemd unit runs without root, with the binary in `/usr/local/bin`: reinstall it following its comments.
    - the panel, the API messages and the logs are in English, `setC` confirms with `a=overwrite`, and the log lines have English keys: update any client or script that compares them.
+   - a site whose folder is deleted stays in `turbo.config`, with its settings, until it is deleted from the panel or from the file.
+   - CGIs no longer get the request headers with `_` in their name, `HTTP_HOST` is the host as it chose the site, and an IPv6 denied IP denies its /64.
 
-**The commits "v2.3.rc4." (`9307623`) and "v2.4." (`808dc6f`) of `main` are not this release:** `9307623` has stages 1 to 3, and `808dc6f` stages 1 to 4; both lack stage 5, which fixes security issues among others. If you built Turbo from one of them, upgrade too; its `turbo.config` already has schema 2, so points 2 and 3 don't apply, and the breaking changes to review are those of the stages it lacks (4 and 5 from `9307623`, 5 from `808dc6f`).
-
-Published binaries are static and built with the latest Go 1.26 patch. Check the download with `SHA256SUMS`, in the folder of the download: `sha256sum -c --ignore-missing SHA256SUMS` (`--ignore-missing` checks only the binaries you downloaded; without it, `sha256sum` fails for the others).
+**The commits "v2.3.rc4." (`9307623`) and "v2.4." (`808dc6f`) of `main` are not releases:** `9307623` has stages 1 to 3 of v2.4 and `808dc6f` stages 1 to 4; v2.4 is the commit "v2.4." `57cbb3c`, with stages 1 to 5. If you built Turbo from one of the first two, upgrade too; its `turbo.config` already has schema 2, so points 2 and 3 don't apply, and the breaking changes to review are those of the stages it lacks (4 and 5 from `9307623`, 5 from `808dc6f`) and those of v2.4.1.
 
 ---
 
+## v2.4.1
+
+The first release after v2.4. It brings the fixes of a review of Turbo for production and those of the third review of v2.4 (stage 6), which v2.4 didn't have: they are listed below, newest first, and both apply when upgrading from v2.4.
+
+### Production review
+
+#### New
+- **Close every session:** **Close every session**, in **General settings** (`closeSessions` in the API), closes every session of the panel, also the copies of the token of the one that asks, and gives that one a new session. It needs the current password.
+- **Sites without their folder in the panel:** the sites whose folder isn't there, which Turbo keeps with their settings for when it comes back, are listed in **Sites without their folder**, where they can be deleted; the API's `sites` lists them under `~`. Turbo logs, when it reads `turbo.config`, each site it keeps without its folder.
+
+#### Fixes
+- **HTTP/2, a client that stops reading:** an HTTP/2 connection has a single writer. With a client that stopped reading, the write deadline of each response (`WT`) only queued a reset that couldn't be written, and every handler of the connection, with its CGI and its slot, waited for as long as the client kept it open: a few connections like that left the PHP of every site answering 503. Now a connection where nothing can be written for 30 s is closed, and so is one that doesn't answer a PING within 15 s after 60 s without a frame from the client.
+- **HTTP/1, a client that reads slowly:** a CGI kept its slot until its client had read the whole output, up to `WT` + 2 s, however fast the script was: about one request per second from a single IP left the PHP of every site answering 503. Now the output of a CGI waits for its client in memory (up to 1 MiB per response and 64 MiB in all) and then in a temporary file (up to 256 MiB per response and 1 GiB in all), and the CGI frees its slot when it ends; beyond those limits it waits for its client, as before.
+- **Character replacements:** the session alone could add one (`s=php d=phtml`), and the server then read the token as the replaced text in every parameter of every action, also in those confirmed with the password: the administrator's `delPreprocessor a=phtml` deleted the preprocessor of `php` (its scripts were then served as text), a subdomain deleted could be another one, and `addPreprocessor` could save another program. Now adding or deleting a replacement needs the current password, a replacement can't be for letters or digits, and the replacements aren't undone in the actions that need the password nor in the site and the subdomain of any action.
+- **Error templates:** with `PA` empty (the default), a response template with a script, which the session alone could set, ran it on the panel's origin, from where it could take the password the next time the administrator confirmed something. Now every error page carries a `Content-Security-Policy` without scripts, on every host, and adding or deleting a template needs the current password.
+- **`turbo.config` read while a site's folder can't be read:** at the start, or when the file was read again, a site whose folder or `@` couldn't be looked at (permissions, I/O, a network disk) lost its settings, and when the folder could be read again the site came from the disk with the defaults, its scripts served as text. Now its settings are kept, as for a folder that isn't there, and apply when the folder can be used.
+- **A malformed site in `turbo.config`:** a site, a subdomain or a list of one that isn't a JSON object (`"?": null`, `"?": "php"`, `"": null`) was skipped without a word, and the site was active without its preprocessors, its scripts served as text; and a preprocessor with a control character was dropped. Now the first makes the file invalid (Turbo doesn't start with it, a reload keeps the configuration in use, and the message points at the site), and the second answers 500, as a preprocessor that can't be used.
+- **HTTPS of a site whose certificate can't be loaded yet:** an `"S": "1"` of `turbo.config` was lost when the certificate couldn't be loaded then (a copy that brings `@` before the `.pem` files, a key that can't be read yet), and the next save wrote `"S": "0"`. Now it is kept, there is no redirect without the certificate, and the certificate is loaded at the next look at the configuration (every 30 s).
+- **Following `M`:** a whole `turbo.config` whose `M` named a directory that doesn't exist yet (a disk not mounted) was applied in the start directory, every site was left without its folder, and saving wrote that directory as `M`; one whose directory couldn't be listed, and a `setM` to a directory whose `turbo.config` led, through its own `M`, to one that can't be used, emptied the configuration in use before finding it out. Now the whole chain is checked before anything is applied: Turbo doesn't start, a reload keeps the configuration in use, and `setM` refuses it.
+- **The `turbo.config` of the start directory and that of `M`, the same file:** when one is a symbolic link to the other, saving wrote the pointer over the whole configuration it had just saved, and Turbo didn't start again. Now it leaves it whole.
+- **Sessions:** changing the username or the password kept the session of the request, so a copy of its token (a cookie taken from the same IP, behind the same NAT) survived the change, and a session renewed itself for as long as it was used. Now `setU`, `setP` and `setM` with other credentials close every session and give the one that asks a new one, and a session lasts 12 hours at most from its login.
+- **Failed logins:** the limit counted each IPv4 address or IPv6 /64, and a /48 has 65 536 of them. Now the /64s of a /48 share a limit of 20 failures in 10 minutes. One of the password checks that run at a time is kept for the requests with a session and for the logins from the networks of `PA`, so a flood of logins from elsewhere doesn't keep the administrator out (503). A new password has 12 to 64 bytes.
+- **`PA` with networks only:** the panel answered on any host, so a page whose name resolves to Turbo (DNS rebinding) could reach it from the browser of someone in those networks. Now, with networks and no host, the panel answers only on an IP address or `localhost`, and Turbo warns about it at startup.
+- **Logs:** only the failed TLS handshakes were grouped. The other connection errors of the server (among them, one line for each GOAWAY frame with an error that an HTTP/2 client sends) and those of the CGIs whose client goes away went out one line each, which let anyone fill the log, and journald then dropped the real messages. Now they are grouped by kind: the first of each kind at once, and then at most one line a minute with the count and the last one, also when Turbo stops.
+- **`release.sh`:** it published `SHA256SUMS` without `govulncheck` (it only warned), and it left the binaries without sums when it failed. Now it fails without `govulncheck` (unless `TURBO_RELEASE_WITHOUT_GOVULNCHECK=1`), checks that each binary was built from the tagged commit, without changes and without cgo, and removes `dist/<version>` when it doesn't end well.
+- **The systemd unit:** it didn't limit what a compromised CGI could do on the host. Now it adds `UMask=0027`, `ProtectHome=tmpfs` with `BindPaths=/home/server`, `PrivateDevices`, the `Protect*` of the kernel, the control groups, the clock, the host name and `/proc`, `RestrictNamespaces`, `RestrictRealtime`, `RestrictSUIDSGID`, `LockPersonality`, `RestrictAddressFamilies`, `SystemCallArchitectures=native` and `SystemCallFilter=@system-service`, and `deploy/systemd-test.sh` checks them.
+- **Continuous integration:** each job has a time limit, so a test that hangs ends with the stacks of its goroutines instead of at the 6 hours of GitHub, and the checkout doesn't keep the token.
+
+#### Breaking changes
+- **The current password for the response templates and the character replacements:** `addHttpCodeResponse`, `delHttpCodeResponse`, `addCharsReplace` and `delCharsReplace` need it in `b`; the panel asks for it.
+- **What the server reads as sent:** the actions that need the current password, `cfg<KEY>` and `hardUpload` take their parameters as sent, and the site and the subdomain (`s`, `d`) of every action are never replaced. An API client that sent those values with the tokens of the replacements (`-.-` for `;`…) must send them URL-encoded, as an `application/x-www-form-urlencoded` body does. A replacement for letters or digits is refused, and one in `turbo.config` is dropped with a warning.
+- **No scripts in any error page:** every error that Turbo answers with the error template carries a `Content-Security-Policy` without scripts, on every host: a template with scripts no longer runs them.
+- **A new password has 12 to 64 bytes** (`setP`). One already in use keeps working; `TURBO_PASSWORD` with fewer than 12 bytes gets a warning, and with more than 64, or with control characters, Turbo doesn't start.
+- **Sessions:** `setU`, `setP`, `setM` with other credentials and `closeSessions` end the session of the request too, and the answer brings the new one: the cookie, and the `ok` header, from which an API client must take it. A session ends 12 hours after its login.
+- **`PA` with networks and no host** answers only on an IP address or `localhost`: to reach the panel by a name, add that name to `PA`.
+- **`turbo.config`:** a site, or a list of a site, that isn't a JSON object, and a whole `turbo.config` whose `M` names a directory that doesn't exist or can't be listed, make the file invalid: Turbo doesn't start with it, and a reload keeps the configuration in use.
+- **Failed logins:** the IPv6 /64s of a /48 share a limit of 20 in 10 minutes.
+- **`sites`** lists the sites without their folder under `~`.
+- **Logs:** the connection errors and those of the CGIs go out grouped by kind (the first at once, then at most one line a minute with the count): a tool that counted their lines must read the count.
+- **The systemd unit** restricts what Turbo and its CGIs can do: no other home folder, devices, kernel settings, namespaces, other address families or system calls outside `@system-service`, and the files it creates are no longer readable by other users. Reinstall it following its comments (`/home/server` with `0750`), and check that your CGIs still work.
+- **`release.sh`** needs `govulncheck`.
+
+### Stage 6: third review
+
+#### Fixes
+- **A site whose folder disappears for a moment keeps its settings:** every 30 s Turbo deactivates the sites whose folder or `@` is no longer there, and when the folder came back (a deploy that deletes and recreates `@`, an upload by FTP, a network disk that didn't answer) the site was activated again with the defaults: without its preprocessors (its scripts were served as text, their source included), HTTPS, headers, rewrites or aliases, until Turbo was restarted or `turbo.config` was edited, and saving meanwhile wrote that into `turbo.config`. Now a deactivated site keeps its settings and gets them back with its folder, and saving keeps it in `turbo.config`. Only a folder that doesn't exist deactivates a site: another error of the disk (permissions, I/O, a network disk that doesn't answer) leaves it as it is, and a sites directory that can't be read deactivates none (before, it deactivated them all).
+- **A site of `turbo.config` whose folder isn't there:** when `turbo.config` is read, its settings are kept (and saved) and apply when the folder appears; before, the site was left out without a word, and its folder, when it appeared, was a new site with the defaults.
+- **A whole `turbo.config` whose `M` names another sites directory:** without a `turbo.config` there, it applies there, with its sites, which are those of that directory; before, it was applied and then emptied when following `M`, and every site was left with the defaults (its scripts served as text) at every start. With a `turbo.config` there that can't be used (invalid, or with pointers that lead back), Turbo doesn't start and a reload keeps the configuration in use, as with a pointer; before, the reload emptied it. The folders of the directory that `M` leaves are no longer activated as sites on the way.
+- **Errors before the request is read, without scripts:** the errors that Turbo answers before reading a whole request (400 for a malformed request or for plain HTTP to the HTTPS port, 414, 431, 501), over HTTP/1 and HTTP/2, carry a `Content-Security-Policy` that allows no scripts. On the panel's host, an HTML error template ran its scripts on the panel's origin (the production review of v2.4.1 puts that policy in every other error page too).
+- **Reloading on a slow disk:** the folders of the sites of `turbo.config` are looked at before taking the global lock, as their certificates and preprocessors already were, so a slow or network disk doesn't hold up every request while `turbo.config` is applied.
+- **CGIs at shutdown:** when the 10 s of grace run out, Turbo closes the connections still open, which ends their CGIs with whatever they started, and waits up to 3 s for them; before, without systemd, they went on after Turbo.
+- **HSTS of the panel without its certificate:** once **Panel certificate** is deleted (`cfgPC a=0`), a request on a connection still open, or on a resumed TLS session, no longer sets `Strict-Transport-Security` again for a year, leaving the browser without a way back to the panel's host.
+- **Denied IPs during a reload:** while `turbo.config` is applied, the denied IPs in use stay denied, and the file's list replaces them at once; before, they were off for a moment, and a long list cost O(n²) with every request held.
+- **Certbot:** an attempt keeps the ACME account of the previous one (with a new account each time, the limit of Let's Encrypt, 10 new accounts per IP every 3 hours, refused the next sites issued in a row), and a hook that keeps Certbot's output open no longer holds that attempt, and every later one, until a restart.
+- **Changing the sites directory (`setM`):** a directory whose sites can't be listed is refused before anything changes (400 "Sites directory can't be read"); before, it left the server without sites until `M` was set back.
+- **Headers that only differ in case:** from the panel, one replaces the other of the site; before, both stayed, and each response carried either value.
+- **Lists of `turbo.config`:** the date of a denied IP may be a JSON integer, and an entry of `@`, `_` or `#` that can't be used is logged; before, they were skipped without a word.
+- **`TURBO_USER`:** the panel warns at startup while the password is `Admin`, whatever the user (before, only with `Turbo`).
+- **`{REWRITE_COMPLEMENT}`:** a `?` of the path (`%3F`) stays in it, encoded again; before, the path was cut there.
+- **Upgrading from v2.3.rc3:** the rewrite sources are decoded once each, always with the same result (one with `%25` could be decoded twice, depending on the order of a map).
+- **Copies of `turbo.config`:** two saves within the same second keep both copies (the second with `-2`).
+- **Limit of the headers (`MHB`) after a POST:** the empty lines that a client may send after the body no longer count as the end of the next request's headers, which let one up to the size of the read buffer through.
+- **Password hash (`PH`):** a salt or a key of more than 64 bytes isn't accepted; a huge one, written by hand, made every failed login cost minutes of CPU.
+- **Logs:** in `turbo.visits`, a field with a C1 control character, a Unicode line separator or invalid UTF-8 is written quoted and escaped, as one with an ASCII control character; and if a CGI can't go in a Job Object on Windows, it is logged (once).
+- **The panel's texts:** the last ones in Spanish are in English (**Default**, **MIME type:**, **Help**, **Panel certificate**, **Signing in**), and a denied IP removed by giving it a past date disappears from the panel's list by the server's answer, as intended.
+
+#### Breaking changes
+- **A site whose folder is deleted stays in `turbo.config`:** its settings are kept for when the folder comes back, also after a restart. To remove it, delete it from the panel (`delSite` now also deletes a site without its folder) or from `turbo.config`. A site or subdomain created from the panel starts with the defaults, also if the settings of one with its name were kept.
+- **No scripts in the errors before the request is read:** an HTML error template with scripts doesn't run them in the errors of 400, 414, 431 and 501 that Turbo answers before reading the whole request, on any host.
+- **What a CGI gets:** the request headers with `_` in their name don't reach it, as in Apache (behind a proxy, `X_Forwarded_For` from the client became the same `HTTP_X_FORWARDED_FOR` as the proxy's `X-Forwarded-For`, and won as often as not); and `HTTP_HOST` and `SERVER_NAME` carry the host as it chose the site: in lower case, without a final dot, with its port only if it is a number. Redirections take its port from it too.
+- **An IPv6 denied IP denies its /64,** the client that the rate limits count (its addresses change by themselves), and the panel doesn't accept one of the administrator's own /64 ("Current IP").
+- **A request whose target doesn't start with `/`** (an opaque one, such as `x:@evil.test`, or `*` outside `OPTIONS`) gets 400; before, it went after the host of a redirection.
+- **`TURBO_USER` of more than 24 characters, or with control characters:** Turbo doesn't start, as with an empty one (it is saved as `U`, and `turbo.config` was refused once the variable was unset).
+- **Failed TLS handshakes in the log:** they are counted and logged at most once a minute, with the count and the last one, instead of one line each, which let anyone fill the log.
+
 ## v2.4
 
-The first release after v2.3.rc3. It brings together five stages of work, none of them released on its own: they are listed below, newest first, with their changes. Every stage applies when upgrading from v2.3.rc3.
+The first release after v2.3.rc3, the commit "v2.4." `57cbb3c` of `main`. It brings together five stages of work, none of them released on its own: they are listed below, newest first, with their changes. Every stage applies when upgrading from v2.3.rc3.
 
 ### Stage 5: second review
 
@@ -184,7 +276,7 @@ The first release after v2.3.rc3. It brings together five stages of work, none o
 - **Updated `net/http`:** `customNetHttp` is now the `net/http` of Go 1.26 plus Turbo's patches, documented in [`customNetHttp/PATCHES.md`](customNetHttp/PATCHES.md). It brings every Go security fix released up to that version. File-serving performance is markedly higher than in v2.3.rc3.
 - **Configurable ports:** the `TURBO_HTTP_ADDR` and `TURBO_HTTPS_ADDR` variables change where Turbo listens, for example to run it behind a proxy.
 - **Reference systemd unit:** [`deploy/turbo.service`](deploy/turbo.service) runs as an unprivileged user with `CAP_NET_BIND_SERVICE`, logs to the journal and restarts on failure.
-- **Messages with level and time:** console messages use `log/slog` (`time=… level=… msg=…`) and are in Spanish.
+- **Messages with level and time:** console messages use `log/slog` (`time=… level=… msg=…`).
 - **GUI embedded from `turbo.dev/`:** a single copy of the GUI, embedded with `//go:embed`.
 - **Checks before publishing:** the README lists the checks to run by hand before each change or release: formatting, `vet`, `staticcheck`, `govulncheck`, `gosec`, `regenerate -check`, tests, `-race`, fuzzing and cross-compilation.
 

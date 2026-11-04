@@ -1,7 +1,7 @@
 #!/bin/bash
 # Builds the binaries of a Turbo release and their SHA256SUMS in dist/<version>/.
 #
-# Usage: git tag v2.4 && ./release.sh v2.4
+# Usage: git tag v2.4.1 && bash release.sh v2.4.1
 #
 # - It uses the Go on the PATH, which must be the latest patch of the go.mod version.
 # - Static binaries (CGO_ENABLED=0), without local paths (-trimpath) or symbols,
@@ -16,11 +16,14 @@
 # - It builds with a fixed Go environment (without the go env file or the GOFLAGS,
 #   GOEXPERIMENT or GOWORK of whoever runs it).
 # - It requires customNetHttp to be the net/http of that Go plus Turbo's patches.
-# - It checks each binary with govulncheck before writing SHA256SUMS: if it finds
-#   a vulnerability, there is no SHA256SUMS. Without govulncheck, it warns.
+# - It checks that each binary was built from HEAD, without changes and without cgo
+#   (go version -m), and with govulncheck before writing SHA256SUMS: if it finds a
+#   vulnerability, there is no SHA256SUMS. Without govulncheck it stops, unless
+#   TURBO_RELEASE_WITHOUT_GOVULNCHECK=1 says so on purpose.
+# - If anything fails, dist/<version> is removed: nothing half done is left to publish.
 set -euo pipefail
 
-VERSION="${1:?Usage: $0 <version, for example v2.4>}"
+VERSION="${1:?Usage: $0 <version, for example v2.4.1>}"
 cd "$(dirname "$0")"
 
 # The version names dist/<version>, which is deleted before building: only
@@ -96,6 +99,9 @@ fi
 OUT="dist/$VERSION"
 rm -rf "$OUT"
 mkdir -p "$OUT"
+# A release that doesn't finish leaves nothing behind that could be published by mistake (binaries without
+# SHA256SUMS, or with a vulnerability).
+trap 'status=$?; if [ "$status" -ne 0 ]; then rm -rf "$OUT"; echo "The release didn'"'"'t finish: $OUT removed." >&2; fi' EXIT
 
 build() { # GOOS GOARCH name
 	echo "Building $3"
@@ -105,16 +111,30 @@ build linux amd64 turbo-linux-amd64
 build linux arm64 turbo-linux-arm64
 build windows amd64 turbo-windows-x64.exe
 
+# Each binary says what it was built from: HEAD, without changes (a file saved during the build would show here)
+# and without cgo.
+HEAD_COMMIT="$(git rev-parse HEAD)"
 for b in "$OUT"/turbo-*; do
-	go version -m "$b" | grep -E "^$b|	build	(CGO_ENABLED|vcs.revision|vcs.modified)" || true
+	info="$(go version -m "$b")"
+	printf '%s\n' "$info" | grep -E "^$b|	build	(CGO_ENABLED|vcs.revision|vcs.modified)" || true
+	for setting in "vcs.revision=$HEAD_COMMIT" "vcs.modified=false" "CGO_ENABLED=0"; do
+		if ! printf '%s\n' "$info" | grep -qxF "	build	$setting"; then
+			echo "$b doesn't say $setting: it isn't exactly the code of the tag." >&2
+			exit 1
+		fi
+	done
 done
-# Before SHA256SUMS: with a known vulnerability, the release isn't ready to publish.
+# Before SHA256SUMS: with a known vulnerability, the release isn't ready to publish. govulncheck is the only check
+# of the standard library outside customNetHttp (crypto/tls, net/url…) that the binaries carry.
 if command -v govulncheck >/dev/null; then
 	for b in "$OUT"/turbo-*; do
 		govulncheck -mode=binary "$b"
 	done
+elif [ "${TURBO_RELEASE_WITHOUT_GOVULNCHECK:-}" = 1 ]; then
+	echo "Warning: the binaries have not been checked with govulncheck (TURBO_RELEASE_WITHOUT_GOVULNCHECK=1)." >&2
 else
-	echo "Warning: govulncheck is not installed; the binaries have not been checked (go install golang.org/x/vuln/cmd/govulncheck@latest)." >&2
+	echo "govulncheck is not installed: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0 (or, on purpose, TURBO_RELEASE_WITHOUT_GOVULNCHECK=1)." >&2
+	exit 1
 fi
 
 (cd "$OUT" && sha256sum turbo-* > SHA256SUMS)

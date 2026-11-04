@@ -128,6 +128,23 @@ func requestHostName(hostHeader string) string {
 
 // hostNameValid reports whether a lower case name is a host name: up to 220 bytes, of labels of 1 to 63
 // characters of [a-z0-9-] that don't start or end with "-" ("--" inside one, as in "xn--", is allowed).
+// canonicalHost is a Host as it chooses the site (requestHostName): the name in lower case and without a final
+// dot, in brackets if it is an IPv6 address, and a ":" with the port only if the port is a number. Without a name,
+// it is left as it is.
+func canonicalHost(hostHeader string) string {
+	name := requestHostName(hostHeader)
+	if name == "" {
+		return hostHeader
+	}
+	if strings.IndexByte(name, ':') != -1 { // An IPv6 address
+		name = "[" + name + "]"
+	}
+	if _, port, err := net.SplitHostPort(hostHeader); err == nil && port != "" && onlyDigits(port) {
+		return name + ":" + port
+	}
+	return name
+}
+
 func hostNameValid(name string) bool {
 	if name == "" || len(name) > 220 {
 		return false
@@ -747,6 +764,50 @@ func loadSiteCertificate(siteKey string, siteDir string) error {
 	return nil
 }
 
+// loadPendingCertificates loads the certificates of the sites with HTTPS on whose files couldn't be loaded when
+// turbo.config was read (the "S" of a site whose folder came back before its .pem, or a key not readable yet). The
+// files are read without the global lock; each certificate is put in use if its site still wants it.
+func loadPendingCertificates() {
+	pending := make(map[string]string) // Site key -> its folder
+	withReadLock(func() {
+		for siteKey := range siteSSLConfig {
+			if _, loaded := siteCertificates[siteKey]; loaded || !httpsEnabled(siteKey) {
+				continue
+			}
+			domain, subdomain := siteKey, ""
+			if sitesMap[siteKey] == nil { // "sub.example.com": the subdomain of a site
+				for site := range sitesMap {
+					if prefix, found := strings.CutSuffix(siteKey, "."+site); found {
+						if _, isSubdomain := sitesMap[site][prefix]; isSubdomain {
+							domain, subdomain = site, prefix
+							break
+						}
+					}
+				}
+			}
+			if _, active := sitesMap[domain][subdomain]; active {
+				pending[siteKey] = sitesDir.Get() + siteFolder(domain, subdomain)
+			}
+		}
+	})
+	for siteKey, siteDir := range pending {
+		cert, err := tls.LoadX509KeyPair(siteDir+certFileName, siteDir+keyFileName)
+		if err != nil {
+			continue
+		}
+		withGlobalLock(func() {
+			if _, loaded := siteCertificates[siteKey]; loaded || !httpsEnabled(siteKey) {
+				return
+			}
+			setSiteCertificate(siteKey, &cert)
+			if servers[0] != nil && !httpsListening.Load() {
+				safeServerStart(servers[0], tlsConfig) // Opens httpsAddr (:443), as enabling HTTPS does
+			}
+			slog.Info("Certificate loaded: the site has HTTPS again", "site", siteKey)
+		})
+	}
+}
+
 // diskLook is what the disk said, looked at before taking the global lock, about the paths the validators look
 // at (the sites directory of M, the certificates of C and S, the executables of the preprocessors): under the
 // lock they take it from here, so a slow or network disk doesn't stop every request while a reload or a panel
@@ -795,6 +856,30 @@ func (look *diskLook) siteFiles(siteDir string, withCertificate bool) {
 	look.stat(siteDir + keyFileName)
 	if withCertificate {
 		look.certificate(siteDir)
+	}
+}
+
+// siteFolders looks at the folder of a site and at its public folder (@), with the names that the check of its
+// existence (siteExistenceCheckers) gives them.
+func (look *diskLook) siteFolders(baseDir string, domain string, subdomain string) {
+	folder := baseDir + siteFolder(domain, subdomain)
+	look.stat(strings.TrimSuffix(folder, "/"))
+	look.stat(folder + publicDirName)
+}
+
+// siteSection looks at what a site's section of turbo.config has the validators look at: its certificate files
+// (loaded if HTTPS is on) and the executables of its preprocessors.
+func (look *diskLook) siteSection(baseDir string, domain string, subdomain string, settings map[string]interface{}) {
+	if ssl, isMap := settings["!"].(map[string]interface{}); isMap {
+		look.siteFiles(baseDir+siteFolder(domain, subdomain), httpsSetting(ssl["S"]))
+	}
+	preprocessorEntries, _ := settings["?"].(map[string]interface{})
+	for _, entry := range preprocessorEntries {
+		if value, isString := entry.(string); isString {
+			if executable, problem := preprocessorCommand(value); problem == "" {
+				look.stat(executable)
+			}
+		}
 	}
 }
 
@@ -1241,14 +1326,31 @@ func startCertbot(key string, prepare func() (certbotJob, bool), finish func(sta
 	})
 }
 
+// certbotWaitDelay is how long the output of Certbot is waited for once it has ended, or been killed when its time
+// ran out: a child that keeps it open (a hook of its configuration) held the attempt, and with it every later one,
+// until Turbo was restarted.
+const certbotWaitDelay = 10 * time.Second
+
+// certbotCommand is Certbot with args, ended with ctx and with certbotWaitDelay.
+func certbotCommand(ctx context.Context, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "certbot", args...) // #nosec G204 -- fixed program; arguments checked by runCertbot (hostOk, parsePanelAccess, certbotEmailProblem, validCertbotAdapter)
+	cmd.WaitDelay = certbotWaitDelay
+	return cmd
+}
+
 // runCertbot runs Certbot for job and moves the new certificate to job.destDir. It returns true, or why it
 // failed (Certbot's output when Certbot fails).
 func runCertbot(timeoutCtx context.Context, job certbotJob) interface{} {
-	if _, err := exec.CommandContext(timeoutCtx, "certbot", "--version").CombinedOutput(); err != nil {
+	if _, err := certbotCommand(timeoutCtx, "--version").CombinedOutput(); err != nil {
 		return "Certbot is not installed"
 	}
-	if _, err := os.ReadDir(job.certDir); err == nil && os.RemoveAll(job.certDir) != nil {
-		return "Error emptying the previous certificate directory"
+	// The certificate of an earlier attempt goes (the new one is found below by its date), but not the ACME account
+	// (accounts/): with a new account on each attempt, Let's Encrypt, which allows 10 new accounts per IP every 3
+	// hours, refused the next sites issued in a row.
+	for _, previous := range []string{"archive", "live", "renewal"} {
+		if err := os.RemoveAll(job.certDir + "/" + previous); err != nil {
+			return "Error emptying the previous certificate directory"
+		}
 	}
 	// Names checked by hostOk (sites) or parsePanelAccess (PA), the e-mail by certbotEmailProblem and the
 	// adapter by validCertbotAdapter.
@@ -1269,7 +1371,7 @@ func runCertbot(timeoutCtx context.Context, job certbotJob) interface{} {
 		"--config-dir", job.certDir,
 		"--work-dir", job.certDir+"/work",
 		"--logs-dir", job.certDir+"/logs")
-	cmdOutput, err := exec.CommandContext(timeoutCtx, "certbot", args...).CombinedOutput() // #nosec G204 -- fixed program; arguments checked as said above
+	cmdOutput, err := certbotCommand(timeoutCtx, args...).CombinedOutput()
 	if err != nil {
 		return string(cmdOutput)
 	}

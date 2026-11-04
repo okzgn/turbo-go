@@ -325,3 +325,132 @@ func TestN65_SetMPointerToDirWithoutConfig(t *testing.T) {
 		t.Errorf("PA (%q), the replacement (%v) or CII (%d) was lost when following a pointer to a directory without turbo.config", pa, repl, cii)
 	}
 }
+
+// Review of 57cbb3c, F3: setM to a folder that can be crossed but not listed is refused before anything changes.
+// Before, the settings in use were emptied and the reload then failed: no site answered until "M" was set back.
+func TestRL_F3_SetMUnlistableDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a folder that can be crossed but not listed is a Unix permission")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root lists any folder")
+	}
+	initForTest(t)
+	other := filepath.ToSlash(t.TempDir()) + "/"
+	if err := os.Chmod(other, 0311); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(other, 0755) })
+	if applied, message := setSitesDir(other, ""); applied || message != "Sites directory can't be read" {
+		t.Errorf("setM to a folder that can't be listed: %v %q; expected it refused", applied, message)
+	}
+	globalMutex.RLock()
+	active := siteExists("localhost", "")
+	globalMutex.RUnlock()
+	if !active {
+		t.Error("localhost was deactivated by a setM that was refused")
+	}
+}
+
+// localhostInUse checks that the sites directory is still dir and that localhost still has its preprocessor.
+func localhostInUse(t *testing.T, dir string, when string) {
+	t.Helper()
+	globalMutex.RLock()
+	active, preprocessor := siteExists("localhost", ""), preprocessors["localhost"]["cgi"]
+	globalMutex.RUnlock()
+	if !sameDir(sitesDir.Get(), dir) || !active || preprocessor == "" {
+		t.Errorf("%s: sites %q, localhost active %v with preprocessor %q; expected the configuration in use", when, sitesDir.Get(), active, preprocessor)
+	}
+}
+
+// localhostWithPreprocessor is a whole turbo.config with localhost and its preprocessor for "cgi".
+func localhostWithPreprocessor() string {
+	return `{"^":{"v":"2"},"localhost":{"":{"?":{"cgi":"` + toolPath("cgiecho") + `"},"-":{"index.html":"1"}}}}`
+}
+
+// withM is config with "M" set to dir.
+func withM(config string, dir string) string {
+	return strings.Replace(config, `{"^":{"v":"2"},`, `{"^":{"v":"2"},".":{"M":"`+dir+`"},`, 1)
+}
+
+// Production review, M-06: the whole chain of "M" is checked before anything is applied. A whole turbo.config whose
+// "M" names a directory that doesn't exist (a disk not mounted yet) is invalid: Turbo doesn't start with it, and a
+// reload keeps the configuration in use. Before, it was applied in the start directory, every site was left without
+// its folder, and saving wrote that directory as "M".
+func TestRP_M06_WholeConfigWithMissingM(t *testing.T) {
+	missing := filepath.ToSlash(t.TempDir()) + "/not-mounted/"
+	dir := initForTest(t)
+	inUse := localhostWithPreprocessor()
+	loadConfig(t, dir, inUse)
+	if err := os.WriteFile(dir+"turbo.config", []byte(withM(inUse, missing)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	withGlobalLock(func() { configFileModTime = 3 }) // Changed since it was read
+	if err := updateSettings(true); err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Errorf("reload with a whole turbo.config whose M doesn't exist: %v; expected an error", err)
+	}
+	localhostInUse(t, dir, "after the reload")
+	resetTestState(dir)
+	if err := updateSettings(false); err == nil {
+		t.Errorf("Turbo starts with a whole turbo.config whose M doesn't exist (sites %q)", sitesDir.Get())
+	}
+}
+
+// Production review, M-06: setM to a directory whose turbo.config leads, through its own "M", to a turbo.config that
+// can't be used, or back to itself, is refused before anything changes. Before, it answered 200 with "could not be
+// applied", and the sites were left with the defaults.
+func TestRP_M06_SetMChecksTheWholeChain(t *testing.T) {
+	dir := initForTest(t)
+	base := startServer(t)
+	tok := login(t, base)
+	loadConfig(t, dir, localhostWithPreprocessor())
+	for _, scenario := range []string{"invalid", "back to itself"} {
+		dirX := filepath.ToSlash(t.TempDir()) + "/"
+		dirY := filepath.ToSlash(t.TempDir()) + "/"
+		target, named := `{broken`, dirY
+		if scenario == "back to itself" {
+			target, named = `{"^":{"v":"2"},".":{"M":"`+dirX+`"}}`, dirX
+		}
+		if err := os.WriteFile(dirY+"turbo.config", []byte(target), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(dirX+"turbo.config", []byte(`{"^":{"v":"2"},".":{"M":"`+dirY+`"},"x.test":{"":{}}}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if code, body := setM(t, base, tok, dirX, "Admin"); code != 400 || !strings.Contains(body, named) {
+			t.Errorf("%s: setM to a directory whose M leads to %s: %d %q; expected 400 naming it", scenario, named, code, body)
+		}
+		localhostInUse(t, dir, scenario+": after setM")
+	}
+}
+
+// Production review, M-06: a sites directory that exists but can't be listed (permissions that only let it be
+// crossed) is found out before anything is applied: setM refuses it, and a reload of a whole turbo.config whose "M"
+// names it keeps the configuration in use.
+func TestRP_M06_UnlistableDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a directory that can't be listed: Unix, and not as root")
+	}
+	dir := initForTest(t)
+	base := startServer(t)
+	tok := login(t, base)
+	inUse := localhostWithPreprocessor()
+	loadConfig(t, dir, inUse)
+	unlistable := filepath.ToSlash(t.TempDir()) + "/"
+	if err := os.Chmod(unlistable, 0o311); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(unlistable, 0o755) })
+	if code, body := setM(t, base, tok, unlistable, "Admin"); code != 400 || !strings.Contains(body, "can't be read") {
+		t.Errorf("setM to a directory that can't be listed: %d %q; expected 400", code, body)
+	}
+	localhostInUse(t, dir, "after setM")
+	if err := os.WriteFile(dir+"turbo.config", []byte(withM(inUse, unlistable)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	withGlobalLock(func() { configFileModTime = 3 }) // Changed since it was read
+	if err := updateSettings(true); err == nil || !strings.Contains(err.Error(), "can't be listed") {
+		t.Errorf("reload with a whole turbo.config whose M can't be listed: %v; expected an error", err)
+	}
+	localhostInUse(t, dir, "after the reload")
+}

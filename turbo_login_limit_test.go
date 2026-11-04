@@ -93,6 +93,11 @@ func TestH57_ConcurrentLoginsLimited(t *testing.T) {
 	initForTest(t)
 	handler := serverHandlerFn("")
 	calls := countPasswordKeys(t)
+	// A PBKDF2 slot for each attempt let through, so that none gets 503 (not checked, not counted) waiting for one:
+	// with 4 CPUs there are 2, and under -race a PBKDF2 can take longer than passwordSlotWait.
+	previousSlots := passwordHashSlots
+	passwordHashSlots = make(chan struct{}, loginMaxFailures+1)
+	t.Cleanup(func() { passwordHashSlots = previousSlots })
 	t.Cleanup(func() {
 		loginFailuresMutex.Lock()
 		clear(loginFailuresByIP)
@@ -256,4 +261,105 @@ func FuzzLogin(f *testing.F) {
 			t.Fatalf("signed in with %q (multipart %v)", body, multipartBody)
 		}
 	})
+}
+
+// Review of 57cbb3c, S12: with TURBO_USER (or another user) and the password still Admin, Turbo warns too; before,
+// it only did with the user Turbo.
+func TestRL_S12_DefaultPasswordWarningWithAnotherUser(t *testing.T) {
+	initForTest(t)
+	panelUser.Set("ops")
+	logs := captureLog(t)
+	warnDefaultCredentials()
+	if !strings.Contains(logs.String(), "The default password (Admin)") {
+		t.Errorf("no warning with ops/Admin:\n%s", logs.String())
+	}
+}
+
+// Production review, M-09: the /64s of an IPv6 /48 share a count of failed logins (loginMaxNetworkFailures): beyond
+// it, a login from any of them gets 429 without a PBKDF2, the right password too, while another /48 isn't held back.
+func TestRP_M09_LoginLimitPer48(t *testing.T) {
+	initForTest(t)
+	handler := serverHandlerFn("")
+	for failures, network := 0, 1; failures < loginMaxNetworkFailures; network++ {
+		for i := 1; i < loginMaxFailures && failures < loginMaxNetworkFailures; i++ { // Below the limit of each /64
+			ip := "[2001:db8:5:" + strconv.FormatInt(int64(network), 16) + "::" + strconv.Itoa(i) + "]" // As in RemoteAddr
+			if rec := loginFrom(handler, ip, "Turbo", "bad"); rec.code != 403 {
+				t.Fatalf("failure %d, from %s: %d; expected 403", failures+1, ip, rec.code)
+			}
+			failures++
+		}
+	}
+	calls := countPasswordKeys(t)
+	if rec := loginFrom(handler, "[2001:db8:5:ffff::1]", "Turbo", "Admin"); rec.code != 429 {
+		t.Errorf("a /64 that never failed, in a /48 with %d failures: %d; expected 429", loginMaxNetworkFailures, rec.code)
+	}
+	if calls.Load() != 0 {
+		t.Errorf("the blocked login computed %d PBKDF2", calls.Load())
+	}
+	if rec := loginFrom(handler, "[2001:db8:6::1]", "Turbo", "Admin"); rec.code != 200 {
+		t.Errorf("another /48: %d; expected 200", rec.code)
+	}
+}
+
+// Production review, M-09: a PBKDF2 slot is kept for the current password of a request with a session and for the
+// logins from the networks of PA: a flood of logins from elsewhere, which takes the other slots, doesn't keep the
+// administrator out.
+func TestRP_M09_ReservedPasswordSlot(t *testing.T) {
+	initForTest(t)
+	handler := serverHandlerFn("")
+	token := newSession(t, "198.51.100.80")
+	verifiedPassword.Store(nil) // A password already checked doesn't need a slot
+	verifiedLogin.Store(nil)
+	fill := func() func() {
+		for i := 0; i < cap(passwordHashSlots); i++ {
+			passwordHashSlots <- struct{}{}
+		}
+		return func() {
+			for i := 0; i < cap(passwordHashSlots); i++ {
+				<-passwordHashSlots
+			}
+		}
+	}
+	free := fill()
+	if rec := loginFrom(handler, "198.51.100.81", "Turbo", "Admin"); rec.code != 503 {
+		t.Errorf("a login with every other slot taken: %d; expected 503", rec.code)
+	}
+	if rec := apiFrom(handler, "198.51.100.80", token, "/admin:inside:setCII?a=50&b=Admin"); rec.code != 200 {
+		t.Errorf("the current password of a session with every other slot taken: %d %q; expected 200", rec.code, rec.body.String())
+	}
+	free()
+
+	if ok, msg := defaultSettingValidators["."]["PA"]("192.0.2.0/24", internalAuth); !ok {
+		t.Fatal(msg)
+	}
+	verifiedPassword.Store(nil)
+	verifiedLogin.Store(nil)
+	free = fill()
+	defer free()
+	if rec := loginFrom(handler, "192.0.2.5", "Turbo", "Admin"); rec.code != 200 {
+		t.Errorf("a login from a network of PA with every other slot taken: %d; expected 200", rec.code)
+	}
+}
+
+// Production review, M-09: a new password has 12 to 64 bytes; one already in use keeps working.
+func TestRP_M09_NewPasswordLength(t *testing.T) {
+	initForTest(t)
+	const ip = "198.51.100.82"
+	token := newSession(t, ip)
+	for _, password := range []string{"ElevenBytes", strings.Repeat("x", 65)} {
+		if rec := apiFrom(serverHandlerFn(""), ip, token, "/admin:inside:setP?"+url.Values{"a": {password}, "b": {"Admin"}}.Encode()); rec.code != 400 || rec.body.String() != "The password must have 12 to 64 bytes" {
+			t.Errorf("setP with %d bytes: %d %q; expected 400", len(password), rec.code, rec.body.String())
+		}
+	}
+	current := "Admin" // Shorter, already in use: it keeps working
+	for _, password := range []string{"TwelveBytes!", strings.Repeat("y", 64)} {
+		rec := apiFrom(serverHandlerFn(""), ip, token, "/admin:inside:setP?"+url.Values{"a": {password}, "b": {current}}.Encode())
+		if rec.code != 200 {
+			t.Fatalf("setP with %d bytes: %d %q; expected 200", len(password), rec.code, rec.body.String())
+		}
+		token, current = rec.Header().Get(sessionHeaderName), password // setP renews the session
+	}
+	if !passwordMatches(strings.Repeat("y", 64)) {
+		t.Error("the password of 64 bytes isn't the one in use")
+	}
 }

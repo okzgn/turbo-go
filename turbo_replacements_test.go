@@ -7,6 +7,7 @@ package main
 
 import (
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 )
@@ -16,13 +17,15 @@ func TestN08_PasswordWithToken(t *testing.T) {
 	initForTest(t)
 	const ip = "198.51.100.80"
 	token := newSession(t, ip)
-	if rec := apiFrom(serverHandlerFn(""), ip, token, "/admin:inside:setP?"+url.Values{"a": {"ab-.-cd"}, "b": {"Admin"}}.Encode()); rec.code != 200 {
+	rec := apiFrom(serverHandlerFn(""), ip, token, "/admin:inside:setP?"+url.Values{"a": {"abcd-.-efghij"}, "b": {"Admin"}}.Encode())
+	if rec.code != 200 {
 		t.Fatalf("setP: %d %q", rec.code, rec.body.String())
 	}
-	if rec := loginFrom(serverHandlerFn(""), ip, "Turbo", "ab-.-cd"); rec.code != 200 {
+	token = rec.Header().Get(sessionHeaderName) // The session that changed the password goes on with a new token
+	if rec := loginFrom(serverHandlerFn(""), ip, "Turbo", "abcd-.-efghij"); rec.code != 200 {
 		t.Errorf("login with the new password: %d", rec.code)
 	}
-	if rec := apiFrom(serverHandlerFn(""), ip, token, "/admin:inside:setU?"+url.Values{"a": {"us-_-er"}, "b": {"ab-.-cd"}}.Encode()); rec.code != 200 {
+	if rec := apiFrom(serverHandlerFn(""), ip, token, "/admin:inside:setU?"+url.Values{"a": {"us-_-er"}, "b": {"abcd-.-efghij"}}.Encode()); rec.code != 200 {
 		t.Fatalf("setU with a b that has a token: %d %q", rec.code, rec.body.String())
 	}
 	if panelUser.Get() != "us-_-er" {
@@ -50,9 +53,11 @@ func TestN08_TokenRules(t *testing.T) {
 	const ip = "198.51.100.82"
 	token := newSession(t, ip)
 	add := func(char, replacement string) int {
-		return apiFrom(serverHandlerFn(""), ip, token, "/admin:inside:addCharsReplace?"+url.Values{"s": {char}, "d": {replacement}}.Encode()).code
+		return apiFrom(serverHandlerFn(""), ip, token, "/admin:inside:addCharsReplace?"+url.Values{"s": {char}, "d": {replacement}, "b": {"Admin"}}.Encode()).code
 	}
 	for _, c := range [][2]string{
+		{"q", "zz"},   // A letter (production review, B2)
+		{"7", "zz"},   // A digit
 		{";", "zz"},   // Fixed
 		{"+", "p"},    // One character
 		{"+", "-.-x"}, // Contains a fixed token
@@ -146,5 +151,85 @@ func TestN78_AmbiguousCharReplacement(t *testing.T) {
 		if got := replaceURIChars(c.sent); got != c.want {
 			t.Errorf("%q is read as %q; expected %q", c.sent, got, c.want)
 		}
+	}
+}
+
+// Production review, B2: a character replacement changes what the panel's actions read, so adding or deleting one
+// needs the password, as do the response templates; and the actions that need it, with the site and the subdomain of
+// every action, take their values as sent. A stolen session can't plant a replacement that turns what the
+// administrator confirms with the password into something else (an extension, a program to run, a site to delete).
+func TestRP_B2_ReplacementsNeedPassword(t *testing.T) {
+	initForTest(t)
+	const ip = "198.51.100.70"
+	token := newSession(t, ip)
+	for _, action := range []struct {
+		name   string
+		values url.Values
+	}{
+		{"addCharsReplace", url.Values{"s": {"|"}, "d": {"cg"}}},
+		{"delCharsReplace", url.Values{"s": {"|"}}},
+		{"addHttpCodeResponse", url.Values{"s": {"404"}, "d": {"Not here"}}},
+		{"delHttpCodeResponse", url.Values{"s": {"404"}}},
+	} {
+		for _, c := range []struct {
+			password string
+			code     int
+			body     string
+		}{{"", 400, "the current password (b)"}, {"WrongPassword", 400, "Wrong current password"}, {"Admin", 200, ""}} {
+			values := url.Values{}
+			for name, value := range action.values {
+				values[name] = value
+			}
+			if c.password != "" {
+				values.Set("b", c.password)
+			}
+			rec := apiFrom(serverHandlerFn(""), ip, token, "/admin:inside:"+action.name+"?"+values.Encode())
+			if rec.code != c.code || !strings.Contains(rec.body.String(), c.body) {
+				t.Errorf("%s with the password %q: %d %q; expected %d %q", action.name, c.password, rec.code, rec.body.String(), c.code, c.body)
+			}
+		}
+	}
+}
+
+func TestRP_B2_PasswordActionsTakeValuesAsSent(t *testing.T) {
+	dir := initForTest(t)
+	const ip = "198.51.100.71"
+	token := newSession(t, ip)
+	if err := os.MkdirAll(dir+"cgtest.test/@", 0755); err != nil {
+		t.Fatal(err)
+	}
+	updateSettings(true)
+	// From here on "cg" stands for "|": it is in the extension, in the path of the program and in a site's name.
+	if rec := apiFrom(serverHandlerFn(""), ip, token, "/admin:inside:addCharsReplace?"+url.Values{"s": {"|"}, "d": {"cg"}, "b": {"Admin"}}.Encode()); rec.code != 200 {
+		t.Fatalf("addCharsReplace: %d %q", rec.code, rec.body.String())
+	}
+	program := toolPath("cgiecho")
+	if rec := apiFrom(serverHandlerFn(""), ip, token, "/admin:inside:addPreprocessor?"+url.Values{"s": {"localhost"}, "d": {""}, "a": {"cgi"}, "b": {program}, "c": {"Admin"}}.Encode()); rec.code != 200 {
+		t.Fatalf("addPreprocessor: %d %q", rec.code, rec.body.String())
+	}
+	globalMutex.RLock()
+	saved, replaced := preprocessors["localhost"]["cgi"], preprocessors["localhost"]["|i"]
+	globalMutex.RUnlock()
+	if saved != program || replaced != "" {
+		t.Errorf("addPreprocessor with the token in its values: cgi = %q, |i = %q; expected cgi = %q", saved, replaced, program)
+	}
+	if rec := apiFrom(serverHandlerFn(""), ip, token, "/admin:inside:delPreprocessor?"+url.Values{"s": {"localhost"}, "d": {""}, "a": {"cgi"}, "b": {"Admin"}}.Encode()); rec.code != 200 {
+		t.Errorf("delPreprocessor of cgi: %d %q", rec.code, rec.body.String())
+	}
+	globalMutex.RLock()
+	_, kept := preprocessors["localhost"]["cgi"]
+	globalMutex.RUnlock()
+	if kept {
+		t.Error("delPreprocessor with a=cgi didn't delete the preprocessor of cgi")
+	}
+	// The site and the subdomain are never replaced; the other values of an action of the session alone still are.
+	if rec := apiFrom(serverHandlerFn(""), ip, token, "/admin:inside:addHeader?"+url.Values{"s": {"cgtest.test"}, "d": {""}, "a": {"X-Test"}, "b": {"1cg2"}}.Encode()); rec.code != 200 {
+		t.Fatalf("addHeader on cgtest.test: %d %q", rec.code, rec.body.String())
+	}
+	globalMutex.RLock()
+	value := customHeaders["cgtest.test"]["X-Test"]
+	globalMutex.RUnlock()
+	if value != "1|2" {
+		t.Errorf("the header of cgtest.test: %q; expected 1|2", value)
 	}
 }

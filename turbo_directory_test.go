@@ -336,3 +336,42 @@ func TestN01_SelfPointer(t *testing.T) {
 		t.Errorf("the reload didn't keep the configuration: PA=%q CII=%d", panelAccess.Load().setting, serverRequestLimits.CII.Load())
 	}
 }
+
+// Production review, M-07: when the turbo.config of the start directory is the very file of the directory that "M"
+// names (a symbolic link), saving doesn't write the pointer over the whole configuration it has just saved there.
+// Before, the file was left pointing to its own directory, and Turbo didn't start again.
+func TestRP_M07_SameFileNotReducedToPointer(t *testing.T) {
+	dirA := initForTest(t)
+	dirC := filepath.ToSlash(t.TempDir()) + "/"
+	if err := os.MkdirAll(dirC+"example.test/@", 0755); err != nil {
+		t.Fatal(err)
+	}
+	whole := `{"^":{"v":"2"},".":{"M":"` + dirC + `","U":"admin2"},"example.test":{"":{".":{"X-Kept":"1"}}}}`
+	if err := os.WriteFile(dirC+"turbo.config", []byte(whole), 0600); err != nil {
+		t.Fatal(err)
+	}
+	os.Remove(dirA + "turbo.config")
+	if err := os.Symlink(dirC+"turbo.config", dirA+"turbo.config"); err != nil {
+		t.Skip("no symbolic links here: " + err.Error())
+	}
+	resetTestState(dirA)
+	if err := updateSettings(false); err != nil {
+		t.Fatal(err)
+	}
+	if !saveDefaultConfig() {
+		t.Fatal("saving failed")
+	}
+	if raw := savedConfig(t, dirC); isSitesDirPointerMap(raw) || raw["example.test"] == nil {
+		t.Errorf("turbo.config of %s after saving: %v; expected the whole configuration", dirC, raw)
+	}
+	resetTestState(dirA) // A start after saving
+	if err := updateSettings(false); err != nil {
+		t.Fatalf("Turbo doesn't start after saving: %v", err)
+	}
+	globalMutex.RLock()
+	header := customHeaders["example.test"]["X-Kept"]
+	globalMutex.RUnlock()
+	if panelUser.Get() != "admin2" || header != "1" {
+		t.Errorf("after a start: user %q, header of example.test %q; expected admin2 and 1", panelUser.Get(), header)
+	}
+}
