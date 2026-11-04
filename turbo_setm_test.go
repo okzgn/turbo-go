@@ -152,7 +152,7 @@ func TestN42_SetMWaitsForReload(t *testing.T) {
 		}
 	}
 	t.Cleanup(func() { beforeSitesScan = func() {} })
-	configFileModTime = 0 // The periodic reload reads A's turbo.config again
+	configFileStamp = configStamp{} // The periodic reload reads A's turbo.config again
 	reloaded := make(chan struct{})
 	go func() { updateSettings(true); close(reloaded) }()
 	<-chosen
@@ -385,7 +385,7 @@ func TestRP_M06_WholeConfigWithMissingM(t *testing.T) {
 	if err := os.WriteFile(dir+"turbo.config", []byte(withM(inUse, missing)), 0600); err != nil {
 		t.Fatal(err)
 	}
-	withGlobalLock(func() { configFileModTime = 3 }) // Changed since it was read
+	withGlobalLock(func() { configFileStamp = configStamp{kind: stampFile, modTime: 3} }) // Changed since it was read
 	if err := updateSettings(true); err == nil || !strings.Contains(err.Error(), "does not exist") {
 		t.Errorf("reload with a whole turbo.config whose M doesn't exist: %v; expected an error", err)
 	}
@@ -448,7 +448,7 @@ func TestRP_M06_UnlistableDirectory(t *testing.T) {
 	if err := os.WriteFile(dir+"turbo.config", []byte(withM(inUse, unlistable)), 0600); err != nil {
 		t.Fatal(err)
 	}
-	withGlobalLock(func() { configFileModTime = 3 }) // Changed since it was read
+	withGlobalLock(func() { configFileStamp = configStamp{kind: stampFile, modTime: 3} }) // Changed since it was read
 	if err := updateSettings(true); err == nil || !strings.Contains(err.Error(), "can't be listed") {
 		t.Errorf("reload with a whole turbo.config whose M can't be listed: %v; expected an error", err)
 	}

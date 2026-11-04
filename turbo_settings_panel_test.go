@@ -58,7 +58,7 @@ func TestN05_InvalidPanelSettingKeptOnReload(t *testing.T) {
 			loadConfig(t, dir, `{"^":{"v":"2"},".":{"PA":"127.0.0.0/8","U":"Other","CII":"77"}}`)
 			hash := panelPasswordHash.Get()
 			os.WriteFile(dir+"turbo.config", []byte(`{"^":{"v":"2"},".":{`+setting+`,"CII":"78"}}`), 0600)
-			configFileModTime = 0
+			configFileStamp = configStamp{}
 			if err := updateSettings(false); err == nil {
 				t.Errorf("the reload with %s doesn't report the error", setting)
 			}

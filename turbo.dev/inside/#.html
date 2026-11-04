@@ -497,11 +497,11 @@ document.addEventListener('DOMContentLoaded', function(){
 		linkEl.onclick = function(event){
 			event.preventDefault();
 			if(event.target == deleteBtn){ return; }
-			statusMessageEl.dataset.ok = 'The folder of "' + name + '" isn\'t there: its settings come back with it. To forget them, delete it with X';
+			statusMessageEl.dataset.ok = 'The folder of "' + name + '" (or its @, or that of its site) isn\'t there: its settings come back with it. To forget them, use X (no folder is deleted)';
 		},
 		deleteBtn.onclick = function(event){
 			event.preventDefault(), event.stopPropagation();
-			showDialogSequence({ type: 'confirm', text: 'Delete "' + name + '", kept without its folder, and its settings?', abortOnCancel: true }, { text: 'Current password:', secret: true, required: true, abortOnCancel: true, okFn: function(z, password){
+			showDialogSequence({ type: 'confirm', text: 'Forget the settings kept for "' + name + '"? No folder is deleted.', abortOnCancel: true }, { text: 'Current password:', secret: true, required: true, abortOnCancel: true, okFn: function(z, password){
 				apiRequest('/admin:inside:delSite?s=' + encodeURIComponent(domain) + '&d=' + encodeURIComponent(subdomain) + '&b=' + encodeURIComponent(password), function(r){ statusMessageEl.dataset.ok = r, container.removeChild(linkEl), updateDormantSection(container); }, function(e){ statusMessageEl.dataset.error = e; });
 			} });
 		};

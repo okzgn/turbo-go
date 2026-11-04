@@ -179,3 +179,41 @@ func TestRL_S11_PasswordHashLengthsBounded(t *testing.T) {
 		}
 	}
 }
+
+// V2 (production review of 775a809): a plain "P" of turbo.config is applied as long as the file accepts it (1 to 64
+// bytes). The file took up to 64 bytes but only up to 24 were applied: a longer one left the default password, with
+// the file valid and only the warning about the default credentials.
+func TestRP2_V2_PlainPasswordUpTo64Bytes(t *testing.T) {
+	for _, length := range []int{25, maxPasswordBytes} {
+		dir := initForTest(t)
+		var defaultHash string
+		withReadLock(func() { defaultHash = panelPasswordHash.Get() })
+		password := strings.Repeat("correct-horse-", 5)[:length]
+		config := `{"^":{"v":"2"},".":{"U":"Operator","P":"` + password + `"}}`
+		if err := os.WriteFile(dir+"turbo.config", []byte(config), 0600); err != nil {
+			t.Fatal(err)
+		}
+		withGlobalLock(func() { configFileStamp = configStamp{} })
+		if err := updateSettings(false); err != nil {
+			t.Fatalf("%d bytes: %v", length, err)
+		}
+		if panelPasswordHash.Get() == defaultHash || !passwordMatches(password) {
+			t.Errorf("a plain P of %d bytes isn't applied: the panel keeps the default password", length)
+		}
+	}
+	// One byte more makes the file invalid: the configuration in use stays, with its password.
+	dir := initForTest(t)
+	var hashBefore string
+	withReadLock(func() { hashBefore = panelPasswordHash.Get() })
+	config := `{"^":{"v":"2"},".":{"U":"Operator","P":"` + strings.Repeat("x", maxPasswordBytes+1) + `"}}`
+	if err := os.WriteFile(dir+"turbo.config", []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	withGlobalLock(func() { configFileStamp = configStamp{} })
+	if err := updateSettings(false); err == nil || !strings.Contains(err.Error(), `"P"`) {
+		t.Errorf("a plain P of %d bytes: %v; expected the file refused because of P", maxPasswordBytes+1, err)
+	}
+	if panelUser.Get() == "Operator" || panelPasswordHash.Get() != hashBefore {
+		t.Error("a refused turbo.config changed the credentials in use")
+	}
+}

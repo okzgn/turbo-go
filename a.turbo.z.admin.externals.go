@@ -191,8 +191,33 @@ func isSitesDirPointerMap(raw map[string]map[string]interface{}) bool {
 // whose "M" names its own folder. Saving left one like that, instead of the whole configuration, when "M" named
 // the start directory written another way; applying it would bring back the defaults.
 func pointsToItself(raw map[string]map[string]interface{}, configPath string) bool {
-	value, isString := raw["."]["M"].(string)
-	return isString && isSitesDirPointerMap(raw) && sameDir(value, filepath.Dir(configPath))
+	value, _ := configSitesDir(raw)
+	return value != "" && isSitesDirPointerMap(raw) && sameDir(value, filepath.Dir(configPath))
+}
+
+// configSitesDir is the "M" of a decoded turbo.config as its setting reads it (configNumberOrString: a string, or
+// an integer as its digits), and whether "M" is there at all. Every reader of "M" uses it: reading only strings in
+// some of them, a numeric "M" was applied without checking where it led.
+func configSitesDir(raw map[string]map[string]interface{}) (value string, present bool) {
+	setting, present := raw["."]["M"]
+	value, _ = configNumberOrString(setting)
+	return value, present
+}
+
+// unusableSitesDirProblem says why the "M" of a turbo.config that only points to another directory
+// (isSitesDirPointerMap) can't be followed when it is there but isn't a directory name ("", null, true, 1.5, an
+// object): applied as it is, such a pointer would leave the default configuration. Without "M" ({} or only "^"),
+// it is an empty configuration, loaded as such.
+func unusableSitesDirProblem(raw map[string]map[string]interface{}) (shown string, unusable bool) {
+	value, present := configSitesDir(raw)
+	if !present || value != "" || !isSitesDirPointerMap(raw) {
+		return "", false
+	}
+	encoded, err := json.Marshal(raw["."]["M"])
+	if err != nil {
+		return `"M"`, true
+	}
+	return string(encoded), true
 }
 
 // configSelfPointerError is a turbo.config that points to itself (see pointsToItself).
@@ -225,8 +250,11 @@ func (e configPointerError) Error() string {
 // follows (counting the redirects already followed). Followed, it emptied the configuration in use (resetSettings)
 // before finding that out, and left the sites with the defaults, their scripts served as text.
 func sitesDirChainProblem(raw map[string]map[string]interface{}, baseDir string, redirects int, withoutConfigKept bool) error {
-	first, _ := raw["."]["M"].(string)
+	first, _ := configSitesDir(raw)
 	whole := !isSitesDirPointerMap(raw)
+	if shown, unusable := unusableSitesDirProblem(raw); unusable {
+		return configPointerError{target: shown, reason: `which is not a directory: "M" must be a non-empty string`}
+	}
 	current, currentDir, value, via := raw, baseDir, first, ""
 	visited := []string{baseDir}
 	for ; value != ""; redirects++ { // Without "M" (a pointer without it is an empty configuration), nothing to follow
@@ -268,7 +296,11 @@ func sitesDirChainProblem(raw map[string]map[string]interface{}, baseDir string,
 		}
 		visited = append(visited, resolved)
 		current, currentDir = target.raw, resolved
-		value, _ = current["."]["M"].(string)
+		if shown, unusable := unusableSitesDirProblem(current); unusable {
+			via = shown
+			return reason(`which is not a directory: "M" must be a non-empty string`)
+		}
+		value, _ = configSitesDir(current)
 		via = value
 	}
 	return nil
@@ -412,13 +444,13 @@ func saveDefaultConfig() bool {
 	}
 	// The periodic check must not take this save for an edit and apply it again over what changes next. The file
 	// now holds the configuration in use: if it disappears, that configuration stays, as with one read at start.
-	info, statErr := os.Stat(configPath)
+	savedStamp := configStampOf(configPath)
 	withGlobalLock(func() {
 		configSchemaRead = configSchema
 		configFileDigest = sha256.Sum256(saved)
 		configFileLoaded = true
-		if statErr == nil {
-			configFileModTime = info.ModTime().UnixNano()
+		if savedStamp.kind == stampFile {
+			configFileStamp = savedStamp
 		}
 	})
 	if !sameDir(baseDir, startDir) && !sameFile(startDir+configFileName, configPath) { // Turbo starts reading startDir: leave there where the sites are
@@ -941,11 +973,19 @@ func panelSettingsProblem(settings map[string]interface{}) error {
 			return configSettingError{"PH", "is not a Turbo password hash"}
 		}
 	} else if value, present := settings["P"]; present { // Only read without "PH"
-		if text, isString := value.(string); !isString || len(text) < 1 || len(text) > maxPasswordBytes || !textAllowed(text, false) {
+		if _, valid := plainPassword(value); !valid {
 			return configSettingError{"P", "a string of 1 to " + strconv.Itoa(maxPasswordBytes) + " bytes, without control characters, is expected"}
 		}
 	}
 	return nil
+}
+
+// plainPassword is the plain-text "P" of turbo.config when it can be used: one rule for checking the file
+// (panelSettingsProblem) and for applying it (loadCredentials). With 24 bytes in one and 64 in the other, a "P" of
+// 25 to 64 bytes made a valid file whose password was never applied, and the panel stayed with the default one.
+func plainPassword(value interface{}) (string, bool) {
+	text, isString := value.(string)
+	return text, isString && len(text) >= 1 && len(text) <= maxPasswordBytes && textAllowed(text, false)
 }
 
 // dropControlChars removes from a turbo.config read from disk the keys and values with control characters or

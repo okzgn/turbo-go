@@ -18,7 +18,7 @@ func loadConfig(t *testing.T, dir, cfg string) {
 	if err := os.WriteFile(dir+"turbo.config", []byte(cfg), 0600); err != nil {
 		t.Fatal(err)
 	}
-	configFileModTime = 0
+	configFileStamp = configStamp{}
 	updateSettings(false)
 }
 

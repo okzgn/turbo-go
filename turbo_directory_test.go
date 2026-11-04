@@ -328,7 +328,7 @@ func TestN01_SelfPointer(t *testing.T) {
 	dir = initForTest(t)
 	loadConfig(t, dir, `{"^":{"v":"2"},".":{"PA":"127.0.0.0/8","CII":"55"}}`)
 	os.WriteFile(dir+"turbo.config", []byte(`{"^":{"v":"2"},".":{"M":"`+dir+`"}}`), 0600)
-	configFileModTime = 0
+	configFileStamp = configStamp{}
 	if err := updateSettings(false); err == nil {
 		t.Error("the reload doesn't report the pointer to itself")
 	}

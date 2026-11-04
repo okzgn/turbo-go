@@ -51,6 +51,9 @@ func main() {
 				return // The client went away
 			}
 		}
+		if ms, err := strconv.Atoi(q.Get("after")); err == nil { // And it keeps running, its output open
+			time.Sleep(time.Duration(ms) * time.Millisecond)
+		}
 		return
 	}
 	if ms := q.Get("child"); ms != "" { // Leaves a child that inherits stdout, sleeps ms and then writes childmark

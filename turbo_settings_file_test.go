@@ -66,7 +66,7 @@ func TestI18_NotAnObject(t *testing.T) {
 	for _, content := range []string{"null", "[]", "5", `"x"`} {
 		dir := initForTest(t)
 		os.WriteFile(dir+"turbo.config", []byte(content), 0600)
-		configFileModTime = 0
+		configFileStamp = configStamp{}
 		if err := updateSettings(false); err == nil {
 			t.Errorf("turbo.config %s was applied; expected an invalid file", content)
 		}

@@ -30,7 +30,7 @@ func TestN22_SchemaVersionInvalid(t *testing.T) {
 	for _, version := range []string{`"x"`, `"2.0"`, `0`, `-1`, `2.5`, `null`, `{}`} {
 		dir := initForTest(t)
 		os.WriteFile(dir+"turbo.config", []byte(`{"^":{"v":`+version+`},".":{"CIL":"5000"}}`), 0600)
-		configFileModTime = 0
+		configFileStamp = configStamp{}
 		err := updateSettings(false)
 		if err == nil {
 			t.Errorf("\"v\":%s was accepted (schema %d); expected an invalid file", version, configSchemaRead)
@@ -42,7 +42,7 @@ func TestN22_SchemaVersionInvalid(t *testing.T) {
 	}
 	dir := initForTest(t)
 	os.WriteFile(dir+"turbo.config", []byte(`{"^":{},".":{}}`), 0600)
-	configFileModTime = 0
+	configFileStamp = configStamp{}
 	if err := updateSettings(false); err == nil {
 		t.Error("\"^\" without \"v\" was accepted")
 	}

@@ -49,7 +49,7 @@ func TestP02_ConfigDotPanics(t *testing.T) {
 	dir := initForTest(t)
 	cfg := `{"localhost":{"":{"$":{".":"image/png"}}}}`
 	os.WriteFile(dir+"turbo.config", []byte(cfg), 0600)
-	configFileModTime = 0
+	configFileStamp = configStamp{}
 	defer func() {
 		if r := recover(); r != nil {
 			t.Fatalf("panic in updateSettings: %v", r)

@@ -138,7 +138,7 @@ func TestP15_SlowDiskReloadDoesNotHoldRequests(t *testing.T) {
 	config := `{"^":{"v":"2"},"localhost":{"":{"-":{"index.html":"1"},"?":{"cgi":"` + toolPath("cgiecho") + `"},"!":{"S":"1","C":"0"}}}}`
 	elapsed := requestWhileLockWaits(t, base, func() {
 		os.WriteFile(dir+"turbo.config", []byte(config), 0600)
-		withGlobalLock(func() { configFileModTime = 0 })
+		withGlobalLock(func() { configFileStamp = configStamp{} })
 		updateSettings(false)
 	})
 	if elapsed > 150*time.Millisecond {

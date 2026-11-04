@@ -54,7 +54,7 @@ func TestN07_PreprocessorPathMeasuredAsWritten(t *testing.T) {
 		t.Errorf("saved preprocessor = %q; expected it as written, %q", got, written)
 	}
 	resetSettings()
-	configFileModTime = 0
+	configFileStamp = configStamp{}
 	updateSettings(false)
 	check("after saving and loading again")
 }
@@ -92,7 +92,7 @@ func TestN07_InvalidPreprocessorAnswers500(t *testing.T) {
 		}
 	}
 	resetSettings()
-	configFileModTime = 0
+	configFileStamp = configStamp{}
 	updateSettings(false)
 	for ext := range cases {
 		if code, body, _ := get(base, "/x."+ext, nil); code != 500 || strings.Contains(body, "source-") {

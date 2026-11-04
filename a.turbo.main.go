@@ -56,7 +56,7 @@ import (
 
 // Locks: globalMutex guards the maps of this block (signedInTokens, charReplacements, fixedCharReplacements,
 // sitesMap, siteSSLConfig, mimeTypes, customHeaders, preprocessors, indexFiles, domainAliases, dormantSites), together with
-// siteCertificates, fixedHTTPResponses, currentCertDomain and configFileModTime: read them with RLock and change
+// siteCertificates, fixedHTTPResponses, currentCertDomain and configFileStamp: read them with RLock and change
 // them with Lock (lockedCheck, withGlobalLock), never outside, as a concurrent map read and write ends the
 // process. Values read on every request without it are atomic or published copies (atomicString,
 // atomic.Pointer, sync.Map, atomic counters), and logMutex guards the log files.
@@ -102,7 +102,7 @@ var (
 	currentCertDomain string              // Certificate domain currently being processed
 	certRetryDelay    = 30 * time.Second  // Delay before retrying a certificate while another one is being issued
 	certPending       = map[string]bool{} // Sites with a certificate retry waiting (one each); guarded by globalMutex
-	configFileModTime int64               // Config file modification time reference
+	configFileStamp   configStamp         // turbo.config as it was when last read; the zero value reads it again
 
 	httpResponses      = &customNetHttp.TurboErrorTemplates // HTTP responses (published copy, see setHTTPResponses)
 	fixedHTTPResponses = make(map[int]bool)                 // Fixed HTTP response codes
@@ -1139,12 +1139,49 @@ type reloadOptions struct {
 	carried           *parsedConfig // A whole turbo.config whose "M" names that directory, without turbo.config: applied there
 }
 
+// configStamp is what a turbo.config was when it was read: missing, impossible to look at, or a file with its
+// modification time and size. The zero value is "unknown", and the file is read whatever it is: with a date as the
+// marker, a file dated at the Unix epoch (as some reproducible builds and image layers leave them) was taken for
+// one already read, and never applied at start.
+type configStamp struct {
+	kind    configStampKind
+	modTime int64
+	size    int64
+}
+
+type configStampKind uint8
+
+const (
+	stampUnknown    configStampKind = iota // Not read yet, or to be read again
+	stampMissing                           // No turbo.config: the defaults
+	stampUnreadable                        // Something is there, but it can't even be looked at
+	stampFile                              // A file (or a broken link, or a folder) with its date and size
+)
+
+// configStampOf looks at the turbo.config at path. Anything there counts as turbo.config, also a broken link or a
+// folder: only a missing one means none. The size also tells a rewrite within the same tick of the clock.
+func configStampOf(path string) configStamp {
+	if info, err := os.Stat(path); err == nil {
+		return configStamp{kind: stampFile, modTime: info.ModTime().UnixNano(), size: info.Size()}
+	} else if linkInfo, lerr := os.Lstat(path); lerr == nil {
+		return configStamp{kind: stampFile, modTime: linkInfo.ModTime().UnixNano(), size: linkInfo.Size()}
+	} else if !os.IsNotExist(lerr) {
+		return configStamp{kind: stampUnreadable} // parseSiteConfig says why
+	}
+	return configStamp{kind: stampMissing}
+}
+
+// changedSince says whether a turbo.config with this stamp has to be read, after one read with last.
+func (stamp configStamp) changedSince(last configStamp) bool {
+	return last.kind == stampUnknown || stamp != last
+}
+
 // updateSettingsFollowing is updateSettings counting how many times "M" moved it to another sites directory,
 // to stop if two configs point at each other. Callers hold settingsUpdateMutex.
 func updateSettingsFollowing(checkSitesFlag bool, redirects int, options reloadOptions) error {
 	baseDir := sitesDir.Get()
-	var lastConfigModTime int64
-	withReadLock(func() { lastConfigModTime = configFileModTime })
+	var lastStamp configStamp
+	withReadLock(func() { lastStamp = configFileStamp })
 
 	refreshLogFiles(baseDir)
 
@@ -1156,22 +1193,15 @@ func updateSettingsFollowing(checkSitesFlag bool, redirects int, options reloadO
 		checkSites()
 	}
 
-	// Anything at the path counts as turbo.config, also a broken link or a folder: only a missing one means none.
-	var configModTime int64 = 1
-	if configFileInfo, err := os.Stat(baseDir + configFileName); err == nil {
-		configModTime = configFileInfo.ModTime().UnixNano()
-	} else if linkInfo, lerr := os.Lstat(baseDir + configFileName); lerr == nil {
-		configModTime = linkInfo.ModTime().UnixNano()
-	} else if !os.IsNotExist(lerr) {
-		configModTime = 2 // It can't even be looked at: readSiteConfigFrom says why
-	}
-	if configModTime == 1 && configFileLoaded && lastConfigModTime != 1 { // It was there: keep what it said
-		withGlobalLock(func() { configFileModTime = 1 })
+	stamp := configStampOf(baseDir + configFileName)
+	if stamp.kind == stampMissing && configFileLoaded && lastStamp.kind != stampMissing { // It was there: keep what it said
+		withGlobalLock(func() { configFileStamp = stamp })
 		slog.Warn("turbo.config has disappeared: the configuration in use stays until it exists again", "file", baseDir+configFileName)
-		lastConfigModTime = 1
+		lastStamp = stamp
 	}
-	withoutConfig := configModTime == 1
-	if options.ignorePointer && !withoutConfig && lastConfigModTime != configModTime {
+	withoutConfig := stamp.kind == stampMissing
+	changed := stamp.changedSince(lastStamp)
+	if options.ignorePointer && !withoutConfig && changed {
 		if data, err := os.ReadFile(baseDir + configFileName); err == nil && isSitesDirPointer(data) { // #nosec G304 -- turbo.config of the sites directory chosen by the administrator
 			slog.Info("The turbo.config of the sites directory only points to another directory: it is not followed, and saving will write the whole configuration there", "file", baseDir+configFileName)
 			withoutConfig = true
@@ -1182,10 +1212,10 @@ func updateSettingsFollowing(checkSitesFlag bool, redirects int, options reloadO
 	configRead := false
 	sitesActivated := false // Sites found on disk, also checked against PA
 	// The whole turbo.config that named this directory, which has none of its own, applies here: its sites are these.
-	carried := options.carried != nil && lastConfigModTime != configModTime && withoutConfig && options.keepWithoutConfig
-	if lastConfigModTime != configModTime && withoutConfig && options.keepWithoutConfig {
+	carried := options.carried != nil && changed && withoutConfig && options.keepWithoutConfig
+	if changed && withoutConfig && options.keepWithoutConfig {
 		withGlobalLock(func() {
-			configFileModTime = configModTime
+			configFileStamp = stamp
 			configFileLoaded = true // Kept as if it came from a file there
 		})
 		if carried {
@@ -1194,7 +1224,7 @@ func updateSettingsFollowing(checkSitesFlag bool, redirects int, options reloadO
 			slog.Info("Sites directory without turbo.config: the global settings, the credentials and the lists in use are kept", "directory", baseDir)
 		}
 	}
-	readConfig := lastConfigModTime != configModTime && !(withoutConfig && options.keepWithoutConfig)
+	readConfig := changed && !(withoutConfig && options.keepWithoutConfig)
 	var config parsedConfig
 	if readConfig { // Read and checked before taking the lock
 		config, configErr = parseSiteConfig(baseDir + configFileName)
@@ -1215,7 +1245,7 @@ func updateSettingsFollowing(checkSitesFlag bool, redirects int, options reloadO
 	// settings in use before the target, maybe without turbo.config, keeps them).
 	var pointerTarget, pointerValue string
 	if readConfig && configErr == nil && config.raw != nil && isSitesDirPointerMap(config.raw) {
-		if value, _ := config.raw["."]["M"].(string); value != "" {
+		if value, _ := configSitesDir(config.raw); value != "" {
 			if resolved, err := resolveSitesDir(value); err == nil && dirExists(resolved) && !sameDir(resolved, baseDir) {
 				pointerTarget, pointerValue = resolved, value
 			}
@@ -1228,7 +1258,7 @@ func updateSettingsFollowing(checkSitesFlag bool, redirects int, options reloadO
 	// served as text.
 	var carry *parsedConfig
 	if readConfig && configErr == nil && config.raw != nil && !isSitesDirPointerMap(config.raw) && redirects < 2 {
-		if value, _ := config.raw["."]["M"].(string); value != "" {
+		if value, _ := configSitesDir(config.raw); value != "" {
 			if resolved, err := resolveSitesDir(value); err == nil && dirExists(resolved) && !sameDir(resolved, baseDir) {
 				if _, statErr := os.Lstat(resolved + configFileName); os.IsNotExist(statErr) {
 					pointerTarget, pointerValue, carry = resolved, value, &config
@@ -1254,7 +1284,7 @@ func updateSettingsFollowing(checkSitesFlag bool, redirects int, options reloadO
 	beforeSitesScan()
 	withDiskLook(look, func() {
 		if readConfig {
-			configFileModTime = configModTime // Not read again until it changes, also if it is invalid
+			configFileStamp = stamp // Not read again until it changes, also if it is invalid
 			if pointerTarget != "" {
 				sitesDir.Set(pointerTarget)
 				sitesDirValue.Set(pointerValue)
@@ -1265,7 +1295,7 @@ func updateSettingsFollowing(checkSitesFlag bool, redirects int, options reloadO
 				if panelUser.Get()+"\x00"+panelPasswordHash.Get() != credentials { // As with setU and setP
 					closeOtherSessions(options.keepSession)
 				}
-				configFileLoaded = configModTime != 1
+				configFileLoaded = stamp.kind != stampMissing
 				configFileDigest = config.digest
 			}
 		} else if carried {
@@ -1288,7 +1318,7 @@ func updateSettingsFollowing(checkSitesFlag bool, redirects int, options reloadO
 	if readConfig && configErr == nil {
 		configRead = true
 		switch {
-		case configModTime == 1:
+		case stamp.kind == stampMissing:
 			slog.Info("No turbo.config: default configuration")
 		case carry != nil:
 			slog.Info("turbo.config read: it applies in the sites directory that its \"M\" names, which has no turbo.config", "directory", pointerTarget)
@@ -1302,7 +1332,7 @@ func updateSettingsFollowing(checkSitesFlag bool, redirects int, options reloadO
 			_, statErr := os.Lstat(newDir + configFileName)
 			keep := options.keepWithoutConfig || os.IsNotExist(statErr)
 			resetSettings()
-			withGlobalLock(func() { configFileModTime = 0 })
+			withGlobalLock(func() { configFileStamp = configStamp{} })
 			return updateSettingsFollowing(checkSitesFlag, redirects+1, reloadOptions{keepWithoutConfig: keep, keepSession: options.keepSession, carried: carry})
 		}
 	}
@@ -1328,7 +1358,7 @@ func updateSettingsFollowing(checkSitesFlag bool, redirects int, options reloadO
 // the site has HTTPS on) and the executables of their preprocessors.
 func lookAheadSettings(config parsedConfig, baseDir string, disk []diskSite, restoring map[diskSite]map[string]interface{}) *diskLook {
 	look := newDiskLook()
-	if value, isString := config.raw["."]["M"].(string); isString {
+	if value, present := configSitesDir(config.raw); present {
 		if resolved, err := resolveSitesDir(value); err == nil {
 			look.stat(resolved)
 		}
@@ -1910,10 +1940,23 @@ func forgetDormantLocked(domain string, subdomain string) {
 		delete(dormantSites, domain)
 		return
 	}
+	forgetDormantEntryLocked(domain, subdomain)
+}
+
+// forgetDormantEntryLocked drops what is kept of that one site: for a domain, not what is kept of its subdomains,
+// which the panel lists, and deletes, each on its own. Callers hold the global lock.
+func forgetDormantEntryLocked(domain string, subdomain string) {
 	delete(dormantSites[domain], subdomain)
 	if len(dormantSites[domain]) == 0 {
 		delete(dormantSites, domain)
 	}
+}
+
+// keptSiteMessage is the answer to creating, from the panel, a site that Turbo keeps without its folder: created
+// anew, it lost its settings with the session alone (its preprocessors included, its scripts then served as text
+// when its folder came back), and the settings of its subdomains with it.
+func keptSiteMessage(name string) string {
+	return name + " is kept without its folder, with its settings: put its folder back, or delete it first (Sites without their folder)"
 }
 
 // restoreDormantLocked activates a site whose folder is back with the settings kept for it, applied as when
@@ -2234,17 +2277,23 @@ func dynamic(basePath string, requestPath string, queryString string, scriptPath
 	}
 	// The CGI's output waits in output for the client (newCGIOutput), so that the CGI, done, frees its slot at once,
 	// however slowly the client reads: holding it until the client had read everything let a few clients that don't
-	// read keep every slot, and every site's CGIs answered 503.
-	output := newCGIOutput(cgiResponseWriter{responseWriter})
+	// read keep every slot, and every site's CGIs answered 503. The CGI runs with a context of its own, which the output
+	// cancels when it cuts the response (its client already has its share of CGIs waiting for it).
+	cgiContext, cancelCGI := context.WithCancel(request.Context())
+	defer cancelCGI()
+	request = request.WithContext(cgiContext)
+	output := newCGIOutput(cgiResponseWriter{responseWriter}, ipAddr(request.RemoteAddr), cancelCGI)
 	slotHeld, completed := true, false
 	defer func() {
+		// First the slot: on the way out without completing, the CGI and its group have already ended (P12 waits for
+		// them), and the sender may wait for a client that doesn't read until WT + 2 s.
+		if slotHeld {
+			releaseCGISlot()
+		}
 		if completed {
 			output.finish() // What is left reaches the client, the slot already free
 		} else {
 			output.abort() // Cut (the client went away, or WT ran out): nothing more is written
-		}
-		if slotHeld {
-			releaseCGISlot()
 		}
 	}()
 	withoutSessionCookie(request)
@@ -2281,20 +2330,185 @@ func dynamic(basePath string, requestPath string, queryString string, scriptPath
 	slotHeld = false
 }
 
-// How much of a CGI's output may wait for its client: in memory, cgiOutputMemory per response and cgiOutputBudget for
-// all of them; beyond, in a temporary file, cgiOutputFileMax per response and cgiOutputFileBudget for all of them.
-// Within them a CGI never waits for its client, so it ends, and frees its slot, as soon as it is done; beyond them
-// it waits for its client, as it did writing straight to it (as nginx's FastCGI buffers do).
-const (
-	cgiOutputMemory     = 1 << 20
-	cgiOutputBudget     = 64 << 20
-	cgiOutputFileMax    = 256 << 20
-	cgiOutputFileBudget = 1 << 30
+// How much of a CGI's output may wait for its client: in memory, memory per response and budget for all of them;
+// beyond, in a temporary file, fileMax per response (its size on disk) and fileBudget for all of them. A client
+// (limiterKey) may take a quarter of each budget and, in IPv6, its /48 half. Within them a CGI never waits for its
+// client, so it ends, and frees its slot, as soon as it is done; beyond them it waits for its client, as it did
+// writing straight to it (as nginx's FastCGI buffers do), and only a quarter of the CGI slots may wait like that for
+// the responses of one client (a half for a /48): a response beyond is cut. A variable, so that tests can lower them
+// (under cgiOutputSharesMutex).
+type cgiOutputLimitSet struct {
+	memory, budget, fileMax, fileBudget int64
+}
+
+var cgiOutputLimits = cgiOutputLimitSet{memory: 1 << 20, budget: 64 << 20, fileMax: 256 << 20, fileBudget: 1 << 30}
+
+// cgiOutputInUse and cgiOutputFilesInUse are what the outputs of the CGIs take, in memory and in temporary files (their
+// size on disk), while they wait for their clients. They change only under cgiOutputSharesMutex.
+var cgiOutputInUse, cgiOutputFilesInUse atomic.Int64
+
+// cgiOutputShares are, by client (limiterKey) and, in IPv6, by /48, what the outputs of their CGIs take and how many of
+// them have had to wait for their clients. Without them, the clients of one address that didn't read filled the
+// budgets, and the CGIs of everyone else waited for those clients again: every site's CGIs answered 503. Guarded by
+// cgiOutputSharesMutex, which also makes checking a part of a budget and taking it one step; it is taken after the
+// mutex of an output.
+var (
+	cgiOutputSharesMutex sync.Mutex
+	cgiOutputShares      = map[string]*cgiOutputShare{}
 )
 
-// cgiOutputInUse and cgiOutputFilesInUse are what the outputs of the CGIs take, in memory and in temporary files,
-// while they wait for their clients.
-var cgiOutputInUse, cgiOutputFilesInUse atomic.Int64
+type cgiOutputShare struct {
+	memory, files int64 // What the outputs of its responses take, in memory and in temporary files
+	waiting       int64 // Its responses whose CGI has had to wait for the client
+	responses     int   // Its responses in progress: the entry goes with the last one
+}
+
+// cgiOutputNetworkKey is the /48 of an IPv6 client, whose /64s are each a client; "" for IPv4.
+func cgiOutputNetworkKey(ip string) string {
+	address, err := netip.ParseAddr(ip)
+	if err != nil {
+		return ""
+	}
+	if address = address.Unmap().WithZone(""); address.Is4() {
+		return ""
+	}
+	prefix, _ := address.Prefix(48)
+	return prefix.String()
+}
+
+// cgiOutputKeys are the entries of cgiOutputShares that a response counts in.
+func (output *cgiOutput) cgiOutputKeys() []string {
+	keys := make([]string, 0, 2)
+	for _, key := range []string{output.client, output.network} {
+		if key != "" {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
+// joinShares and leaveShares count a response in its client and its network while it is in progress. joinShares
+// also takes the limits in force (cgiOutputLimits changes only under cgiOutputSharesMutex).
+func (output *cgiOutput) joinShares() {
+	cgiOutputSharesMutex.Lock()
+	defer cgiOutputSharesMutex.Unlock()
+	output.limits = cgiOutputLimits
+	for _, key := range output.cgiOutputKeys() {
+		share := cgiOutputShares[key]
+		if share == nil {
+			share = &cgiOutputShare{}
+			cgiOutputShares[key] = share
+		}
+		share.responses++
+	}
+}
+
+func (output *cgiOutput) leaveShares() {
+	cgiOutputSharesMutex.Lock()
+	defer cgiOutputSharesMutex.Unlock()
+	for _, key := range output.cgiOutputKeys() {
+		if share := cgiOutputShares[key]; share != nil {
+			if share.responses--; share.responses <= 0 {
+				delete(cgiOutputShares, key)
+			}
+		}
+	}
+}
+
+// reserveLocked takes size bytes of memory (or, with file, of temporary files) if the budget, the quarter of its client
+// and the half of its network allow it; with force, whatever they say (a response with nothing waiting always gets a
+// chunk in, so that every CGI makes progress). Callers hold output.mutex.
+func (output *cgiOutput) reserveLocked(size int64, file bool, force bool) bool {
+	cgiOutputSharesMutex.Lock()
+	defer cgiOutputSharesMutex.Unlock()
+	total, budget := &cgiOutputInUse, output.limits.budget
+	if file {
+		total, budget = &cgiOutputFilesInUse, output.limits.fileBudget
+	}
+	part := func(share *cgiOutputShare) *int64 {
+		if file {
+			return &share.files
+		}
+		return &share.memory
+	}
+	if !force {
+		if total.Load()+size > budget {
+			return false
+		}
+		for _, key := range output.cgiOutputKeys() {
+			limit := budget / 4 // The client's quarter
+			if key == output.network {
+				limit = budget / 2 // The network's half
+			}
+			if share := cgiOutputShares[key]; share != nil && *part(share)+size > limit {
+				return false
+			}
+		}
+	}
+	total.Add(size)
+	for _, key := range output.cgiOutputKeys() {
+		if share := cgiOutputShares[key]; share != nil {
+			*part(share) += size
+		}
+	}
+	return true
+}
+
+// releaseLocked gives back what reserveLocked took. Callers hold output.mutex.
+func (output *cgiOutput) releaseLocked(size int64, file bool) {
+	if size == 0 {
+		return
+	}
+	cgiOutputSharesMutex.Lock()
+	defer cgiOutputSharesMutex.Unlock()
+	if file {
+		cgiOutputFilesInUse.Add(-size)
+	} else {
+		cgiOutputInUse.Add(-size)
+	}
+	for _, key := range output.cgiOutputKeys() {
+		if share := cgiOutputShares[key]; share != nil {
+			if file {
+				share.files -= size
+			} else {
+				share.memory -= size
+			}
+		}
+	}
+}
+
+// startWaitingLocked counts the response among those whose CGI waits for their client, unless its client already has a
+// quarter of the CGI slots like that (its network, half). Callers hold output.mutex.
+func (output *cgiOutput) startWaitingLocked() bool {
+	cgiOutputSharesMutex.Lock()
+	defer cgiOutputSharesMutex.Unlock()
+	slots := cgiProcessLimit()
+	for _, key := range output.cgiOutputKeys() {
+		limit := max(1, slots/4)
+		if key == output.network {
+			limit = max(1, slots/2)
+		}
+		if share := cgiOutputShares[key]; share != nil && share.waiting >= limit {
+			return false
+		}
+	}
+	for _, key := range output.cgiOutputKeys() {
+		if share := cgiOutputShares[key]; share != nil {
+			share.waiting++
+		}
+	}
+	return true
+}
+
+func (output *cgiOutput) stopWaitingLocked() {
+	cgiOutputSharesMutex.Lock()
+	defer cgiOutputSharesMutex.Unlock()
+	for _, key := range output.cgiOutputKeys() {
+		if share := cgiOutputShares[key]; share != nil {
+			share.waiting--
+		}
+	}
+}
 
 // cgiOutput is the ResponseWriter a CGI writes to: the headers go to the client's writer at once, and the body is
 // kept (in memory, then in a temporary file) and sent by a goroutine of its own, so that a client that reads slowly,
@@ -2303,16 +2517,25 @@ var cgiOutputInUse, cgiOutputFilesInUse atomic.Int64
 type cgiOutput struct {
 	customNetHttp.ResponseWriter // cgiResponseWriter: the headers the CGI may set, and the client's writer
 
+	limits      cgiOutputLimitSet  // cgiOutputLimits when the response started
+	client      string             // limiterKey of its client
+	network     string             // The /48 of its client in IPv6 (cgiOutputNetworkKey)
+	cancel      context.CancelFunc // Ends the CGI (its context) when the response is cut
 	mutex       sync.Mutex
 	more        *sync.Cond  // Signals a new chunk, the end, or that something was sent
 	chunks      [][]byte    // In memory, waiting to be sent, in order; all of them before what is in file
 	pending     int         // Bytes in chunks
+	inFlight    int         // Bytes the sender took from chunks and hasn't written yet: still this response's memory
 	file        *os.File    // Where the output goes once the memory is full, until all of it is sent
 	fileRead    int64       // What of file was sent
-	fileWritten int64       // What of file was written
+	fileWritten int64       // What of file was written: its size on disk, until it is emptied
+	fileCounted int64       // What of file is counted in the budgets: its size on disk
+	buffer      []byte      // For reading the file, allocated the first time it is read
 	noFile      bool        // The temporary file couldn't be used: beyond the memory, the CGI waits
+	waiting     bool        // Its CGI has had to wait for the client: counted in startWaitingLocked until the end
 	flushing    bool        // A Flush was asked: done after what was written before it
 	closed      bool        // The CGI is done (or cut): nothing more comes
+	ended       bool        // end ran: its shares are given back
 	err         error       // Writing to the client failed, or the response was cut
 	sending     bool        // The sender is running
 	cut         atomic.Bool // The response was cut: the sender stops between two writes
@@ -2322,35 +2545,63 @@ type cgiOutput struct {
 // errCGIOutputCut is the error of a CGI's write once its response was cut.
 var errCGIOutputCut = errors.New("the response was cut")
 
-func newCGIOutput(w customNetHttp.ResponseWriter) *cgiOutput {
-	output := &cgiOutput{ResponseWriter: w, done: make(chan struct{})}
+// errCGIOutputWaitLimit is the error of a CGI's write when its response is cut because the responses of its client
+// (or of its /48) already hold their share of the CGI slots waiting for their clients.
+var errCGIOutputWaitLimit = errors.New("the response was cut: its client already has its share of CGIs waiting for it")
+
+// newCGIOutput is the output of a CGI for the client at ip (an address, as ipAddr gives it); cancel ends the CGI.
+func newCGIOutput(w customNetHttp.ResponseWriter, ip string, cancel context.CancelFunc) *cgiOutput {
+	output := &cgiOutput{ResponseWriter: w, client: limiterKey(ip), network: cgiOutputNetworkKey(ip), cancel: cancel, done: make(chan struct{})}
 	output.more = sync.NewCond(&output.mutex)
+	output.joinShares()
 	return output
 }
 
-// Write keeps a copy of p to be sent: in memory while this response and all of them are within their limits (a
-// response with nothing waiting always gets a chunk in), else at the end of its temporary file, while within its
-// limits; else it waits until the client takes some.
+// Write keeps a copy of p to be sent: in memory while this response, its client and all of them are within their
+// limits (a response with nothing waiting always gets a chunk in), else at the end of its temporary file, while
+// within its limits; else it waits until the client takes some. A response that would wait while its client already
+// has its share of CGIs waiting is cut, and its CGI ended.
 func (output *cgiOutput) Write(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
 	size := int64(len(p))
 	output.mutex.Lock()
-	defer output.mutex.Unlock()
 	for {
 		if output.err != nil {
-			return 0, output.err
+			err := output.err
+			output.mutex.Unlock()
+			return 0, err
 		}
 		inFile := output.fileWritten - output.fileRead
-		if inFile == 0 && (output.pending == 0 || output.pending+len(p) <= cgiOutputMemory && cgiOutputInUse.Load()+size <= cgiOutputBudget) {
+		memory := output.pending + output.inFlight
+		if inFile == 0 && (memory == 0 && output.reserveLocked(size, false, true) ||
+			memory+len(p) <= int(output.limits.memory) && output.reserveLocked(size, false, false)) {
 			output.chunks = append(output.chunks, append([]byte(nil), p...)) // io.Copy reuses its buffer
 			output.pending += len(p)
-			cgiOutputInUse.Add(size)
 			break
 		}
-		if !output.noFile && inFile+size <= cgiOutputFileMax && cgiOutputFilesInUse.Load()+size <= cgiOutputFileBudget && output.spill(p) {
-			break
+		if !output.noFile && output.fileWritten+size <= output.limits.fileMax && output.reserveLocked(size, true, false) {
+			if output.spill(p) {
+				output.fileCounted += size
+				break
+			}
+			output.releaseLocked(size, true)
+			continue // noFile: the memory, or waiting
+		}
+		if !output.waiting {
+			if !output.startWaitingLocked() {
+				output.err = errCGIOutputWaitLimit
+				output.dropLocked()
+				output.more.Broadcast()
+				cancel := output.cancel
+				output.mutex.Unlock()
+				if cancel != nil {
+					cancel() // The CGI and what it started end (P12)
+				}
+				return 0, errCGIOutputWaitLimit
+			}
+			output.waiting = true
 		}
 		output.more.Wait()
 	}
@@ -2359,6 +2610,7 @@ func (output *cgiOutput) Write(p []byte) (int, error) {
 		go output.send()
 	}
 	output.more.Broadcast()
+	output.mutex.Unlock()
 	return len(p), nil
 }
 
@@ -2378,7 +2630,6 @@ func (output *cgiOutput) spill(p []byte) bool {
 		return false
 	}
 	output.fileWritten += int64(len(p))
-	cgiOutputFilesInUse.Add(int64(len(p)))
 	return true
 }
 
@@ -2403,7 +2654,7 @@ func (output *cgiOutput) Unwrap() customNetHttp.ResponseWriter {
 // all of it is sent, or writing fails.
 func (output *cgiOutput) send() {
 	defer close(output.done)
-	buffer := make([]byte, 32<<10)
+	const fileRead = 32 << 10
 	for {
 		output.mutex.Lock()
 		for len(output.chunks) == 0 && output.fileWritten == output.fileRead && !output.flushing && !output.closed && output.err == nil {
@@ -2414,12 +2665,15 @@ func (output *cgiOutput) send() {
 			return
 		}
 		chunks, flush := output.chunks, output.flushing
-		output.chunks, output.pending, output.flushing = nil, 0, false // Taken: cgiOutputInUse still counts them until sent
-		var fromFile int64                                             // With the memory sent, the next part of the file
+		output.inFlight += output.pending // Taken: still this response's memory until written
+		output.chunks, output.pending, output.flushing = nil, 0, false
+		var fromFile int64 // With the memory sent, the next part of the file
 		if len(chunks) == 0 {
-			fromFile = min(output.fileWritten-output.fileRead, int64(len(buffer)))
+			if fromFile = min(output.fileWritten-output.fileRead, fileRead); fromFile > 0 && output.buffer == nil {
+				output.buffer = make([]byte, fileRead)
+			}
 		}
-		file, readAt := output.file, output.fileRead
+		file, readAt, buffer := output.file, output.fileRead, output.buffer
 		output.mutex.Unlock()
 
 		var err error
@@ -2430,7 +2684,11 @@ func (output *cgiOutput) send() {
 			if err == nil {
 				_, err = output.ResponseWriter.Write(chunk)
 			}
-			cgiOutputInUse.Add(-int64(len(chunk)))
+			output.mutex.Lock()
+			output.inFlight -= len(chunk)
+			output.releaseLocked(int64(len(chunk)), false)
+			output.more.Broadcast()
+			output.mutex.Unlock()
 		}
 		if err == nil && fromFile > 0 && !output.cut.Load() {
 			read, readErr := file.ReadAt(buffer[:fromFile], readAt)
@@ -2441,12 +2699,16 @@ func (output *cgiOutput) send() {
 				err = readErr
 			}
 			output.mutex.Lock()
-			if output.err == nil { // Not dropped meanwhile (dropLocked counted it already)
+			if output.err == nil { // Not dropped meanwhile
 				output.fileRead += int64(read)
-				cgiOutputFilesInUse.Add(-int64(read))
-				if output.fileRead == output.fileWritten { // All of the file sent: it is used again from the start
+				// All of the file sent: it is used again from the start, and what it took is given back. Until then its
+				// size on disk stays counted, however much of it was sent.
+				if output.fileRead == output.fileWritten && output.file.Truncate(0) == nil {
 					output.fileRead, output.fileWritten = 0, 0
-					_ = output.file.Truncate(0)
+					output.releaseLocked(output.fileCounted, true)
+					output.fileCounted = 0
+				} else if output.fileRead == output.fileWritten {
+					output.noFile = true // It couldn't be emptied: it stays counted until the end
 				}
 			}
 			output.mutex.Unlock()
@@ -2467,17 +2729,19 @@ func (output *cgiOutput) send() {
 	}
 }
 
-// dropLocked forgets what wasn't sent, in memory and in the file. Callers hold output.mutex.
+// dropLocked forgets what wasn't sent: the chunks in memory, given back, and the place in the file, which stays
+// counted until end removes it. Callers hold output.mutex.
 func (output *cgiOutput) dropLocked() {
+	var memory int64
 	for _, chunk := range output.chunks {
-		cgiOutputInUse.Add(-int64(len(chunk)))
+		memory += int64(len(chunk))
 	}
+	output.releaseLocked(memory, false)
 	output.chunks, output.pending = nil, 0
-	cgiOutputFilesInUse.Add(-(output.fileWritten - output.fileRead))
 	output.fileRead, output.fileWritten = 0, 0
 }
 
-// end waits until the sender stops, and removes the temporary file.
+// end waits until the sender stops, removes the temporary file and gives back what the response took.
 func (output *cgiOutput) end() {
 	output.mutex.Lock()
 	sending := output.sending
@@ -2494,6 +2758,16 @@ func (output *cgiOutput) end() {
 		_ = os.Remove(output.file.Name())
 		output.file = nil
 	}
+	output.releaseLocked(output.fileCounted, true)
+	output.fileCounted = 0
+	if output.ended {
+		return
+	}
+	output.ended = true
+	if output.waiting {
+		output.stopWaitingLocked()
+	}
+	output.leaveShares()
 }
 
 // finish waits until all the output is sent, or writing to the client failed: the CGI is done.

@@ -92,7 +92,7 @@ func resetTestState(dir string) {
 	}
 	clear(sessionDeadlines)
 	publishDeniedIPs(map[string]int64{}) // With its /64s, which a test's denial of an IPv6 would leave behind
-	configFileModTime = 0
+	configFileStamp = configStamp{}
 	globalMutex.Unlock()
 
 	ipReferences.Clear()

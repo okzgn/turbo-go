@@ -152,7 +152,7 @@ func TestN11_ReloadIsAtomicForRequests(t *testing.T) {
 		}()
 	}
 	for requests.Load() < 1000 {
-		configFileModTime = 0
+		configFileStamp = configStamp{}
 		updateSettings(false)
 	}
 	close(stop)
@@ -178,7 +178,7 @@ func BenchmarkReload(b *testing.B) {
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		configFileModTime = 0
+		configFileStamp = configStamp{}
 		if err := updateSettings(true); err != nil {
 			b.Fatal(err)
 		}
@@ -215,7 +215,7 @@ func FuzzConfigReload(f *testing.F) {
 		if err := os.WriteFile(dir+"turbo.config", content, 0600); err != nil {
 			t.Fatal(err)
 		}
-		withGlobalLock(func() { configFileModTime = 0 })
+		withGlobalLock(func() { configFileStamp = configStamp{} })
 		return updateSettings(false)
 	}
 	state := func() (user, hash, access, sites string) {

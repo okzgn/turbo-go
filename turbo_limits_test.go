@@ -160,7 +160,7 @@ func TestC_DeniedIPsFromConfig(t *testing.T) {
 	dir := initForTest(t)
 	cfg := `{"localhost":{"":{}},"@":{"203.0.113.8":"9999999999","203.0.113.9":"1000"}}`
 	os.WriteFile(dir+"turbo.config", []byte(cfg), 0600)
-	configFileModTime = 0
+	configFileStamp = configStamp{}
 	updateSettings(false)
 	if !perIPNotAvailable("203.0.113.8", true) {
 		t.Error("the active IP of turbo.config isn't blocked")
@@ -199,7 +199,7 @@ func TestW_DeniedIPShortAddress(t *testing.T) {
 		}
 	}()
 	os.WriteFile(dir+"turbo.config", []byte(`{"localhost":{"":{}},"@":{"::":"9999999999"}}`), 0600)
-	configFileModTime = 0
+	configFileStamp = configStamp{}
 	defer func() {
 		if r := recover(); r != nil {
 			t.Fatalf("panic when loading turbo.config with \"::\" in \"@\": %v", r)

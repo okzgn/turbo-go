@@ -133,7 +133,7 @@ func lightReset(dir string) {
 	charReplacements["&"] = "-_-"
 	panelUser.Set("Turbo")
 	sitesDir.Set(dir)
-	configFileModTime = 0
+	configFileStamp = configStamp{}
 	globalMutex.Unlock()
 }
 
@@ -551,7 +551,7 @@ func TestN86_PointerWithoutTarget(t *testing.T) {
 			os.WriteFile(dirB+"turbo.config", []byte(`{"^":{"v":"2"},".":{"M":"`+dirA+`"}}`), 0600)
 		}
 		os.WriteFile(dirA+"turbo.config", []byte(`{"^":{"v":"2"},".":{"M":"`+dirB+`"}}`), 0600)
-		withGlobalLock(func() { configFileModTime = 3 }) // Changed since it was read
+		withGlobalLock(func() { configFileStamp = configStamp{kind: stampFile, modTime: 3} }) // Changed since it was read
 		if err := updateSettings(false); err == nil {
 			t.Errorf("reload %s: the pointer was applied without an error", scenario)
 		}
@@ -627,7 +627,7 @@ func TestRA2_UnusableTargetOfMKeepsConfigInUse(t *testing.T) {
 		if err := os.WriteFile(dirA+"turbo.config", []byte(pointing), 0600); err != nil {
 			t.Fatal(err)
 		}
-		withGlobalLock(func() { configFileModTime = 3 }) // Changed since it was read
+		withGlobalLock(func() { configFileStamp = configStamp{kind: stampFile, modTime: 3} }) // Changed since it was read
 		err := updateSettings(true)
 		if err == nil || !strings.Contains(err.Error(), dirC) {
 			t.Errorf("%s: reload with %q: %v; expected an error that names %s", scenario, pointing, err, dirC)
@@ -658,12 +658,12 @@ func TestN115_EmptyConfigIsNotAPointer(t *testing.T) {
 			t.Errorf("startup with turbo.config %s: %v", content, err)
 		}
 		os.WriteFile(dir+"turbo.config", []byte(`{"^":{"v":"2"},".":{"U":"other"}}`), 0600)
-		withGlobalLock(func() { configFileModTime = 0 })
+		withGlobalLock(func() { configFileStamp = configStamp{} })
 		if err := updateSettings(false); err != nil || panelUser.Get() != "other" {
 			t.Fatalf("turbo.config with U: %v, user %q", err, panelUser.Get())
 		}
 		os.WriteFile(dir+"turbo.config", []byte(content), 0600)
-		withGlobalLock(func() { configFileModTime = 0 })
+		withGlobalLock(func() { configFileStamp = configStamp{} })
 		if err := updateSettings(false); err != nil {
 			t.Errorf("reload with turbo.config %s: %v", content, err)
 		}
@@ -747,7 +747,7 @@ func TestRP_M03_MalformedSiteSectionsInvalid(t *testing.T) {
 		if err := os.WriteFile(dir+"turbo.config", []byte(broken), 0600); err != nil {
 			t.Fatal(err)
 		}
-		withGlobalLock(func() { configFileModTime = 3 }) // Changed since it was read
+		withGlobalLock(func() { configFileStamp = configStamp{kind: stampFile, modTime: 3} }) // Changed since it was read
 		err := updateSettings(true)
 		if !errors.As(err, &configSiteError{}) {
 			t.Errorf("reload with the site %s: %v; expected a site section that can't be used", section, err)

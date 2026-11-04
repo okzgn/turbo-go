@@ -134,6 +134,31 @@ jobs:
         # Hosted runners have sudo without a password (for setcap) and the ports 80 and 443 free.
         run: bash deploy/real-ports-test.sh
 
+  systemd:
+    name: Reference systemd unit (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - id: go
+        run: echo "version=$(sed -n '1s/^go//p' customNetHttp/UPSTREAM)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ steps.go.outputs.version }}
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+        run: go build -trimpath -o "$RUNNER_TEMP/turbo" .
+      - name: deploy/systemd-test.sh
+        # Hosted runners have systemd as PID 1, sudo without a password and the ports 80 and 443 free: the script
+        # installs the unit as its comments say, checks it and removes it all.
+        run: sudo bash deploy/systemd-test.sh "$RUNNER_TEMP/turbo"
+      - name: Journal of the unit
+        if: failure()
+        run: sudo journalctl -u turbo --no-pager -n 200 || true
+
   fuzzing:
     name: Fuzzing (15 s per target, shard ${{ matrix.shard }} of 3)
     runs-on: ubuntu-latest

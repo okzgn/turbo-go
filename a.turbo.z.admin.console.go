@@ -942,7 +942,7 @@ func loadCredentials(settings map[string]interface{}) {
 		}
 		slog.Warn("Invalid PH in turbo.config: ignored")
 	}
-	if password, isString := settings["P"].(string); isString && len(password) >= 1 && len(password) <= 24 {
+	if password, valid := plainPassword(settings["P"]); valid {
 		slog.Warn("Plain-text password in turbo.config: only its hash will be saved")
 		if err := setPanelPassword(password); err != nil {
 			slog.Error("Can't hash the password of turbo.config: the previous one is kept", "error", err)
@@ -1048,6 +1048,9 @@ func addSite(domain string) (bool, string) {
 	if siteExists(domain, "") {
 		return false, "Site already exists."
 	}
+	if _, kept := dormantSites[domain][""]; kept {
+		return false, keptSiteMessage(domain)
+	}
 	if valid, message := hostOk(domain, false); !valid {
 		return false, message
 	}
@@ -1069,7 +1072,6 @@ func addSite(domain string) (bool, string) {
 		deleteSiteLocked(domain, "")
 		return false, "Error creating"
 	}
-	forgetDormantLocked(domain, "") // A site created from the panel starts anew, its subdomains too
 	return true, "Site added"
 }
 
@@ -1083,6 +1085,9 @@ func addSubdomain(domain string, subdomain string) (bool, string) {
 	}
 	if siteExists(domain, subdomain) {
 		return false, "Subdomain already exists"
+	}
+	if _, kept := dormantSites[domain][subdomain]; kept {
+		return false, keptSiteMessage(subdomain + "." + domain)
 	}
 	if problem := newSiteProblem(domain, subdomain); problem != "" {
 		return false, problem
@@ -1100,7 +1105,6 @@ func addSubdomain(domain string, subdomain string) (bool, string) {
 		deleteSiteLocked(domain, subdomain)
 		return false, "Error creating"
 	}
-	forgetDormantLocked(domain, subdomain) // A subdomain created from the panel starts anew
 	return true, "Subdomain added"
 }
 
@@ -1311,7 +1315,7 @@ func setSitesDir(value string, currentSession string) (bool, string) {
 	configBytes, readErr := os.ReadFile(resolved + configFileName) // #nosec G304 -- turbo.config of the sites directory chosen by the administrator
 	kept := readErr != nil || options.ignorePointer && isSitesDirPointer(configBytes)
 	resetSettings()
-	withGlobalLock(func() { configFileModTime = 0 }) // Read even with the same date as the one in use
+	withGlobalLock(func() { configFileStamp = configStamp{} }) // Read even with the same date as the one in use
 	if err = updateSettingsFollowing(true, 0, options); err != nil {
 		slog.Error(configErrorMessage(err, false))
 		return true, message + ", but its configuration could not be applied:\n" + err.Error()
@@ -1649,6 +1653,10 @@ func consoleActionsAPI(apiPath string, currentSession string, responseWriter cus
 				if !dangerousActionPasswordOK(responseWriter, request, request.Form, "b") {
 					return true
 				}
+				// Serialized with the reloads (taken before the global lock, as they do): one that looked at the disk
+				// before the folder was deleted brought the site back afterwards, with the defaults.
+				settingsUpdateMutex.Lock()
+				defer settingsUpdateMutex.Unlock()
 				what := "Site"
 				isSubdomain := request.Form["d"][0] != ""
 				if isSubdomain {
@@ -1661,6 +1669,11 @@ func consoleActionsAPI(apiPath string, currentSession string, responseWriter cus
 				})
 				if !exists && !kept {
 					badReq(responseWriter, request, what+" not found")
+					return true
+				}
+				if !exists { // Only what is kept of it: no folder is deleted (its own may be there, with only its @, or its site's, missing)
+					withGlobalLock(func() { forgetDormantEntryLocked(request.Form["s"][0], request.Form["d"][0]) })
+					respond(responseWriter, what+" deleted: Turbo forgets the settings it kept for it, and no folder is deleted")
 					return true
 				}
 				siteDir := sitesDir.Get() + changeWildcards(request.Form["s"][0])

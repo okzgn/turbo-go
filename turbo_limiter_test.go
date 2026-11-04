@@ -137,7 +137,7 @@ func TestA5_CGLSetting(t *testing.T) {
 		t.Fatalf("saved CGL: %v", raw["."]["CGL"])
 	}
 	globalRequestLimit.Store(0)
-	configFileModTime = 0
+	configFileStamp = configStamp{}
 	globalMutex.Unlock()
 	updateSettings(false)
 	globalMutex.Lock()

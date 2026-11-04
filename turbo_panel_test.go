@@ -252,7 +252,7 @@ func TestC_UnknownRootKey(t *testing.T) {
 	dir := initForTest(t)
 	cfg := `{"^":{"v":"2"},"version":"x","localhost":{"":{"-":{"index.html":""}}}}`
 	os.WriteFile(dir+"turbo.config", []byte(cfg), 0600)
-	configFileModTime = 0
+	configFileStamp = configStamp{}
 	updateSettings(false)
 	if _, ok := sitesMap["^"]; ok {
 		t.Fatal("the key '^' is treated as a site")
@@ -267,7 +267,7 @@ func TestC_CredentialsFromConfig(t *testing.T) {
 	dir := initForTest(t)
 	cfg := `{"localhost":{"":{"-":{"index.html":""}}},".":{"U":"Operator","P":"Secret1","CIL":"1000"}}`
 	os.WriteFile(dir+"turbo.config", []byte(cfg), 0600)
-	configFileModTime = 0
+	configFileStamp = configStamp{}
 	updateSettings(false)
 	if panelUser.Get() != "Operator" {
 		t.Errorf("U=%q", panelUser.Get())

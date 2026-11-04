@@ -17,7 +17,7 @@ import (
 func TestN06_UnreadableConfigFile(t *testing.T) {
 	dir := initForTest(t)
 	os.Mkdir(dir+"turbo.config", 0755)
-	configFileModTime = 0
+	configFileStamp = configStamp{}
 	if err := updateSettings(false); err == nil {
 		t.Error("a turbo.config directory was taken for a missing file")
 	}
@@ -25,7 +25,7 @@ func TestN06_UnreadableConfigFile(t *testing.T) {
 	if err := os.Symlink(dir+"missing", dir+"turbo.config"); err != nil {
 		t.Skipf("no symbolic links on this system: %v", err)
 	}
-	configFileModTime = 0
+	configFileStamp = configStamp{}
 	if err := updateSettings(false); err == nil {
 		t.Error("a broken turbo.config link was taken for a missing file")
 	}
@@ -39,7 +39,7 @@ func TestN06_UnreadableSitesDir(t *testing.T) {
 	dir := initForTest(t)
 	os.Chmod(dir, 0)
 	t.Cleanup(func() { os.Chmod(dir, 0755) })
-	configFileModTime = 0
+	configFileStamp = configStamp{}
 	err := updateSettings(false)
 	if err == nil || !strings.Contains(err.Error(), strings.TrimSuffix(dir, "/")) {
 		t.Errorf("unreadable sites folder: %v; expected an error with the path", err)
