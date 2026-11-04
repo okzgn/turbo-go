@@ -2,12 +2,12 @@
 <html spellcheck="false" data-inside>
 
 <head>
-<title>Turbo | Administración</title>
+<title>Turbo | Administration</title>
 <link rel="icon" href="/admin:i.png">
 
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, user-scalable=no">
-<meta name="description" content="Interfaz de administración del servidor web.">
+<meta name="description" content="Administration interface of the web server.">
 <meta name="author" content="Elías A. Soshina">
 <meta name="theme-color" content="#ffffff">
 
@@ -89,7 +89,7 @@ section { padding: 1rem 0.5rem 0 0.5rem; }
 header h1 { padding: 1rem 0; }
 #list-site-actions li::before { content: '·'; }
 #link-site-breadcrumb::before { content: '<'; }
-#panel-subdomain > .breadcrumb-frame::before { content: '< Subdominio: '; }
+#panel-subdomain > .breadcrumb-frame::before { content: '< Subdomain: '; }
 .btn-add-entry::before { content: '+'; }
 header a:last-child::after, .data-block a span::after, fieldset a::before, legend::before { content: '>'; }
 [data-error]::after, [data-ok]::after, #sec-aliases .entry-list a::after { content: 'X'; }
@@ -244,7 +244,7 @@ article p {
 </style>
 <script>
 document.addEventListener('DOMContentLoaded', function(){
-	const appConfig = Object.freeze({ a: '/admin:inside:set', b: 'ok' });
+	const appConfig = Object.freeze({ a: '/admin:inside:set' });
 	const CONFIG_KEYS = Object.freeze({
 		GENERAL_CONFIG: '.',
 		CHARS_REPLACE: '_',
@@ -258,7 +258,7 @@ document.addEventListener('DOMContentLoaded', function(){
 		REWRITES: '=',
 		HEADERS: '.'
 	});
-	let tempEditValues = [], charReplacementMap = {},
+	let tempEditValues = [], charReplacementMap = {}, ambiguousValues = [],
 		charsReplaceSection, deniedIpsSection, httpCodeResponsesSection,
 		requestLimitsFieldset, siteActionButtonsList, generalSettingsFieldset,
 		addIndexLink, addPreprocessorLink, siteActionButtonsListMoveRef,
@@ -278,12 +278,24 @@ document.addEventListener('DOMContentLoaded', function(){
 			responseTextOrHandler = context(responseTextOrHandler, status);
 			onError.call(this, responseTextOrHandler.message, responseTextOrHandler.status);
 		}
+		xhr = ambiguousValues.find(function(ambiguous){ return (url + (typeof bodyOrOnSuccess == 'string' ? bodyOrOnSuccess : '')).indexOf(ambiguous.sent) != -1; }), ambiguousValues = [];
+		if(xhr){ return handleError.call(this, 'Not sent "' + xhr.value + '": with the character replacements the server would read "' + xhr.received + '". Change the text or the replacements', 0); }
 		xhr = new XMLHttpRequest(),
-		xhr.onerror = function(){ handleError.call(this, 'Intente nuevamente', 0); },
-		xhr.onabort = function(){ handleError.call(this, 'Petición cancelada', 0); },
+		xhr.timeout = 30000, // A request that doesn't answer in 30 s is given up
+		xhr.onerror = function(){ handleError.call(this, 'Network error: try again', 0); },
+		xhr.onabort = function(){ handleError.call(this, 'Request cancelled', 0); },
+		xhr.ontimeout = function(){ handleError.call(this, 'No response in 30 seconds: try again', 0); },
 		xhr.onload = function(){
 			responseTextOrHandler = this.responseText;
+			if(this.getResponseHeader('X-Turbo-Login') == 'required'){ // The session ended: back to the login
+				setTimeout(function(){ self.location = '/admin:'; }, 1500);
+				return handleError.call(this, 'The session has ended: sign in again', 0);
+			}
 			switch(this.status){
+				case 429:
+				case 503:
+					responseTextOrHandler = Math.max(1, +this.getResponseHeader('Retry-After') || 1);
+					return handleError.call(this, (this.status == 429 ? 'Too many requests or failed attempts' : 'Server busy') + ': wait ' + responseTextOrHandler + (responseTextOrHandler == 1 ? ' second' : ' seconds'), this.status);
 				case 200:
 				case 201:
 				case 304:
@@ -305,19 +317,20 @@ document.addEventListener('DOMContentLoaded', function(){
 		if(requestBody == null && url.indexOf('?') != -1){ // Parameters go in the body, not in the URL that turbo.visits records (the current password among them)
 			requestBody = url.slice(url.indexOf('?') + 1), url = url.slice(0, url.indexOf('?'));
 		}
-		xhr.open('POST', /* With no slash at the end: 'http://localhost' + a.replace('default://home', '')*/url);
+		xhr.open('POST', url);
 		if(typeof requestBody == 'string'){ xhr.setRequestHeader('Content-Type', 'application/x-www-form-urlencoded'); }
 		xhr.send(requestBody), statusMessageEl.parentNode.dataset.isLoading = '';
 	}
+	function isReservedKey(key){ return Object.prototype.hasOwnProperty.call(reservedKeysMap, key); }
 	function renderSitesList(container, sitesMap, siteKey){
 		for(siteKey in sitesMap){
-			if(siteKey in reservedKeysMap){ continue; }
+			if(isReservedKey(siteKey)){ continue; }
 			createSiteEntry(container, siteKey, sitesMap[siteKey], (!sitesMap[siteKey][CONFIG_KEYS.SITE_CONFIG] ? 0 : sitesMap[siteKey][CONFIG_KEYS.SITE_CONFIG]['S'] != '0'));
 		}
 	}
 	function renderKeyValueList(container, dataMap, propertyName, extraArgs, entryKey){
 		for(entryKey in dataMap){
-			if(entryKey in reservedKeysMap){ continue; }
+			if(isReservedKey(entryKey)){ continue; }
 			createKeyValueEntry(container, entryKey, propertyName, dataMap[entryKey], extraArgs);
 		}
 	}
@@ -340,53 +353,68 @@ document.addEventListener('DOMContentLoaded', function(){
 				if((hrefValue = clickEvent.getAttribute('href').slice(basePath.length)) && hrefValue in settingsDefs && typeof settingsDefs[hrefValue] == 'object'){ settingsDefs[hrefValue].element = clickEvent; }
 			});
 		}
-		return function(clickEvent, hrefValue, basePathIndex, dialogSteps, settingKey, isConfirmType, extraQueryString, extraFieldKey, extraFieldDef, promptValue, dialogQueue){
+		return function(clickEvent, hrefValue, basePathIndex, dialogSteps, settingKey, isConfirmType, extraQueryString, extraFieldKey, extraFieldDef, promptValue, dialogQueue, emptyActions){
 			clickEvent.preventDefault();
-			if(clickEvent.target.nodeName != 'A' || !(hrefValue = clickEvent.target.href) || (basePathIndex = hrefValue.indexOf(basePath)) == -1){ return; }
+			var clickTarget = (clickEvent.target.closest ? clickEvent.target.closest('a') : clickEvent.target); // The <i> inside a link counts as the link
+			if(!clickTarget || clickTarget.nodeName != 'A' || !(hrefValue = clickTarget.href) || (basePathIndex = hrefValue.indexOf(basePath)) == -1){ return; }
 			if((settingKey = hrefValue.slice(basePathIndex + basePath.length)) && settingsDefs[settingKey] && typeof settingsDefs[settingKey] == 'object'){
-				settingsDefs[settingKey].element = clickEvent.target, dialogQueue = [];
+				settingsDefs[settingKey].element = clickTarget, dialogQueue = [];
 
 				if(settingsDefs[settingKey].extra){
 					settingsDefs[settingKey].extra = (settingsDefs[settingKey].extra && typeof settingsDefs[settingKey].extra == 'object' ? settingsDefs[settingKey].extra : {});
 					if(settingsDefs[settingKey].extra[0]){
-						extraQueryString = '';
+						extraQueryString = '', emptyActions = [];
 						for(extraFieldKey in settingsDefs[settingKey].extra){
 							extraFieldDef = settingsDefs[settingKey].extra[extraFieldKey];
+							extraFieldDef.tmpValue = (extraFieldDef.value || ''); // What this site has now, not what was typed for another one
 							if(!(settingsDefs[settingKey].extra && typeof settingsDefs[settingKey].extra == 'object') || !extraFieldDef.param || (typeof extraFieldDef.stateFn == 'function' && extraFieldDef.stateFn.call(settingsDefs, settingsDefs[settingKey], settingsDefs[settingKey].value, extraFieldDef.value))){ continue; }
 							(function(extraFieldDef){
 								dialogQueue.push({
 									type: 'prompt',
-									text: ((typeof extraFieldDef.text == 'function' ? extraFieldDef.text.call(settingsDefs, settingsDefs[settingKey], settingsDefs[settingKey].value, extraFieldDef.value) : extraFieldDef.text) || 'Valor:'),
+									text: ((typeof extraFieldDef.text == 'function' ? extraFieldDef.text.call(settingsDefs, settingsDefs[settingKey], settingsDefs[settingKey].value, extraFieldDef.value) : extraFieldDef.text) || 'Value:'),
 									value: (extraFieldDef.value || ''),
 									required: extraFieldDef.required,
-									okFn: function(o, promptValue){ if(promptValue){ extraFieldDef.tmpValue = promptValue, extraQueryString += '&' + extraFieldDef.param + '=' + encodeURIComponent(applyCharReplacements(promptValue)); } },
-									cancelFn: function(){ extraQueryString = ''; }
+									secret: extraFieldDef.secret,
+									abortOnCancel: true, // Cancelling any step sends nothing
+									okFn: function(o, promptValue){
+										if(promptValue){ return (extraFieldDef.tmpValue = (extraFieldDef.secret ? '' : promptValue), extraQueryString += '&' + extraFieldDef.param + '=' + encodeURIComponent(extraFieldDef.literal ? promptValue : applyCharReplacements(promptValue))); }
+										if(extraFieldDef.value && extraFieldDef.emptyConfirm){ // Emptied: ask before dropping the saved value
+											o.next = { type: 'confirm', text: extraFieldDef.emptyConfirm, abortOnCancel: true, okFn: function(){ extraFieldDef.tmpValue = '', emptyActions.push(extraFieldDef.emptyAction); }, next: o.next };
+										}
+									}
 								});
 							})(extraFieldDef);
 						}
 					} else {
 						dialogQueue.push({
 							type: 'prompt',
-							text: ((typeof settingsDefs[settingKey].extra.text == 'function' ? settingsDefs[settingKey].extra.text.call(settingsDefs[settingKey], settingsDefs[settingKey].value, settingsDefs[settingKey].extra.value) : settingsDefs[settingKey].extra.text) || 'Contraseña:'),
+							text: ((typeof settingsDefs[settingKey].extra.text == 'function' ? settingsDefs[settingKey].extra.text.call(settingsDefs[settingKey], settingsDefs[settingKey].value, settingsDefs[settingKey].extra.value) : settingsDefs[settingKey].extra.text) || 'Password:'),
 							value: (settingsDefs[settingKey].extra.value || ''),
 							required: settingsDefs[settingKey].extra.required,
-							okFn: function(o, dialogSteps){ if(dialogSteps){ extraQueryString = '&' + (settingsDefs[settingKey].extra.param || 'b') + '=' + encodeURIComponent(applyCharReplacements(dialogSteps)); } }
+							secret: true, // The current password
+							okFn: function(o, dialogSteps){ if(dialogSteps){ extraQueryString = '&' + (settingsDefs[settingKey].extra.param || 'b') + '=' + encodeURIComponent(dialogSteps); } } // The password as typed: the replacements don't apply to it
 						});
 					}
 				}
 				dialogQueue.push({
+					abortOnCancel: true,
+					secret: settingsDefs[settingKey].secret,
 					type: (isConfirmType = settingsDefs[settingKey].cfm) ? 'confirm' : 'prompt',
-					text: ((typeof settingsDefs[settingKey].text == 'function' ? settingsDefs[settingKey].text.call(settingsDefs[settingKey], settingsDefs[settingKey].value) : settingsDefs[settingKey].text) || settingsDefs[settingKey].element.dataset.text || (clickEvent.target.innerText + ((!settingsDefs[settingKey].element.dataset.postfix && !settingsDefs[settingKey].postfix) ? '' : (' ' + (settingsDefs[settingKey].element.dataset.postfix || settingsDefs[settingKey].postfix))) + ':')),
+					text: ((typeof settingsDefs[settingKey].text == 'function' ? settingsDefs[settingKey].text.call(settingsDefs[settingKey], settingsDefs[settingKey].value) : settingsDefs[settingKey].text) || settingsDefs[settingKey].element.dataset.text || (clickTarget.innerText + ((!settingsDefs[settingKey].element.dataset.postfix && !settingsDefs[settingKey].postfix) ? '' : (' ' + (settingsDefs[settingKey].element.dataset.postfix || settingsDefs[settingKey].postfix))) + ':')),
 					value: (settingsDefs[settingKey].value || ''),
-					okFn: function(o, dialogSteps){
-						if(dialogSteps = (typeof settingsDefs[settingKey].valueFn != 'function' ? (!isConfirmType ? applyCharReplacements(dialogSteps) : '1') : settingsDefs[settingKey].valueFn.call(settingsDefs[settingKey], settingsDefs[settingKey].value, dialogSteps))){
-							apiRequest((hrefValue + (!settingsDefs[settingKey].siteInfo ? '?' : (getCurrentContext().request + '&')) + 'a=' + encodeURIComponent(dialogSteps) + (!extraQueryString ? '' : extraQueryString)),
-							function(r){
-								statusMessageEl.dataset.ok = r,
-								settingsDefs[settingKey].value = (!settingsDefs[settingKey].emptyValue ? dialogSteps : ''),
-								(typeof settingsDefs[settingKey].ok != 'function' ? void(0) : settingsDefs[settingKey].ok.call(settingsDefs[settingKey], clickEvent.target, hrefValue));
-							},
-							function(hrefValue, httpStatus){ statusMessageEl.dataset[httpStatus === 'WAIT' ? 'ok' : 'error'] = hrefValue /* WAIT (202): in progress, not an error */, (typeof settingsDefs[settingKey].bad != 'function' ? void(0) : settingsDefs[settingKey].bad.call(settingsDefs[settingKey], clickEvent.target, hrefValue, httpStatus)); });
+					okFn: function(o, dialogSteps, send){
+						if(dialogSteps = (typeof settingsDefs[settingKey].valueFn != 'function' ? (!isConfirmType ? (settingsDefs[settingKey].literal ? dialogSteps : applyCharReplacements(dialogSteps)) : '1') : settingsDefs[settingKey].valueFn.call(settingsDefs[settingKey], settingsDefs[settingKey].value, dialogSteps))){
+							send = function(){
+								apiRequest((hrefValue + (!settingsDefs[settingKey].siteInfo ? '?' : (getCurrentContext().request + '&')) + 'a=' + encodeURIComponent(dialogSteps) + (!extraQueryString ? '' : extraQueryString)),
+								function(r){
+									statusMessageEl.dataset.ok = r,
+									settingsDefs[settingKey].value = (!settingsDefs[settingKey].emptyValue ? dialogSteps : ''),
+									(typeof settingsDefs[settingKey].ok != 'function' ? void(0) : settingsDefs[settingKey].ok.call(settingsDefs[settingKey], clickTarget, hrefValue));
+								},
+								function(hrefValue, httpStatus){ statusMessageEl.dataset[httpStatus === 'WAIT' ? 'ok' : 'error'] = hrefValue /* WAIT (202): in progress, not an error */, (typeof settingsDefs[settingKey].bad != 'function' ? void(0) : settingsDefs[settingKey].bad.call(settingsDefs[settingKey], clickTarget, hrefValue, httpStatus)); });
+							};
+							if(!emptyActions || !emptyActions.length){ return send(); }
+							apiRequest(emptyActions[0] + getCurrentContext().request + '&a=', send, function(e){ statusMessageEl.dataset.error = e; }); // A saved value emptied first (back to webroot: cfgA with an empty value)
 						}
 					}
 				});
@@ -412,11 +440,18 @@ document.addEventListener('DOMContentLoaded', function(){
 		while(index < pathKeys.length){ if(!(currentValue = (currentValue || rootObj)[pathKeys[index++]])){ return; } }
 		return currentValue;
 	}
-	function applyCharReplacements(inputValue, reverseFlag, charKey){
+	function applyCharReplacements(inputValue, reverseFlag, charKey, encodedValue){
 		if(typeof inputValue != 'string'){ inputValue = ''; }
 		if(!inputValue){ return inputValue; }
-		for(charKey in charReplacementMap){ inputValue = inputValue.replace(new RegExp(charKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'), (!reverseFlag ? charReplacementMap[charKey] : '')); }
-		return inputValue;
+		encodedValue = inputValue;
+		for(charKey in charReplacementMap){ encodedValue = encodedValue.replace(new RegExp(charKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'), (!reverseFlag ? charReplacementMap[charKey] : '')); }
+		if(!reverseFlag && (charKey = undoCharReplacements(encodedValue)) != inputValue){ ambiguousValues.push({ sent: encodeURIComponent(encodedValue), value: inputValue, received: charKey }); } // The server would read another text: apiRequest doesn't send it
+		return encodedValue;
+	}
+	function undoCharReplacements(inputValue, tokens, chars, charKey){ // As the server does: tokens don't contain one another, so their order doesn't matter
+		tokens = [], chars = {};
+		for(charKey in charReplacementMap){ tokens.push(charReplacementMap[charKey].replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), chars[charReplacementMap[charKey]] = charKey; }
+		return (!tokens.length ? inputValue : inputValue.replace(new RegExp(tokens.join('|'), 'g'), function(token){ return chars[token]; }));
 	}
 	function resetTempEditValues(){ tempEditValues = []; }
 	function clearAndRender(container, data, renderFn, extraArgs, childrenToRemove){ childrenToRemove = $q((!childrenToRemove ? 'a:first-child ~ a' : 'a'), 0, container), childrenToRemove.forEach(function(f){ container.removeChild(f); }), (typeof renderFn != 'function' ? 0 : renderFn.apply(0, (!extraArgs ? [container, data] : [container, data].concat(extraArgs)))); };
@@ -443,7 +478,7 @@ document.addEventListener('DOMContentLoaded', function(){
 	function createSiteEntry(container, name, siteData, isHttps, linkEl){
 		linkEl = document.createElement('a');
 		if(isHttps){ linkEl.dataset.hasHttps = ''; }
-		linkEl.site = cloneSiteData(siteData), linkEl.site._ = { name: name, element: linkEl }, linkEl.innerText = (name || 'Raíz'), linkEl.href = ('#' + name), container.appendChild(linkEl);
+		linkEl.site = cloneSiteData(siteData), linkEl.site._ = { name: name, element: linkEl }, linkEl.innerText = (name || 'Root'), linkEl.href = ('#' + name), container.appendChild(linkEl);
 	}
 	function cloneSiteData(sourceObj, key){
 		sourceObj = Object.assign({}, sourceObj);
@@ -454,14 +489,14 @@ document.addEventListener('DOMContentLoaded', function(){
 		return String(value || '').split(',').some(function(entry){ entry = entry.trim(); return entry && entry != '*' && entry.indexOf('/') == -1; });
 	}
 	function updatePanelAccessWarning(link){
-		link = $q('[href="/admin:inside:setPA"]', 1), link.innerText = 'Dónde responde el panel' + (panelHasOwnHost(generalSettingsDefs['PA'].value) ? '' : ' (aviso: sin un host propio)');
+		link = $q('[href="/admin:inside:setPA"]', 1), link.innerText = 'Where the panel answers' + (panelHasOwnHost(generalSettingsDefs['PA'].value) ? '' : ' (warning: no host of its own)');
 	}
 	function loadInitialData(isRetry){
 		(delete mainPanel.loaded), apiRequest.call(parseProxyResponse, '/admin:inside:sites', function(a, b, isRetry, d){
 			if(typeof (a = parseJsonResponse(a)) == 'string'){ return (statusMessageEl.dataset.error = a); }
 			renderSitesList(sitesListSection, a), charReplacementMap = {};
 			for(b in a[CONFIG_KEYS.GENERAL_CONFIG]){ if(b in generalSettingsDefs && typeof generalSettingsDefs[b].value == 'undefined'){ generalSettingsDefs[b].value = a[CONFIG_KEYS.GENERAL_CONFIG][b]; } }
-			updatePanelAccessWarning();
+			updatePanelAccessWarning(), updatePanelCertificate(a[CONFIG_KEYS.GENERAL_CONFIG]);
 			for(b in a[CONFIG_KEYS.CHARS_REPLACE]){
 				isRetry = a[CONFIG_KEYS.CHARS_REPLACE][b], d = 0;
 				switch(typeof isRetry){
@@ -475,7 +510,7 @@ document.addEventListener('DOMContentLoaded', function(){
 				isRetry = a[CONFIG_KEYS.HTTP_CODES][b], d = (isRetry && typeof isRetry == 'object' && isRetry['f']),
 				createHttpCodeResponseEntry(httpCodeResponsesSection, b, (!d ? isRetry : isRetry['f']), d);
 			}
-		}, function(){ (isRetry ? statusMessageEl.dataset.error = 'Actualice la página' : loadInitialData(1)); });
+		}, function(){ (isRetry ? statusMessageEl.dataset.error = 'Reload the page' : loadInitialData(1)); });
 	}
 	function loadSiteSubdomains(siteEntry, isRetry){
 		apiRequest.call(parseProxyResponse, ('/admin:inside:subdomains?s=' + encodeURIComponent(siteEntry.site._.name)), function(a, b){
@@ -491,7 +526,7 @@ document.addEventListener('DOMContentLoaded', function(){
 			subdomainPanel.subdomain = subdomainEntry.site, subdomainPanel.dataset.activeSubdomain = subdomainEntry.site._.name;
 		}, function(a){ (isRetry ? statusMessageEl.dataset.error = a : loadSubdomainData(subdomainEntry, 1)); });
 	}
-	function detectAuthError(responseText){ return (responseText.indexOf('data-err') != -1 ? 'Vuelva a entrar' : (!responseText ? 'Vuelva a intentarlo' : (responseText.indexOf('<meta') != -1 ? 'Inautorizado' : null))); }
+	function detectAuthError(responseText){ return (!responseText ? 'Try again' : null); } // The missing session comes in X-Turbo-Login, never in the content
 	function parseResponse(text, status){
         try { return JSON.parse(text); }
         catch (e) { return { status: status, message: text }; }
@@ -501,8 +536,8 @@ document.addEventListener('DOMContentLoaded', function(){
     }
 	function parseJsonResponse(rawJson){
 		try { rawJson = JSON.parse(rawJson); }
-		catch(rawJson){ return 'Contenido incorrecto'; }
-		if(!Object.keys(rawJson).length){ return 'Contenido vacío'; }
+		catch(rawJson){ return 'Invalid content'; }
+		if(!Object.keys(rawJson).length){ return 'Empty content'; }
 		return rawJson;
 	}
 	function applySettingsFromQuery(unusedContainer, queryParams, settingsDefs, settingKey, pendingSettingCalls){
@@ -571,13 +606,13 @@ document.addEventListener('DOMContentLoaded', function(){
 		articleEl = document.createElement('article'), document.body.appendChild(articleEl),
 		contentDiv = document.createElement('div'), articleEl.appendChild(contentDiv),
 		buttonsWrapperSpan = document.createElement('span'), contentDiv.appendChild(buttonsWrapperSpan),
-		cancelButton = document.createElement('button'), cancelButton.innerText = dialogConfig.cancelText || (!isPromptType ? 'No' : 'Cancelar'), buttonsWrapperSpan.appendChild(cancelButton),
-		okButton = document.createElement('button'), okButton.innerText = dialogConfig.okText || (!isPromptType ? 'Sí' : 'Aceptar'), okButton.dataset.primaryBtn = '', buttonsWrapperSpan.appendChild(okButton);
+		cancelButton = document.createElement('button'), cancelButton.innerText = dialogConfig.cancelText || (!isPromptType ? 'No' : 'Cancel'), buttonsWrapperSpan.appendChild(cancelButton),
+		okButton = document.createElement('button'), okButton.innerText = dialogConfig.okText || (!isPromptType ? 'Yes' : 'OK'), okButton.dataset.primaryBtn = '', buttonsWrapperSpan.appendChild(okButton);
 		if(dialogConfig.assign && typeof dialogConfig.assign == 'object'){ for(assignKey in dialogConfig.assign){ articleEl[assignKey] = dialogConfig.assign[assignKey]; } }
 		if(dialogConfig.text){ messageParagraph = document.createElement('p'), messageParagraph.innerText = dialogConfig.text, contentDiv.prepend(messageParagraph); }
 		if(isPromptType){
 			textInput = document.createElement('input'),
-			textInput.type = 'text',
+			textInput.type = (dialogConfig.secret ? 'password' : 'text'),
 			textInput.placeholder = dialogConfig.placeholder || '',
 			textInput.value = dialogConfig.value || '',
 			(!messageParagraph ? contentDiv.prepend(textInput) : messageParagraph.insertAdjacentElement('afterend', textInput)), textInput.focus();
@@ -585,7 +620,7 @@ document.addEventListener('DOMContentLoaded', function(){
 		articleEl.onclick = function(assignKey){ if(assignKey.target.nodeName == 'ARTICLE'){ cancelButton.click(); } }
 		cancelButton.onclick = function(){
 			textInput = (!textInput ? null : textInput.value), (typeof dialogConfig.cancelFn == 'function' ? dialogConfig.cancelFn.call(articleEl, dialogConfig, textInput) : 0), document.body.removeChild(articleEl);
-			(!dialogConfig.required && dialogConfig.next && typeof dialogConfig.next == 'object' ? (dialogConfig.next.previous = dialogConfig, dialogConfig.next.previous.finalValue = textInput, showDialog(dialogConfig.next.type, dialogConfig.next)) : 0);
+			(!dialogConfig.required && !dialogConfig.abortOnCancel && dialogConfig.next && typeof dialogConfig.next == 'object' ? (dialogConfig.next.previous = dialogConfig, dialogConfig.next.previous.finalValue = textInput, showDialog(dialogConfig.next.type, dialogConfig.next)) : 0);
 		}
 		okButton.onclick = function(){
 			if(textInput && dialogConfig.required && !textInput.value && dialogConfig.strict !== false){ return textInput.focus(); }
@@ -644,7 +679,7 @@ document.addEventListener('DOMContentLoaded', function(){
 	fieldsetLegendsList = $q('fieldset legend'),
 	signOutLink = $q('[href="/admin:signout:"]', 1);
 
-	reservedKeysMap = {
+	reservedKeysMap = Object.assign(Object.create(null), { // Without a prototype: "constructor" is no reserved key
 		[CONFIG_KEYS.HTTP_CODES]: {},
 		[CONFIG_KEYS.DENIED_IPS]: {},
 		[CONFIG_KEYS.CHARS_REPLACE]: {},
@@ -655,7 +690,7 @@ document.addEventListener('DOMContentLoaded', function(){
 		[CONFIG_KEYS.PREPROCESSORS]: {},
 		[CONFIG_KEYS.INDEXES]: {},
 		[CONFIG_KEYS.REWRITES]: {}
-	},
+	}),
 	newEntryHandlersByContainer = {
 		'sec-subdomains': function handleNewSubdomainEntry(container, newLinkEl){
 			mainPanel.site[newLinkEl.site._.name] = newLinkEl.site, newLinkEl.onclick = function(event){
@@ -668,7 +703,7 @@ document.addEventListener('DOMContentLoaded', function(){
 			newLinkEl.onclick = function(event, context, aliasValue, triggerEl){
 				event.preventDefault(), context = getCurrentContext(), triggerEl = this, aliasValue = triggerEl.alias;
 				showDialog('confirm', {
-					text: '¿Borrar el alias "' + aliasValue + '" de "' + context.site + '"?',
+					text: 'Delete the alias "' + aliasValue + '" of "' + context.site + '"?',
 					okFn: function(){ apiRequest((triggerEl.href + '&s=' + encodeURIComponent(context.domain) + '&d=' + encodeURIComponent(context.subdomain)), function(r){ statusMessageEl.dataset.ok = r, container.removeChild(newLinkEl), (delete mainPanel.site[context.subdomain][CONFIG_KEYS.ALIASES][aliasValue]); }, function(e){ statusMessageEl.dataset.error = e; }); }
 				});
 			};
@@ -677,49 +712,54 @@ document.addEventListener('DOMContentLoaded', function(){
 			deleteBtn = createDeleteButton(newLinkEl, '/admin:inside:delRewrite'), fromOrName = newLinkEl.rewrite.from, toOrContent = newLinkEl.rewrite.to,
 			deleteBtn.onclick = function(event){
 				event.preventDefault();
-			showDialog('confirm', { text: '¿Borrar la reescritura "' + fromOrName + '" a "' + toOrContent + '"?', okFn: function(){ apiRequest((deleteBtn.href + getCurrentContext().request + '&a=' + encodeURIComponent(applyCharReplacements(fromOrName))), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.REWRITES][fromOrName]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
+			showDialog('confirm', { text: 'Delete the rewrite "' + fromOrName + '" to "' + toOrContent + '"?', okFn: function(){ apiRequest((deleteBtn.href + getCurrentContext().request + '&a=' + encodeURIComponent(applyCharReplacements(fromOrName))), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.REWRITES][fromOrName]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
 			}, newLinkEl.onclick = function(event){ event.preventDefault(), tempEditValues[0] = fromOrName, tempEditValues[1] = toOrContent, addRewriteLink.onclick.call(this); };
 		},
 		'box-mime': function handleNewMimeEntry(container, newLinkEl, deleteBtn, fromOrName, toOrContent){
 			deleteBtn = createDeleteButton(newLinkEl, '/admin:inside:delMIME'), fromOrName = newLinkEl.mime.from, toOrContent = newLinkEl.mime.to,
 			deleteBtn.onclick = function(event){
 				event.preventDefault();
-				showDialog('confirm', { text: '¿Borrar el MIME "' + fromOrName + '" con "' + toOrContent + '"?', okFn: function(){ apiRequest((deleteBtn.href + getCurrentContext().request + '&a=' + encodeURIComponent(fromOrName)), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.MIME_TYPES][fromOrName]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
+				showDialog('confirm', { text: 'Delete the MIME "' + fromOrName + '" with "' + toOrContent + '"?', okFn: function(){ apiRequest((deleteBtn.href + getCurrentContext().request + '&a=' + encodeURIComponent(fromOrName)), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.MIME_TYPES][fromOrName]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
 			}, newLinkEl.onclick = function(event){ event.preventDefault(), tempEditValues[0] = fromOrName, tempEditValues[1] = toOrContent, addMimeLink.onclick.call(this); };
 		},
 		'box-headers': function handleNewHeaderEntry(container, newLinkEl, deleteBtn, fromOrName, toOrContent){
 			deleteBtn = createDeleteButton(newLinkEl, '/admin:inside:delHeader'), fromOrName = newLinkEl.header.name, toOrContent = newLinkEl.header.content,
 			deleteBtn.onclick = function(event){
 				event.preventDefault();
-				showDialog('confirm', { text: '¿Borrar la cabecera "' + fromOrName + '" con "' + toOrContent + '"?', okFn: function(){ apiRequest((deleteBtn.href + getCurrentContext().request + '&a=' + encodeURIComponent(fromOrName)), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.HEADERS][fromOrName]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
+				showDialog('confirm', { text: 'Delete the header "' + fromOrName + '" with "' + toOrContent + '"?', okFn: function(){ apiRequest((deleteBtn.href + getCurrentContext().request + '&a=' + encodeURIComponent(fromOrName)), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.HEADERS][fromOrName]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
 			}, newLinkEl.onclick = function(event){ event.preventDefault(), tempEditValues[0] = fromOrName, tempEditValues[1] = toOrContent, addHeaderLink.onclick.call(this); };
 		},
 		'box-preprocessors': function handleNewPreprocessorEntry(container, newLinkEl, deleteBtn, fromOrName, toOrContent){
 			deleteBtn = createDeleteButton(newLinkEl, '/admin:inside:delPreprocessor'), fromOrName = newLinkEl.preprocessor.from, toOrContent = newLinkEl.preprocessor.to,
 			deleteBtn.onclick = function(event){
 				event.preventDefault();
-				showDialog('confirm', { text: '¿Borrar el preprocesador para "' + fromOrName + '" con "' + toOrContent + '"?', okFn: function(){ apiRequest((deleteBtn.href + getCurrentContext().request + '&a=' + encodeURIComponent(fromOrName)), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.PREPROCESSORS][fromOrName]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
+				// Without its preprocessor, the extension's files would be served as text, their source included: the
+				// current password is asked, as to add one
+				showDialogSequence({ type: 'confirm', text: 'Delete the preprocessor for "' + fromOrName + '" with "' + toOrContent + '"? Its files would be served as text, their source code included.', abortOnCancel: true }, { text: 'Current password:', secret: true, required: true, okFn: function(z, password){ apiRequest((deleteBtn.href + getCurrentContext().request + '&a=' + encodeURIComponent(fromOrName) + '&b=' + encodeURIComponent(password)), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.PREPROCESSORS][fromOrName]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
 			}, newLinkEl.onclick = function(event){ event.preventDefault(), tempEditValues[0] = fromOrName, tempEditValues[1] = toOrContent, addPreprocessorLink.onclick.call(this); };
 		},
 		'box-indexes': function handleNewIndexEntry(container, newLinkEl, deleteBtn, indexValue, context){
 			deleteBtn = createDeleteButton(newLinkEl, '/admin:inside:delIndex'), indexValue = newLinkEl.index, context = getCurrentContext(),
 			deleteBtn.onclick = function(event){
 				event.preventDefault();
-				showDialog('confirm', { text: '¿Borrar el índice "' + indexValue + '" de "' + context.site + '"?', okFn: function(){ apiRequest((deleteBtn.href + context.request + '&a=' + encodeURIComponent(applyCharReplacements(indexValue))), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.INDEXES][indexValue]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
+				showDialog('confirm', { text: 'Delete the index "' + indexValue + '" of "' + context.site + '"?', okFn: function(){ apiRequest((deleteBtn.href + context.request + '&a=' + encodeURIComponent(applyCharReplacements(indexValue))), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.INDEXES][indexValue]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
 			}, newLinkEl.onclick = function(event){ event.preventDefault(), tempEditValues[0] = indexValue, addIndexLink.onclick.call(this); };
 		}
 	},
-	generalSettingsDefs = { 'U': {}, 'P': {}, 'C': { cfm: true, emptyValue: true, bad: function(el, message){ // A newer turbo.config is only overwritten after confirming it
-		if(String(message).indexOf('a=sobrescribir') == -1){ return; }
-		showDialog('prompt', { text: message + '. Contraseña actual para sobrescribirlo:', required: true, okFn: function(z, password){ apiRequest('/admin:inside:setC?a=sobrescribir&b=' + encodeURIComponent(applyCharReplacements(password)), function(r){ statusMessageEl.dataset.ok = r; }, function(e){ statusMessageEl.dataset.error = e; }); } });
-	} }, 'PA': {}, 'RHT': {}, 'RT': {}, 'WT': {}, 'IT': {}, 'CII': {}, 'MUB': {}, 'MHB': {}, 'MBB': {}, 'CIS': {}, 'CIL': {}, 'CGL': {} },
-	generalSettingsDefs['M'] = { ok: function(a){ clearAndRender(sitesListSection), clearAndRender(charsReplaceSection), clearAndRender(deniedIpsSection), clearAndRender(httpCodeResponsesSection), loadInitialData(); } },
-	Object.keys(generalSettingsDefs).forEach(function(k){ generalSettingsDefs[k].extra = { value: '', required: 1, text: 'Contraseña actual:' }; }), // Every setting needs the current password
-	generalSettingsDefs['RT'].postfix = generalSettingsDefs['WT'].postfix = '(milisegundos [ms], segundos [s], minutos [m], e ilimitado [0])',
-	generalSettingsDefs['RHT'].postfix = generalSettingsDefs['IT'].postfix = '(milisegundos [ms], segundos [s], minutos [m]; 0 usa el de lectura total de petición)',
+	generalSettingsDefs = { 'U': { literal: true }, 'P': { literal: true, secret: true, emptyValue: true }, 'C': { cfm: true, emptyValue: true, bad: function(el, message){ // A newer turbo.config is only overwritten after confirming it
+		if(String(message).indexOf('a=overwrite') == -1){ return; }
+		showDialog('prompt', { text: message + '. Current password to overwrite it:', required: true, secret: true, okFn: function(z, password){ apiRequest('/admin:inside:setC?a=overwrite&b=' + encodeURIComponent(password), function(r){ statusMessageEl.dataset.ok = r; }, function(e){ statusMessageEl.dataset.error = e; }); } });
+	} }, 'PA': {}, 'RHT': {}, 'RT': {}, 'WT': {}, 'IT': {}, 'CII': {}, 'MUB': {}, 'MHB': {}, 'MBB': {}, 'CIS': {}, 'CIL': {}, 'CGL': {}, 'CGP': {} },
+	generalSettingsDefs['M'] = { ok: function(){ // Every value may come from the new directory: the page reloads once the answer is read
+		var reload = function(){ self.location.reload(); };
+		showDialog('confirm', { text: statusMessageEl.dataset.ok + '\n\nThe page will reload with the values of the new directory.', okText: 'OK', cancelText: 'Close', okFn: reload, cancelFn: reload });
+	} },
+	Object.keys(generalSettingsDefs).forEach(function(k){ generalSettingsDefs[k].extra = { value: '', required: 1, text: 'Current password:' }; }), // Every setting needs the current password
+	generalSettingsDefs['RT'].postfix = generalSettingsDefs['WT'].postfix = '(milliseconds [ms], seconds [s], minutes [m], and unlimited [0])',
+	generalSettingsDefs['RHT'].postfix = generalSettingsDefs['IT'].postfix = '(milliseconds [ms], seconds [s], minutes [m]; 0 uses the total request read)',
 	generalSettingsDefs['MUB'].postfix = generalSettingsDefs['MHB'].postfix = generalSettingsDefs['MBB'].postfix = '(bytes)',
 	generalSettingsDefs['PA'].text = function(value){ // D3: warn while the panel has no host of its own
-		return 'Dónde responde el panel (hosts o redes CIDR separados por comas; * = cualquiera. Recomendado: un host propio para el panel que no sirva ningún sitio; las redes limitan quién accede)' + (panelHasOwnHost(value) ? '' : '. Aviso: sin un host propio, el panel comparte origen con los sitios y una página servida por Turbo podría usar su sesión') + ':';
+		return 'Where the panel answers (comma-separated hosts or CIDR networks; * = any. Recommended: a host of its own for the panel that serves no site; the networks limit who gets in)' + (panelHasOwnHost(value) ? '' : '. Warning: without a host of its own, the panel shares its origin with the sites and a page served by Turbo could use its session') + ':';
 	},
 	generalSettingsDefs['PA'].ok = updatePanelAccessWarning,
 	requestLimitsFieldset.onclick = createSettingsClickHandler(generalSettingsDefs, statusMessageEl), generalSettingsFieldset.onclick = createSettingsClickHandler(generalSettingsDefs, statusMessageEl), requestTimingFieldset.onclick = createSettingsClickHandler(generalSettingsDefs, statusMessageEl), requestRateFieldset.onclick = createSettingsClickHandler(generalSettingsDefs, statusMessageEl);
@@ -755,7 +795,9 @@ document.addEventListener('DOMContentLoaded', function(){
 		'A': {
 			element: true,
 			param: 'y',
-			text: 'Adaptador (opcional [dns-route53, etc.]):',
+			text: 'Adapter (optional [dns-route53, etc.]):',
+			emptyConfirm: 'Back to webroot (no adapter)?',
+			emptyAction: '/admin:inside:cfgA',
 			tmpValue: ''
 		},
 		'C': {
@@ -776,10 +818,28 @@ document.addEventListener('DOMContentLoaded', function(){
 				a = getCurrentContext().subdomain,
 				mainPanel.site[a][CONFIG_KEYS.SITE_CONFIG]['E'] = siteSettingsDefs['E'].tmpValue,
 				mainPanel.site[a][CONFIG_KEYS.SITE_CONFIG]['A'] = siteSettingsDefs['A'].tmpValue;
+				if(c === 'WAIT'){ this.poll(getCurrentContext(), 0); }
 				return this.wait['set' + (c === 'WAIT' ? 'True' : 'False')]();
 			},
+			// poll asks for the certificate of context every 5 s while it is being issued, for 4 minutes at most (48
+			// times). Its answer updates the panel only if the same site is still open.
+			poll: function(context, tries, def){
+				def = this, clearTimeout(def.pollTimer);
+				if(tries >= 48){ return (statusMessageEl.dataset.error = 'The certificate is still in process after 4 minutes: check again later'); }
+				def.pollTimer = setTimeout(function(){
+					apiRequest('/admin:inside:cfgC' + context.request + '&a=1', function(r){
+						if(getCurrentContext().request != context.request){ return; }
+						statusMessageEl.dataset.ok = r, def.value = '1', def.ok.call(def);
+					}, function(e, s){
+						if(s === 'WAIT'){ return def.poll(context, tries + 1); }
+						if(moveToHTTPS(s)){ return; }
+						if(getCurrentContext().request != context.request){ return; }
+						statusMessageEl.dataset.error = e, def.wait.setFalse();
+					});
+				}, 5000);
+			},
 
-			setting: function(a, b){ // Maybe this.setting can be used as automatic after this.ok
+			setting: function(a, b){
 				b = getCurrentContext().site, this.wait.list[b] = this.wait.list[b] || {};
 				if(typeof this.wait.list[b].startValue == 'undefined'){ this.wait.list[b].startValue = a; }
 				if(this.wait.list[b].status || (typeof this.wait.list[b].startValue == 'string' && this.wait.condition(this.wait.list[b].startValue))){
@@ -802,7 +862,11 @@ document.addEventListener('DOMContentLoaded', function(){
 			}
 		}
 	};
-	siteSettingsDefs['C'].extra = [siteSettingsDefs['E'], siteSettingsDefs['A']], siteSettingsDefs['A'].stateFn = siteSettingsDefs['E'].stateFn;
+	siteSettingsDefs['C'].extra = [siteSettingsDefs['E'], siteSettingsDefs['A'], { // Deleting a certificate needs the current password
+		param: 'b', secret: true, literal: true, required: 1, value: '',
+		text: 'Current password (to delete the certificate):',
+		stateFn: function(a, b, c){ return ((c = a.wait.list[getCurrentContext().site]) && c.status) || a.wait.filter(b) == '0'; } // Asked only when deleting
+	}], siteSettingsDefs['A'].stateFn = siteSettingsDefs['E'].stateFn;
 	document.ondragstart = function(a){ return a.preventDefault(); },
 	document.onselectstart = function(a){ return a.preventDefault(); },
 	siteActionButtonsList.onclick = createSettingsClickHandler.call({ box: siteActionButtonsList }, siteSettingsDefs, statusMessageEl, '/admin:inside:cfg');
@@ -812,33 +876,34 @@ document.addEventListener('DOMContentLoaded', function(){
 	};
 	sitesListSection.firstElementChild.onclick = function(b, c, d){
 		b.preventDefault(), d = this;
-		showDialog('prompt', { text: 'Dominio:', required: true, okFn: function(z, c){ apiRequest((d.href + '?s=' + encodeURIComponent(c)), function(r){ statusMessageEl.dataset.ok = r, createSiteEntry(sitesListSection, c, { '': reservedKeysMap }, 0); }, function(e){ statusMessageEl.dataset.error = e; }); }});
+		showDialog('prompt', { text: 'Domain:', required: true, okFn: function(z, c){ apiRequest((d.href + '?s=' + encodeURIComponent(c)), function(r){ statusMessageEl.dataset.ok = r, createSiteEntry(sitesListSection, c, { '': reservedKeysMap }, 0); }, function(e){ statusMessageEl.dataset.error = e; }); }});
 	};
 	charsReplaceSection.firstElementChild.onclick = function(b, c, d, e, f, g, h){
 		b.preventDefault(), f = this, h = [];
 		if(!c){
 			h.push({
 				type: 'prompt',
-				text: 'Caracter(es):',
+				text: 'Character(s):',
 				required: true
 			});
 		}
 		h.push({
 			type: 'prompt',
-			text: 'Reemplazo:',
+			text: 'Replacement:',
 			required: true,
 			value: d || '',
 			okFn: function(z, d){
 				c = (!c ? z.previous.finalValue : c), e = f.href.indexOf('#'),
 				apiRequest(((e != -1 ? f.href.substring(0, e) : f.href) + '?s=' + encodeURIComponent(applyCharReplacements(c)) + '&d=' + encodeURIComponent(applyCharReplacements(d))), function(r){
-					statusMessageEl.dataset.ok = r, (f.chars != c ? createCharsReplaceEntry(charsReplaceSection, c, d) : f.replacement = d), charReplacementMap[c] = d;
+					g = findEntryByProperty(charsReplaceSection, 'a', ['chars'], c),
+					statusMessageEl.dataset.ok = r, (!g ? createCharsReplaceEntry(charsReplaceSection, c, d) : g.replacement = d), charReplacementMap[c] = d;
 				}, function(e){ statusMessageEl.dataset.error = e; });
 			}
 		});
 		showDialogSequence.apply(0, h);
 	};
 	deniedIpsSection.firstElementChild.onclick = function(b, c, d, e, f, g, h){
-		b.preventDefault(), h = [], f = ' ' + (d && !isNaN(d) ? new Date(d * 1000).toLocaleString() : '(este instante: ' + Math.ceil((new Date).getTime() / 1000) + ')'), g = this;
+		b.preventDefault(), h = [], f = ' ' + (d && !isNaN(d) ? new Date(d * 1000).toLocaleString() : '(now: ' + Math.ceil((new Date).getTime() / 1000) + ')'), g = this;
 		if(!c){
 			h.push({
 				type: 'prompt',
@@ -848,13 +913,16 @@ document.addEventListener('DOMContentLoaded', function(){
 		}
 		h.push({
 			type: 'prompt',
-			text: 'Fecha UNIX de desbloqueo' + f +  ':',
+			text: 'UNIX unblocking date' + f +  ':',
 			required: true,
 			value: d || '',
 			okFn: function(z, d){
 				c = (!c ? z.previous.finalValue : c), e = g.href.indexOf('#'),
 				apiRequest(((e != -1 ? g.href.substring(0, e) : g.href) + '?s=' + encodeURIComponent(c) + '&d=' + encodeURIComponent(d)), function(r){
-					statusMessageEl.dataset.ok = r, (g.ip != c ? createDeniedIpEntry(deniedIpsSection, c, d) : (g.unblockingDate = d, scheduleAutoRemoval(g, d)));
+					var existing = findEntryByProperty(deniedIpsSection, 'a', ['ip'], c);
+					statusMessageEl.dataset.ok = r;
+					if(r.indexOf('eliminado') != -1){ return (existing ? deniedIpsSection.removeChild(existing) : 0); } // Date 0 or past: the server removed it
+					(!existing ? createDeniedIpEntry(deniedIpsSection, c, d) : (existing.unblockingDate = d, scheduleAutoRemoval(existing, d)));
 				}, function(e){ statusMessageEl.dataset.error = e; });
 			}
 		});
@@ -865,19 +933,20 @@ document.addEventListener('DOMContentLoaded', function(){
 		if(!c){
 			g.push({
 				type: 'prompt',
-				text: 'Código HTTP:',
+				text: 'HTTP code:',
 				required: true
 			});
 		}
 		g.push({
 			type: 'prompt',
-			text: 'Respuesta:',
+			text: 'Response:',
 			required: true,
 			value: d || '',
 			okFn: function(z, d){
 				c = (!c ? z.previous.finalValue : c), e = f.href.indexOf('#'),
 				apiRequest(((e != -1 ? f.href.substring(0, e) : f.href) + '?s=' + encodeURIComponent(c) + '&d=' + encodeURIComponent(applyCharReplacements(d))), function(r){
-					statusMessageEl.dataset.ok = r, (f.httpCode != c ? createHttpCodeResponseEntry(httpCodeResponsesSection, c, d) : f.response = d);
+					var existing = findEntryByProperty(httpCodeResponsesSection, 'a', ['httpCode'], c);
+					statusMessageEl.dataset.ok = r, (!existing ? createHttpCodeResponseEntry(httpCodeResponsesSection, c, d) : existing.response = d);
 				}, function(e){ statusMessageEl.dataset.error = e; });
 			},
 			assign: { className: 'modal-wide' }
@@ -891,16 +960,70 @@ document.addEventListener('DOMContentLoaded', function(){
 	};
 	deleteSiteOrSubdomainLink.onclick = function(a, b, c){
 		a.preventDefault(), b = getCurrentContext(), c = this;
-		showDialog('confirm', {
-			text: '¿Borrar definitivamente "' + b.site + '"?',
-			okFn: function(){
-				apiRequest((c.href + b.request), function(r, s){
+		showDialogSequence({
+			type: 'confirm',
+			text: 'Delete "' + b.site + '" for good?',
+			abortOnCancel: true
+		},{
+			text: 'Current password:',
+			secret: true,
+			required: true,
+			okFn: function(z, password){
+				apiRequest((c.href + b.request + '&b=' + encodeURIComponent(password)), function(r, s){
 					statusMessageEl.dataset.ok = r;
 				if(typeof subdomainPanel.dataset.activeSubdomain != 'undefined' && (s = subdomainPanel.subdomain._.name)){ (delete mainPanel.site[s]), addSubdomainLink.parentNode.removeChild(subdomainPanel.subdomain._.element); return subdomainBreadcrumbLink.onclick(); }
 					siteBreadcrumbLink.onclick(), sitesListSection.removeChild(mainPanel.site._.element);
 				}, function(e){ statusMessageEl.dataset.error = e; });
 			}
 		});
+	};
+	// The certificate of the panel's own host (cfgPC): Certbot creates it for the hosts of PA, with an e-mail and an
+	// optional DNS adapter (without one, it validates over HTTP on those hosts), or it is deleted. While Certbot
+	// runs, the panel asks every 5 s, for 4 minutes at most, as with a site's certificate.
+	var panelCertLink = $q('#btn-panel-cert', 1), panelCertState = { email: '', adapter: '', status: false };
+	function updatePanelCertificate(general){
+		if(general){ panelCertState.email = general.PCE || '', panelCertState.adapter = general.PCA || '', panelCertState.status = general.PCC; }
+		panelCertLink.innerText = 'Panel certificate' + (panelCertState.status === true ? ' (active)' : (panelCertState.status === 'WAIT' ? ' (in process)' : ''));
+		if(general && panelCertState.status === 'WAIT'){ pollPanelCertificate(0); }
+	}
+	// Once a certificate covers the panel's host, its requests over HTTP are redirected to HTTPS, which a request
+	// from an http: page can't follow (another origin): it fails as a network error. The page then reloads, and the
+	// navigation follows the redirection.
+	function moveToHTTPS(status){
+		if(status !== 0 || self.location.protocol !== 'http:'){ return false; }
+		statusMessageEl.dataset.ok = 'The panel switches to HTTPS: reloading', setTimeout(function(){ self.location.reload(); }, 1500);
+		return true;
+	}
+	function pollPanelCertificate(tries){
+		clearTimeout(panelCertState.timer);
+		if(tries >= 48){ return (statusMessageEl.dataset.error = 'The panel certificate is still in process after 4 minutes: check again later'); }
+		panelCertState.timer = setTimeout(function(){
+			apiRequest('/admin:inside:cfgPC?a=1', function(r){ statusMessageEl.dataset.ok = r, panelCertState.status = true, updatePanelCertificate(); }, function(e, s){
+				if(s === 'WAIT'){ return pollPanelCertificate(tries + 1); }
+				if(moveToHTTPS(s)){ return; }
+				statusMessageEl.dataset.error = e, panelCertState.status = false, updatePanelCertificate();
+			});
+		}, 5000);
+	}
+	panelCertLink.onclick = function(a, email, adapter){
+		a.preventDefault();
+		if(panelCertState.status === 'WAIT'){ return (statusMessageEl.dataset.ok = 'Panel certificate in process'); }
+		if(panelCertState.status === true){
+			return showDialog('prompt', { text: 'Delete the panel certificate. Current password:', required: true, secret: true, okFn: function(z, password){ // Deleting it needs the current password
+				apiRequest('/admin:inside:cfgPC?a=0&b=' + encodeURIComponent(password), function(r){ statusMessageEl.dataset.ok = r, panelCertState.status = false, updatePanelCertificate(); }, function(e){ statusMessageEl.dataset.error = e; });
+			} });
+		}
+		showDialogSequence(
+			{ text: 'E-mail for the panel certificate (expiry notices):', value: panelCertState.email, required: 1, abortOnCancel: true, okFn: function(c, v){ email = v; } },
+			{ text: 'Adapter (optional [dns-route53, etc.]; empty: Certbot validates over HTTP on the panel hosts):', value: panelCertState.adapter, abortOnCancel: true, okFn: function(c, v){ adapter = v; } },
+			{ type: 'confirm', text: 'Create the certificate for the hosts of "Where the panel answers"?', okFn: function(){
+				panelCertState.email = email, panelCertState.adapter = adapter;
+				apiRequest('/admin:inside:cfgPC?a=1&z=' + encodeURIComponent(applyCharReplacements(email)) + '&y=' + encodeURIComponent(applyCharReplacements(adapter)), function(r){ statusMessageEl.dataset.ok = r, panelCertState.status = true, updatePanelCertificate(); }, function(e, s){
+					if(s !== 'WAIT'){ return (statusMessageEl.dataset.error = e); }
+					statusMessageEl.dataset.ok = e, panelCertState.status = 'WAIT', updatePanelCertificate(), pollPanelCertificate(0);
+				});
+			} }
+		);
 	};
 	uploadFilesLink.onclick = function(a){
 		a.preventDefault(),
@@ -910,17 +1033,29 @@ document.addEventListener('DOMContentLoaded', function(){
 	};
 	uploadFileInput.addEventListener('change', function(a, b){
 		a = getCurrentContext(), b = this;
-		showDialog('confirm', {
-			text: '¿Borrar y subir datos a "' + a.site + '"?',
-			okFn: function(){
-				apiRequest((uploadFilesLink.href + a.request), new FormData(b.parentNode), function(r){ statusMessageEl.dataset.ok = r, uploadFileInput.parentNode.reset(); }, function(e){ statusMessageEl.dataset.error = e, uploadFileInput.parentNode.reset(); });
+		showDialogSequence({
+			type: 'confirm',
+			text: 'Delete and upload data to "' + a.site + '"?',
+			abortOnCancel: true,
+			cancelFn: function(){ uploadFileInput.parentNode.reset(); }
+		},{
+			text: 'Current password:',
+			secret: true,
+			required: true,
+			cancelFn: function(){ uploadFileInput.parentNode.reset(); },
+			okFn: function(z, password, data){
+				data = new FormData(b.parentNode), data.append('b', password); // In the body, never in the URL
+				apiRequest((uploadFilesLink.href + a.request), data, function(r){ statusMessageEl.dataset.ok = r, uploadFileInput.parentNode.reset(); }, function(e, s){
+					// Each upload replaces the whole folder: the way out is a larger limit, not fewer files
+					statusMessageEl.dataset.error = (s == 413 ? 'The files exceed the "Max. body size", which also counts about 600 bytes per file: raise it to upload them. Nothing was changed' : e), uploadFileInput.parentNode.reset();
+				});
 			}
 		});
 	});
 	addSubdomainLink.onclick = function(a, b, c){
 		a.preventDefault();
 		showDialog('prompt', {
-			text: 'Subdominio:',
+			text: 'Subdomain:',
 			required: true,
 			okFn: function(z, c){
 			apiRequest((addSubdomainLink.href + '?s=' + encodeURIComponent(mainPanel.dataset.activeSite) + '&d=' + encodeURIComponent(c)), function(r){ statusMessageEl.dataset.ok = r, createSiteEntry(addSubdomainLink.parentNode, c, reservedKeysMap, 0); }, function(e){ statusMessageEl.dataset.error = e; });
@@ -940,12 +1075,12 @@ document.addEventListener('DOMContentLoaded', function(){
 	addRewriteLink.onclick = function(a, b, c, d, e){
 		if(a){ a.preventDefault(); }
 		d = this, showDialogSequence({
-			text: 'Dirección relativa (/...):',
+			text: 'Relative address (/...):',
 			value: tempEditValues[0] || '',
 			required: true,
 			cancelFn: resetTempEditValues
 		}, {
-			text: 'Reescribir (/...) o redirigir (https://...) a:',
+			text: 'Rewrite (/...) or redirect (https://...) to:',
 			value: tempEditValues[1] || '',
 			required: true,
 			okFn: function(z, c){
@@ -971,7 +1106,7 @@ document.addEventListener('DOMContentLoaded', function(){
 		if(a){ a.preventDefault(); }
 
 		d = this, showDialogSequence({
-			text: 'Extensión:',
+			text: 'Extension:',
 			value: tempEditValues[0] || '',
 			required: true,
 			strict: false,
@@ -982,7 +1117,7 @@ document.addEventListener('DOMContentLoaded', function(){
 			required: true,
 			okFn: function(z, c){
 				b = z.previous.finalValue,
-				b = applyCharReplacements((b.charAt(0) != '.' ? b : b.slice(1)), 1),
+				b = applyCharReplacements((b.charAt(0) != '.' ? b : b.slice(1)), 1).toLowerCase(), // As the server keeps it
 				e = 'mime',
 				apiRequest((addMimeLink.href + getCurrentContext().request + '&a=' + encodeURIComponent(b) + '&b=' + encodeURIComponent(applyCharReplacements(c))), function(r, s, t, u){
 					if(b in subdomainPanel.subdomain[CONFIG_KEYS.MIME_TYPES]){ t = findEntryByProperty(addMimeLink.nextElementSibling, 'a', [e, 'from'], b); }
@@ -1002,12 +1137,12 @@ document.addEventListener('DOMContentLoaded', function(){
 		if(a){ a.preventDefault(); }
 
 		d = this, showDialogSequence({
-			text: 'Cabecera:',
+			text: 'Header:',
 			value: tempEditValues[0] || '',
 			required: true,
 			cancelFn: resetTempEditValues
 		},{
-			text: 'Contenido:',
+			text: 'Content:',
 			value: tempEditValues[1] || '',
 			required: true,
 			okFn: function(z, c){
@@ -1030,20 +1165,26 @@ document.addEventListener('DOMContentLoaded', function(){
 	addPreprocessorLink.onclick = function(a, b, c, d, e){
 		if(a){ a.preventDefault(); }
 		d = this, showDialogSequence({
-			text: 'Extensión:',
+			text: 'Extension:',
 			value: tempEditValues[0] || '',
 			required: true,
 			strict: false,
 			cancelFn: resetTempEditValues
 		},{
-			text: 'Ruta del preprocesador:',
+			text: 'Preprocessor path:',
 			value: tempEditValues[1] || '',
 			required: true,
-			okFn: function(z, c){
-				b = z.previous.finalValue,
+			okFn: function(z, c){ d.executable = c; },
+			cancelFn: resetTempEditValues
+		},{
+			text: 'Current password (a preprocessor runs programs on the server):',
+			secret: true,
+			required: true,
+			okFn: function(z, password){
+				b = z.previous.previous.finalValue, c = d.executable,
 				b = applyCharReplacements((b.charAt(0) != '.' ? b : b.slice(1)), 1),
 				e = 'preprocessor',
-				apiRequest((addPreprocessorLink.href + getCurrentContext().request + '&a=' + encodeURIComponent(b) + '&b=' + encodeURIComponent(applyCharReplacements(c))), function(r, s, t, u){
+				apiRequest((addPreprocessorLink.href + getCurrentContext().request + '&a=' + encodeURIComponent(b) + '&b=' + encodeURIComponent(applyCharReplacements(c)) + '&c=' + encodeURIComponent(password)), function(r, s, t, u){
 					if(b in subdomainPanel.subdomain[CONFIG_KEYS.PREPROCESSORS]){ t = findEntryByProperty(addPreprocessorLink.nextElementSibling, 'a', [e, 'from'], b); }
 					statusMessageEl.dataset.ok = r, subdomainPanel.subdomain[CONFIG_KEYS.PREPROCESSORS][b] = c, createKeyValueEntry(addPreprocessorLink.nextElementSibling, b, e, c);
 					if(tempEditValues[0] != null){
@@ -1060,7 +1201,7 @@ document.addEventListener('DOMContentLoaded', function(){
 	addIndexLink.onclick = function(a, b, c, d, e){
 		if(a){ a.preventDefault(); }
 		d = this, showDialog('prompt', {
-			text: 'Archivo de índice:',
+			text: 'Index file:',
 			value: tempEditValues[0] || '',
 			okFn: function(z, b){
 				e = 'index',
@@ -1087,8 +1228,9 @@ document.addEventListener('DOMContentLoaded', function(){
 	});
 	signOutLink.onclick = function(a){
 		if(a){ a.preventDefault(); }
-		apiRequest('/admin:signout:'), statusMessageEl.dataset.ok = '. . .',
-		setTimeout(function(){ self.location.reload(); }, 567);
+		statusMessageEl.dataset.ok = '. . .';
+		var reload = function(){ self.location.reload(); }; // Once the session is closed, whatever the answer
+		apiRequest('/admin:signout:', reload, reload);
 	};
 	self.onkeydown = function(a, b){
 		b = $q('article [data-primary-btn]'), b = b[b.length - 1];
@@ -1116,7 +1258,7 @@ document.addEventListener('DOMContentLoaded', function(){
 		}
 		if(a.id == 'panel-subdomain' && this.attributeName == 'data-active-subdomain'){
 			if(a.subdomain && a.dataset.activeSubdomain == a.subdomain._.name){
-				toggleSiteSubdomainView(a), addSubdomainLink.parentNode.dataset.isHidden = '', subdomainBreadcrumbLink.innerText = (a.subdomain._.name || 'Raíz'),
+				toggleSiteSubdomainView(a), addSubdomainLink.parentNode.dataset.isHidden = '', subdomainBreadcrumbLink.innerText = (a.subdomain._.name || 'Root'),
 				clearAndRender(addAliasLink.nextElementSibling, a.subdomain[CONFIG_KEYS.ALIASES], renderSimpleEntries, 0, 1);
 				clearAndRender(addRewriteLink.nextElementSibling, a.subdomain[CONFIG_KEYS.REWRITES], renderKeyValueList, ['rewrite'], 1),
 				clearAndRender(addMimeLink.nextElementSibling, a.subdomain[CONFIG_KEYS.MIME_TYPES], renderKeyValueList, ['mime'], 1),
@@ -1156,9 +1298,9 @@ document.addEventListener('DOMContentLoaded', function(){
 			});
 		}
 	});
-	attachDeleteConfirmation(charsReplaceSection, { key: 'chars', value: 'replacement', text: '¿Borrar reemplazo de caracter "{REFERENCE}"?' });
-	attachDeleteConfirmation(deniedIpsSection, { key: 'ip', value: 'unblockingDate', text: '¿Borrar IP denegado "{REFERENCE}"?' });
-	attachDeleteConfirmation(httpCodeResponsesSection, { key: 'httpCode', value: 'response', text: '¿Borrar respuesta a código HTTP "{REFERENCE}"?' });
+	attachDeleteConfirmation(charsReplaceSection, { key: 'chars', value: 'replacement', text: 'Delete the character replacement "{REFERENCE}"?' });
+	attachDeleteConfirmation(deniedIpsSection, { key: 'ip', value: 'unblockingDate', text: 'Delete the denied IP "{REFERENCE}"?' });
+	attachDeleteConfirmation(httpCodeResponsesSection, { key: 'httpCode', value: 'response', text: 'Delete the HTTP code response "{REFERENCE}"?' });
 	loadInitialData(), resetTempEditValues();
 });
 </script>
@@ -1169,94 +1311,96 @@ document.addEventListener('DOMContentLoaded', function(){
 		<h2>Turbo</h2>
 		<p></p>
 		<a target="_blank" href="https://okzgn.com"><span>Ayuda</span></a>
-		<a href="/admin:signout:"><span>Salir</span></a>
+		<a href="/admin:signout:"><span>Sign out</span></a>
 	</header>
 	<aside>
 		<fieldset id="sec-general-settings">
-			<legend>Configuración general</legend>
+			<legend>General settings</legend>
 			<ul data-is-hidden>
-				<li><a href="/admin:inside:setU">Cambiar usuario</a></li>
-				<li><a href="/admin:inside:setP">Cambiar contraseña</a></li>
-				<li><a href="/admin:inside:setM">Directorio de sitios</a></li>
-				<li><a href="/admin:inside:setPA">Dónde responde el panel</a></li>
-				<li><a data-text="¿Guardar rescribiendo configuración?" href="/admin:inside:setC">Guardar configuración</a></li>
+				<li><a href="/admin:inside:setU">Change user</a></li>
+				<li><a href="/admin:inside:setP">Change password</a></li>
+				<li><a href="/admin:inside:setM">Sites directory</a></li>
+				<li><a href="/admin:inside:setPA">Where the panel answers</a></li>
+				<li><a id="btn-panel-cert" href="/admin:inside:cfgPC">Certificado del panel</a></li>
+				<li><a data-text="Save, overwriting the configuration?" href="/admin:inside:setC">Save configuration</a></li>
 			</ul>
 		</fieldset>
 		<fieldset id="sec-request-rate">
-			<legend>Frecuencia de peticiones</legend>
+			<legend>Request rate</legend>
 			<ul data-is-hidden>
-				<li><a data-postfix="(milisegundos [ms])" href="/admin:inside:setCIS">Contador de peticiones por intervalo</a></li>
-				<li><a href="/admin:inside:setCII">Peticiones máximas por intervalo</a></li>
-				<li><a data-postfix="(milisegundos [ms])" href="/admin:inside:setCIL">Tiempo de reinicio de contador</a></li>
-				<li><a data-postfix="(por segundo, entre todos los clientes; 0 = sin límite)" href="/admin:inside:setCGL">Límite global de peticiones</a></li>
+				<li><a data-postfix="(milliseconds [ms])" href="/admin:inside:setCIS">Request counting window</a></li>
+				<li><a href="/admin:inside:setCII">Maximum requests per interval</a></li>
+				<li><a data-postfix="(milliseconds [ms])" href="/admin:inside:setCIL">Counter reset time</a></li>
+				<li><a data-postfix="(per second, among all clients; 0 = no limit)" href="/admin:inside:setCGL">Global request limit</a></li>
 			</ul>
 		</fieldset>
 		<fieldset id="sec-request-timing">
-			<legend>Tiempo para cada petición</legend>
+			<legend>Time for each request</legend>
 			<ul data-is-hidden>
-				<li><a href="/admin:inside:setRHT">Lectura de cabeceras</a></li>
-				<li><a href="/admin:inside:setRT">Lectura total de petición</a></li>
-				<li><a href="/admin:inside:setWT">Escritura de respuesta</a></li>
-				<li><a href="/admin:inside:setIT">Cierre de conexión inactiva</a></li>
+				<li><a href="/admin:inside:setRHT">Header read</a></li>
+				<li><a href="/admin:inside:setRT">Total request read</a></li>
+				<li><a href="/admin:inside:setWT">Response write</a></li>
+				<li><a href="/admin:inside:setIT">Idle connection close</a></li>
 			</ul>
 		</fieldset>
 		<fieldset id="sec-request-limits">
-			<legend>Límites para cada petición</legend>
+			<legend>Limits for each request</legend>
 			<ul data-is-hidden>
-				<li><a href="/admin:inside:setMUB">Tamaño máx. de <i>URIs</i></a></li>
-				<li><a href="/admin:inside:setMHB">Tamaño máx. de cabeceras</a></li>
-				<li><a href="/admin:inside:setMBB">Tamaño máx. de contenidos</a></li>
+				<li><a href="/admin:inside:setMUB">Max. size of <i>URIs</i></a></li>
+				<li><a href="/admin:inside:setMHB">Max. size of headers</a></li>
+				<li><a href="/admin:inside:setMBB">Max. body size</a></li>
+				<li><a data-postfix="(0 = automatic)" href="/admin:inside:setCGP">Concurrent CGI processes</a></li>
 			</ul>
 		</fieldset>
 		<section id="sec-sites-list">
-			<a class="btn-add-entry" href="/admin:inside:addSite">Agregar sitio</a>
+			<a class="btn-add-entry" href="/admin:inside:addSite">Add site</a>
 		</section>
 		<section id="sec-denied-ips">
-			<a class="btn-add-entry" href="/admin:inside:addDenied">Agregar IP denegado</a>
+			<a class="btn-add-entry" href="/admin:inside:addDenied">Add denied IP</a>
 		</section>
 		<section id="sec-http-codes">
-			<a class="btn-add-entry" href="/admin:inside:addHttpCodeResponse">Agregar respuesta a código HTTP</a>
+			<a class="btn-add-entry" href="/admin:inside:addHttpCodeResponse">Add HTTP code response</a>
 		</section>
 		<section id="sec-chars-replace">
-			<a class="btn-add-entry" href="/admin:inside:addCharsReplace">Agregar reemplazo de caracter(es)</a>
+			<a class="btn-add-entry" href="/admin:inside:addCharsReplace">Add character replacement</a>
 		</section>
 	</aside>
 	<main>
 		<form id="form-file-upload"><input type="file" name="f" multiple webkitdirectory mozdirectory></form>
 		<a id="link-site-breadcrumb" class="breadcrumb-frame" href="/admin:inside:"></a>
 		<ul id="list-site-actions">
-			<li><a data-true-text="¿Generar certificado SSL?" data-false-text="¿Eliminar certificado SSL?" data-wait-text="¿Obtener respuesta del certificado?" data-true="Crear SSL" data-false="Borrar SSL" data-wait="Respuesta SSL" href="/admin:inside:cfgC">Crear SSL</a></li>
-			<li><a data-true-text="¿Activar redirección HTTPS?" data-false-text="¿Desactivar redirección HTTPS?" data-true="R. HTTPS" data-false="Sin r. HTTPS" href="/admin:inside:cfgS">R. HTTPS</a></li>
-			<li><a data-true-text="¿Activar redirección desde raíz a www?" data-false-text="¿Desactivar redirección desde raíz a www?" data-true="R. www" data-false="Sin r. www" href="/admin:inside:cfgW">R. www</a></li>
-			<li><a data-true-text="¿Activar redirección desde www a raíz?" data-false-text="¿Desactivar redirección desde www a raíz?" data-true="R. raíz" data-false="Sin r. raíz" href="/admin:inside:cfgR">R. raíz</a></li>
-			<li><a id="btn-upload-files" href="/admin:inside:hardUpload">Subir archivos</a></li>
-			<li><a id="btn-delete-entity" data-site-text="Borrar sitio" data-subdomain-text="Borrar subdominio" href="/admin:inside:delSite">Borrar sitio</a></li>
+			<li><a data-true-text="Generate an SSL certificate?" data-false-text="Delete the SSL certificate?" data-wait-text="Get the certificate's response?" data-true="Create SSL" data-false="Delete SSL" data-wait="SSL response" href="/admin:inside:cfgC">Create SSL</a></li>
+			<li><a data-true-text="Enable the HTTPS redirect?" data-false-text="Disable the HTTPS redirect?" data-true="R. HTTPS" data-false="No r. HTTPS" href="/admin:inside:cfgS">R. HTTPS</a></li>
+			<li><a data-true-text="Enable the redirect from root to www?" data-false-text="Disable the redirect from root to www?" data-true="R. www" data-false="No r. www" href="/admin:inside:cfgW">R. www</a></li>
+			<li><a data-true-text="Enable the redirect from www to root?" data-false-text="Disable the redirect from www to root?" data-true="R. root" data-false="No r. root" href="/admin:inside:cfgR">R. root</a></li>
+			<li><a id="btn-upload-files" href="/admin:inside:hardUpload">Upload files</a></li>
+			<li><a id="btn-delete-entity" data-site-text="Delete site" data-subdomain-text="Delete subdomain" href="/admin:inside:delSite">Delete site</a></li>
 		</ul>
 		<section id="sec-aliases">
-			<a class="btn-add-entry" href="/admin:inside:addAlias">Agregar alias</a>
+			<a class="btn-add-entry" href="/admin:inside:addAlias">Add alias</a>
 			<div class="entry-list"></div>
 		</section>
-		<section id="sec-subdomains"><a class="btn-add-entry" href="/admin:inside:addSubdomain">Agregar subdominio</a></section>
+		<section id="sec-subdomains"><a class="btn-add-entry" href="/admin:inside:addSubdomain">Add subdomain</a></section>
 		<section id="panel-subdomain">
 			<a class="breadcrumb-frame" href="/admin:inside:"></a>
 			<div id="box-mime" class="data-block">
-				<a class="btn-add-entry" href="/admin:inside:addMIME">Agregar MIME</a>
+				<a class="btn-add-entry" href="/admin:inside:addMIME">Add MIME</a>
 				<div class="entry-list"></div>
 			</div>
 			<div id="box-headers" class="data-block">
-				<a class="btn-add-entry" href="/admin:inside:addHeader">Agregar cabecera</a>
+				<a class="btn-add-entry" href="/admin:inside:addHeader">Add header</a>
 				<div class="entry-list"></div>
 			</div>
 			<div id="box-rewrites" class="data-block">
-				<a class="btn-add-entry" href="/admin:inside:addRewrite">Agregar reescritura</a>
+				<a class="btn-add-entry" href="/admin:inside:addRewrite">Add rewrite</a>
 				<div class="entry-list"></div>
 			</div>
 			<div id="box-preprocessors" class="data-block">
-				<a class="btn-add-entry" href="/admin:inside:addPreprocessor">Agregar preprocesador</a>
+				<a class="btn-add-entry" href="/admin:inside:addPreprocessor">Add preprocessor</a>
 				<div class="entry-list"></div>
 			</div>
 			<div id="box-indexes" class="data-block">
-				<a class="btn-add-entry" href="/admin:inside:addIndex">Agregar índice</a>
+				<a class="btn-add-entry" href="/admin:inside:addIndex">Add index</a>
 				<div class="entry-list"></div>
 			</div>
 		</section>

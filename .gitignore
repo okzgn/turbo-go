@@ -1,3 +1,15 @@
-dist/
-turbo.visits
-turbo.denials
+/dist/
+# What Turbo creates when it runs in the repository root
+/turbo.config
+/turbo.config.*
+turbo.certificates/
+turbo.panel/
+*.pem
+turbo.visits*
+turbo.denials*
+# The binary built in the root: go build . leaves turbo or turbo.exe, and the examples of the README turbo-<os>-<arch>
+/turbo
+/turbo.exe
+/turbo-*
+# Local settings of the development tools
+/.claude/

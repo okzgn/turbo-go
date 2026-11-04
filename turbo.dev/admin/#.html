@@ -2,11 +2,11 @@
 <html spellcheck="false" data-signin>
 
 <head>
-<title>Turbo | Administración</title>
+<title>Turbo | Administration</title>
 <link rel="icon" href="/admin:i.png">
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, user-scalable=no">
-<meta name="description" content="Acceso a la interfaz de administración del servidor web.">
+<meta name="description" content="Access to the administration interface of the web server.">
 <meta name="author" content="Elías A. Soshina">
 <meta name="theme-color" content="#004e9b">
 <link rel="stylesheet" href="/admin:m.css">
@@ -40,8 +40,10 @@ function $(a, b, c, d, e, f, g, h, i, j, k){
 		d.call(this, g, this.status);
 	}
 	e = new XMLHttpRequest(),
-	e.onerror = function(){ h.call(this, 'Intente nuevamente'); },
-	e.onabort = function(){ h.call(this, 'Petición cancelada'); },
+	e.timeout = 30000,
+	e.onerror = function(){ h.call(this, 'Network error: check the connection and try again'); },
+	e.onabort = function(){ h.call(this, 'Request cancelled'); },
+	e.ontimeout = function(){ h.call(this, 'No response in 30 seconds: try again'); },
 	e.onload = function(){
 		g = this.responseText;
 		switch(this.status){
@@ -58,7 +60,7 @@ function $(a, b, c, d, e, f, g, h, i, j, k){
 	}
 	e.open('POST', a), e.send(!f ? b : null);
 }
-function _(a){ return (a.indexOf('data-signin') != -1 ? 'Sin respuesta' : (!a ? 'Vuelva a intentarlo' : null)); }
+function _(a){ return (a.indexOf('data-signin') != -1 ? 'No response' : (!a ? 'Try again' : null)); }
 function A(a, b){
 	delete G.dataset.ok; delete G.dataset.err;
 	G.dataset[b || 'err'] = '', G.innerText = a, clearTimeout(E.T), E.T = setTimeout(function(){ G.dataset.hidden = ''; }, 6789);
@@ -82,9 +84,17 @@ document.addEventListener('DOMContentLoaded', function(G, E, T, U, P){
 			}
 			A(Z);
 		},
-		function(Z, S, R){ // S: HTTP status. 429: too many failed logins from this IP; 503: no room to check the password now
-			delete T.dataset.l, U.value = '', P.value = '', R = Math.ceil((+this.getResponseHeader('Retry-After') || 60) / 60);
-			A(S == 429 ? ('Demasiados intentos fallidos: espere ' + R + (R == 1 ? ' minuto' : ' minutos')) : (S == 503 ? 'Servidor ocupado: vuelva a intentarlo en unos segundos' : 'Inautorizado'));
+		function(Z, S, R){ // S: HTTP status (0 without an answer). 429: too many failed logins from this IP; 503: no room to check the password now
+			delete T.dataset.l, R = Math.max(1, +this.getResponseHeader('Retry-After') || 1), R = R + (R == 1 ? ' second' : ' seconds');
+			switch(S){
+				case 403: U.value = '', P.value = ''; return A('Wrong user or password');
+				case 429: return A('Too many failed attempts: wait ' + R);
+				case 503: return A('Server busy: try again in ' + R);
+				case 413: return A('User or password too long');
+				case 400: return A('Bad request: try again');
+				case 0: return A(Z);
+			}
+			A('Error ' + S + ': try again');
 		});
 	};
 });
@@ -94,10 +104,10 @@ document.addEventListener('DOMContentLoaded', function(G, E, T, U, P){
 <form id="E" action="/admin:" method="post">
 <fieldset>
 	<h1><a target="_blank" href="https://okzgn.com"><img src="/admin:i.png" alt="Logotipo de OKZGN"><span>Turbo</span></a></h1>
-	<h2>Administración</h2>
+	<h2>Administration</h2>
 	<p id="G" data-hidden></p>
-	<input type="text" name="u" placeholder="Usuario">
-	<input type="password" name="p" placeholder="Contraseña"><input type="submit" value="Entrar >">
+	<input type="text" name="u" placeholder="User">
+	<input type="password" name="p" placeholder="Password"><input type="submit" value="Sign in >">
 </fieldset>
 </form>
 </body>

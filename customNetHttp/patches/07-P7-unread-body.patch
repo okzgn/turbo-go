@@ -1,0 +1,22 @@
+diff --git a/1.net.http.server.go b/1.net.http.server.go
+index 2fa5503..e68c409 100644
+--- a/1.net.http.server.go
++++ b/1.net.http.server.go
+@@ -1111,7 +1111,7 @@ func (w *response) Header() Header {
+ // This number is approximately what a typical machine's TCP buffer
+ // size is anyway.  (if we have the bytes on the machine, we might as
+ // well read them)
+-const maxPostHandlerReadBytes = 256 << 10
++const maxPostHandlerReadBytes = 0 // turbo:P7: a body with unread data is not drained; the connection is closed (Go: 256 << 10)
+ 
+ func checkWriteHeaderCode(code int) {
+ 	// Issue 22880: require valid WriteHeader status codes.
+@@ -1415,7 +1415,7 @@ func (cw *chunkWriter) writeHeader(p []byte) {
+ 					// Body was closed in handler with non-EOF error.
+ 					w.closeAfterReply = true
+ 				}
+-			case bdy.unreadDataSizeLocked() >= maxPostHandlerReadBytes:
++			case bdy.unreadDataSizeLocked() > maxPostHandlerReadBytes: // turbo:P7: a body read whole (0 unread) keeps the connection (Go: >=)
+ 				tooBig = true
+ 			default:
+ 				discard = true

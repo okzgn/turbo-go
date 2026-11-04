@@ -27,8 +27,8 @@ import (
 	"time"
 )
 
-// Estado de Turbo que lee el servidor HTTP (los parches de PATCHES.md). El
-// resto del estado de Turbo vive en el paquete main.
+// Turbo state that the HTTP server reads (the patches of PATCHES.md). The
+// rest of Turbo's state lives in the main package.
 
 // TurboServerName is the value of the Server header and of the default error
 // template.
@@ -55,10 +55,10 @@ var (
 	TurboMaxURILength   atomic.Int64 // URI length limit (MUB)
 )
 
-// Limits of multipart forms (fixed).
+// Limits of multipart forms: fixed, but atomic, as tests change them while requests read them.
 var (
-	TurboMaxFormParts         = 1000 // Maximum parts of a form, as Go (D10; TurboWithFormLimits raises it for one request)
-	TurboMaxFormHeaders int64 = 1000 // Maximum headers of the parts of a form
+	TurboMaxFormParts   atomic.Int64 // Maximum parts of a form: 1000, as Go (TurboWithFormLimits raises it for one request)
+	TurboMaxFormHeaders atomic.Int64 // Maximum headers of all the parts of a form: 10000, as Go, so that 1000 file parts fit
 )
 
 func init() {
@@ -67,4 +67,6 @@ func init() {
 	TurboMaxBodySize.Store(1048576)
 	TurboMaxHeaderBytes.Store(5000)
 	TurboMaxURILength.Store(1000)
+	TurboMaxFormParts.Store(1000)
+	TurboMaxFormHeaders.Store(10000)
 }

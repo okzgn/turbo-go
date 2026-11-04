@@ -22,11 +22,11 @@ For commercial licensing, please visit one of the following:
 
 package customNetHttp
 
-// Sustituto de internal/godebug, que no se puede importar fuera del árbol de
-// Go. customNetHttp no lee GODEBUG: todos los ajustes valen "" y el código de
-// Go aplica su comportamiento por defecto (el de go 1.26 en go.mod).
+// Substitute for internal/godebug, which can't be imported outside Go's
+// tree. customNetHttp doesn't read GODEBUG: every setting is "" and Go's
+// code applies its default behaviour (that of go 1.26 in go.mod).
 //
-// customNetHttp/regenerar convierte cada godebug.X del código de Go en
+// customNetHttp/regenerate turns each godebug.X of Go's code into
 // godebug_X.
 
 type godebug_Setting struct {

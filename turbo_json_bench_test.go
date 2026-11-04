@@ -1,6 +1,6 @@
 package main
 
-// O5: el JSON de la configuración ("sites", turbo.config) con 500 sitios.
+// O5: the JSON of the configuration ("sites", turbo.config) with 500 sites.
 
 import (
 	"strconv"
@@ -11,10 +11,10 @@ func BenchmarkSitesJSON500(b *testing.B) {
 	initForTest(b)
 	globalMutex.Lock()
 	for i := 0; i < 500; i++ {
-		site := "sitio-" + strconv.Itoa(i) + ".test"
-		_constructSite(site, "")
-		_constructSite(site, "www")
-		customHeaders[site]["X-Sitio"] = site
+		site := "site-" + strconv.Itoa(i) + ".test"
+		constructSiteWithoutIndex(site, "")
+		constructSiteWithoutIndex(site, "www")
+		customHeaders[site]["X-Site"] = site
 	}
 	globalMutex.Unlock()
 	b.ResetTimer()

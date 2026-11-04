@@ -1,6 +1,6 @@
 package main
 
-// Panel y API (#28, #29, #38, #49, #50, #52).
+// Panel and API (#28, #29, #38, #49, #50, #52).
 
 import (
 	"bytes"
@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -20,13 +21,13 @@ import (
 	"turbo/customNetHttp"
 )
 
-// La documentación dice "/admin"; el panel responde en "/admin:".
+// The documentation says "/admin"; the panel answers on "/admin:".
 func TestW_AdminURL(t *testing.T) {
 	initForTest(t)
 	base := startServer(t)
 	res, body, err := rawGet(base, "localhost", "/admin:")
 	if err != nil || res.StatusCode != 200 || !strings.Contains(body, "data-signin") {
-		t.Fatalf("/admin: no sirve el login: %v %v", res, err)
+		t.Fatalf("/admin: doesn't serve the login: %v %v", res, err)
 	}
 	for _, p := range []string{"/admin", "/admin/"} {
 		res, body, err := rawGet(base, "localhost", p)
@@ -34,13 +35,13 @@ func TestW_AdminURL(t *testing.T) {
 			t.Fatalf("%s -> %v", p, err)
 		}
 		if strings.Contains(body, "data-signin") {
-			t.Errorf("%s sirve el login", p)
+			t.Errorf("%s serves the login", p)
 		}
 		t.Logf("%s -> %d", p, res.StatusCode)
 	}
 }
 
-// #50: con turbo.dev parcial, lo que falta se sirve desde la copia embebida.
+// #50: with a partial turbo.dev, what is missing is served from the embedded copy.
 func TestW_TurboDevPartial(t *testing.T) {
 	dir := initForTest(t)
 	os.MkdirAll(dir+"turbo.dev/admin", 0755)
@@ -49,16 +50,16 @@ func TestW_TurboDevPartial(t *testing.T) {
 	for _, p := range []string{"/admin:", "/admin:m.css", "/admin:i.png"} {
 		res, body, err := rawGet(base, "localhost", p)
 		if err != nil || res.StatusCode != 200 {
-			t.Errorf("%s -> %v %v; se esperaba 200", p, res, err)
+			t.Errorf("%s -> %v %v; expected 200", p, res, err)
 			continue
 		}
 		if strings.Contains(body, dir) || strings.Contains(body, strings.ReplaceAll(dir, "/", `\`)) {
-			t.Errorf("%s revela la ruta del servidor", p)
+			t.Errorf("%s reveals the server's path", p)
 		}
 	}
 }
 
-// #52: dos logins dan tokens distintos; la sesión dura 600 s de inactividad.
+// #52: two logins give different tokens; the session lasts 600 s of inactivity.
 func TestW_SessionLifetime(t *testing.T) {
 	initForTest(t)
 	base := startServer(t)
@@ -67,29 +68,29 @@ func TestW_SessionLifetime(t *testing.T) {
 	exp := signedInTokens[sessionKey("127.0.0.1", tok)]
 	globalMutex.RUnlock()
 	if d := exp - time.Now().Unix(); d < 595 || d > 600 {
-		t.Errorf("expiración = ahora + %d s; se esperaban 600", d)
+		t.Errorf("expiry = now + %d s; expected 600", d)
 	}
 	if tok2 := login(t, base); tok2 == tok {
-		t.Error("dos logins desde la misma IP comparten token")
+		t.Error("two logins from the same IP share a token")
 	}
 }
 
-// #49: los ajustes generales exigen la contraseña actual (b).
+// #49: the general settings require the current password (b).
 func TestW_SettingsWithoutPassword(t *testing.T) {
 	initForTest(t)
 	base := startServer(t)
 	tok := login(t, base)
-	for _, p := range []string{"/admin:inside:setRT?a=7s", "/admin:inside:setRT?a=8s&b=incorrecta", "/admin:inside:setC?a=x"} {
+	for _, p := range []string{"/admin:inside:setRT?a=7s", "/admin:inside:setRT?a=8s&b=wrong", "/admin:inside:setC?a=x"} {
 		code, body, err := post(base, p, tok)
 		if err != nil || code != 400 {
-			t.Errorf("%s -> %d %q %v; se esperaba 400", p, code, body, err)
+			t.Errorf("%s -> %d %q %v; expected 400", p, code, body, err)
 		}
 	}
 }
 
-// #28, #72: el panel funciona con la cookie de sesión (HttpOnly, SameSite=Strict)
-// sin token en la URL; sin cookie se ve el login; salir la borra; un CGI del
-// mismo host no la recibe.
+// #28, #72: the panel works with the session cookie (HttpOnly, SameSite=Strict)
+// without a token in the URL; without the cookie, the login page shows; signing
+// out deletes it; a CGI on the same host doesn't get it.
 func TestW_SessionCookie(t *testing.T) {
 	dir := initForTest(t)
 	os.WriteFile(dir+"localhost/@/x.cgi", []byte("x"), 0644)
@@ -113,7 +114,7 @@ func TestW_SessionCookie(t *testing.T) {
 	t.Logf("Set-Cookie: %s", setCookie)
 	for _, attr := range []string{"turbo_session=", "Path=/", "HttpOnly", "SameSite=Strict"} {
 		if !strings.Contains(setCookie, attr) {
-			t.Fatalf("falta %q en Set-Cookie", attr)
+			t.Fatalf("%q missing in Set-Cookie", attr)
 		}
 	}
 	cookie := strings.SplitN(setCookie, ";", 2)[0]
@@ -122,7 +123,7 @@ func TestW_SessionCookie(t *testing.T) {
 		req, _ := http.NewRequest("GET", base+path, nil)
 		req.Host = "localhost"
 		if cookie != "" {
-			req.Header.Set("Cookie", cookie+"; otra=1")
+			req.Header.Set("Cookie", cookie+"; other=1")
 		}
 		res, err := (&http.Client{Timeout: clientTimeout()}).Do(req)
 		if err != nil {
@@ -133,99 +134,98 @@ func TestW_SessionCookie(t *testing.T) {
 		return res.StatusCode, string(b)
 	}
 	if code, body := panel("/admin:inside:"); code != 200 || strings.Contains(body, "<meta http-equiv") {
-		t.Fatalf("panel con cookie: %d %.80q", code, body)
+		t.Fatalf("panel with cookie: %d %.80q", code, body)
 	}
 	if code, body := panel("/admin:inside:"); code != 200 || strings.Contains(body, "<meta http-equiv") {
-		t.Fatalf("recarga del panel con cookie: %d %.80q", code, body)
+		t.Fatalf("panel reload with cookie: %d %.80q", code, body)
 	}
-	if _, body := panel("/x.cgi"); strings.Contains(body, "turbo_session") || !strings.Contains(body, "HTTP_COOKIE=otra=1\n") {
-		t.Fatalf("el CGI debe recibir solo las demás cookies:\n%s", body)
+	if _, body := panel("/x.cgi"); strings.Contains(body, "turbo_session") || !strings.Contains(body, "HTTP_COOKIE=other=1\n") {
+		t.Fatalf("the CGI must get only the other cookies:\n%s", body)
 	}
 	saved := cookie
 	cookie = ""
 	if _, body := panel("/admin:inside:"); !strings.Contains(body, "<meta http-equiv") {
-		t.Fatalf("panel sin cookie: se esperaba la redirección al login, %.80q", body)
+		t.Fatalf("panel without cookie: expected the redirect to the login, %.80q", body)
 	}
 	cookie = saved
 	req, _ = http.NewRequest("POST", base+"/admin:signout:", nil)
 	req.Host = "localhost"
 	req.Header.Set("Cookie", cookie)
+	req.Header.Set("Sec-Fetch-Site", "same-origin") // As the panel's page sends it: with the cookie, signout needs it
 	res, err = (&http.Client{Timeout: clientTimeout()}).Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	res.Body.Close()
 	if sc := res.Header.Get("Set-Cookie"); !strings.Contains(sc, "Max-Age=0") {
-		t.Errorf("salir no borra la cookie: %q", sc)
+		t.Errorf("signing out doesn't delete the cookie: %q", sc)
 	}
 	if _, body := panel("/admin:inside:"); !strings.Contains(body, "<meta http-equiv") {
-		t.Fatal("la sesión sigue válida tras salir")
+		t.Fatal("the session is still valid after signing out")
 	}
 }
 
-// #28: el token de sesión no debe aparecer en turbo.visits.
+// #28: the session token must not appear in turbo.visits.
 func TestP28_TokenInVisitsLog(t *testing.T) {
 	dir := initForTest(t)
 	os.WriteFile(dir+"turbo.visits", nil, 0644)
-	updateSettings(false) // la recarga periódica abre el log
+	updateSettings(false) // the periodic reload opens the log
 	base := startServer(t)
 	tok := login(t, base)
-	get(base, "/admin:inside:", map[string]string{"Cookie": "turbo_session=" + tok}) // como el panel tras T1.6
+	get(base, "/admin:inside:", map[string]string{"Cookie": "turbo_session=" + tok}) // as the panel does after T1.6
 	get(base, "/index.html", nil)
 	serverSetLogState(visitsLogName, nil)
 	b, _ := os.ReadFile(dir + "turbo.visits")
 	if strings.Contains(string(b), tok) {
-		t.Fatalf("el token aparece en turbo.visits:\n%s", b)
+		t.Fatalf("the token appears in turbo.visits:\n%s", b)
 	}
 }
 
-// #29: "Guardar configuración" guarda el usuario y el hash de la contraseña,
-// nunca la contraseña en texto plano.
+// #29: "Save configuration" saves the user and the password hash, never the
+// password in plain text.
 func TestP29_CredentialsNotPersisted(t *testing.T) {
 	dir := initForTest(t)
-	defaultSettingValidators["."]["P"]("NuevaClave", "Admin")
-	if ok, msg := defaultSettingValidators["."]["C"]("", "NuevaClave"); !ok {
+	defaultSettingValidators["."]["P"]("NewPassword", "Admin")
+	if ok, msg := defaultSettingValidators["."]["C"]("", "NewPassword"); !ok {
 		t.Fatalf("setC: %q", msg)
 	}
 	b, _ := os.ReadFile(dir + "turbo.config")
 	s := string(b)
-	if strings.Contains(s, "NuevaClave") {
-		t.Error("contraseña en texto plano en turbo.config")
+	if strings.Contains(s, "NewPassword") {
+		t.Error("plain-text password in turbo.config")
 	}
 	if !strings.Contains(s, `"PH"`) || !strings.Contains(s, `"U"`) {
-		t.Errorf("faltan U o PH en turbo.config: %s", s)
+		t.Errorf("U or PH missing in turbo.config: %s", s)
 	}
-	// Reinicio: el estado vuelve a Turbo/Admin y se lee turbo.config.
+	// Restart: the state goes back to Turbo/Admin and turbo.config is read.
 	resetTestState(dir)
 	updateSettings(false)
-	if !passwordMatches("NuevaClave") || passwordMatches("Admin") {
-		t.Errorf("tras reiniciar: NuevaClave=%v Admin=%v; se esperaba solo NuevaClave", passwordMatches("NuevaClave"), passwordMatches("Admin"))
+	if !passwordMatches("NewPassword") || passwordMatches("Admin") {
+		t.Errorf("after restarting: NewPassword=%v Admin=%v; expected only NewPassword", passwordMatches("NewPassword"), passwordMatches("Admin"))
 	}
 }
 
-// TURBO_USER y TURBO_PASSWORD tienen prioridad sobre U y PH de turbo.config.
+// TURBO_USER and TURBO_PASSWORD take priority over U and PH of turbo.config.
 func TestC_CredentialsEnvPriority(t *testing.T) {
 	dir := initForTest(t)
-	defaultSettingValidators["."]["U"]("Otro", "Admin")
-	defaultSettingValidators["."]["P"]("DelArchivo", "Admin")
-	globalMutex.Lock()
-	saveDefaultConfig()
-	globalMutex.Unlock()
+	defaultSettingValidators["."]["U"]("Other", "Admin")
+	defaultSettingValidators["."]["P"]("FromFile", "Admin")
+	saveDefaultConfig() // Takes the locks itself (T20)
 	resetTestState(dir)
-	setPanelPassword("DelEntorno")
+	setPanelPassword("FromEnv")
 	userFromEnv, passwordFromEnv = true, true
 	updateSettings(false)
-	if panelUser.Get() != "Turbo" || !passwordMatches("DelEntorno") || passwordMatches("DelArchivo") {
-		t.Errorf("U=%q DelEntorno=%v DelArchivo=%v; se esperaban las credenciales del entorno", panelUser.Get(), passwordMatches("DelEntorno"), passwordMatches("DelArchivo"))
+	if panelUser.Get() != "Turbo" || !passwordMatches("FromEnv") || passwordMatches("FromFile") {
+		t.Errorf("U=%q FromEnv=%v FromFile=%v; expected the credentials from the environment", panelUser.Get(), passwordMatches("FromEnv"), passwordMatches("FromFile"))
 	}
 }
 
-// #58: tras cambiar el directorio de sitios (M) y guardar, al reiniciar se
-// sirve el nuevo directorio con su configuración.
+// #58: after changing the sites directory (M) and saving, a restart serves the
+// new directory with its configuration.
 func TestC_SitesDirPersisted(t *testing.T) {
 	start := initForTest(t)
 	other := filepath.ToSlash(t.TempDir()) + "/"
-	os.MkdirAll(other+"otro.test/@", 0755)
+	os.MkdirAll(other+"other.test/@", 0755)
 	if ok, msg := defaultSettingValidators["."]["M"](other, "Admin"); !ok {
 		t.Fatalf("setM: %q", msg)
 	}
@@ -234,18 +234,18 @@ func TestC_SitesDirPersisted(t *testing.T) {
 	if ok, msg := defaultSettingValidators["."]["C"]("", "Admin"); !ok {
 		t.Fatalf("setC: %q", msg)
 	}
-	resetTestState(start) // reinicio en el directorio de trabajo
+	resetTestState(start) // restart in the working directory
 	updateSettings(false)
 	if sitesDir.Get() != other {
-		t.Fatalf("directorio tras reiniciar: %q; se esperaba %q", sitesDir.Get(), other)
+		t.Fatalf("directory after restarting: %q; expected %q", sitesDir.Get(), other)
 	}
-	if _, ok := sitesMap["otro.test"]; !ok {
-		t.Error("el sitio del nuevo directorio no se cargó")
+	if _, ok := sitesMap["other.test"]; !ok {
+		t.Error("the site of the new directory wasn't loaded")
 	}
 }
 
-// Una clave raíz que no es un nombre de host ("^", la de la versión de
-// esquema de §5.1) no se confunde con un sitio.
+// A root key that isn't a host name ("^", the schema version key of §5.1)
+// isn't mistaken for a site.
 func TestC_UnknownRootKey(t *testing.T) {
 	dir := initForTest(t)
 	cfg := `{"^":{"v":"2"},"version":"x","localhost":{"":{"-":{"index.html":""}}}}`
@@ -253,36 +253,36 @@ func TestC_UnknownRootKey(t *testing.T) {
 	configFileModTime = 0
 	updateSettings(false)
 	if _, ok := sitesMap["^"]; ok {
-		t.Fatal("la clave '^' se trata como un sitio")
+		t.Fatal("the key '^' is treated as a site")
 	}
 	if _, ok := sitesMap["localhost"]; !ok {
-		t.Fatal("localhost no se cargó")
+		t.Fatal("localhost wasn't loaded")
 	}
 }
 
-// #29: U y P en texto plano en turbo.config se migran a U y PH al guardar.
+// #29: plain-text U and P in turbo.config are migrated to U and PH when saving.
 func TestC_CredentialsFromConfig(t *testing.T) {
 	dir := initForTest(t)
-	cfg := `{"localhost":{"":{"-":{"index.html":""}}},".":{"U":"Operador","P":"Secreta1","CIL":"1000"}}`
+	cfg := `{"localhost":{"":{"-":{"index.html":""}}},".":{"U":"Operator","P":"Secret1","CIL":"1000"}}`
 	os.WriteFile(dir+"turbo.config", []byte(cfg), 0600)
 	configFileModTime = 0
 	updateSettings(false)
-	if panelUser.Get() != "Operador" {
+	if panelUser.Get() != "Operator" {
 		t.Errorf("U=%q", panelUser.Get())
 	}
 	saveDefaultConfig()
 	b, _ := os.ReadFile(dir + "turbo.config")
 	s := string(b)
-	if strings.Contains(s, "Secreta1") || !strings.Contains(s, `"PH"`) || !strings.Contains(s, `"^"`) {
-		t.Errorf("turbo.config tras guardar: %s", s)
+	if strings.Contains(s, "Secret1") || !strings.Contains(s, `"PH"`) || !strings.Contains(s, `"^"`) {
+		t.Errorf("turbo.config after saving: %s", s)
 	}
-	if !passwordMatches("Secreta1") || passwordMatches("Admin") {
-		t.Error("la contraseña de P no se aplica")
+	if !passwordMatches("Secret1") || passwordMatches("Admin") {
+		t.Error("the password of P isn't applied")
 	}
 }
 
-// #30, #38: hardUpload vacía todo @, incluidas las subcarpetas, y lista los
-// nombres descartados.
+// #30, #38: hardUpload empties all of @, subfolders included, and lists the
+// discarded names.
 func TestP_HardUpload(t *testing.T) {
 	dir := initForTest(t)
 	os.MkdirAll(dir+"localhost/@/old", 0755)
@@ -293,12 +293,13 @@ func TestP_HardUpload(t *testing.T) {
 	w := multipart.NewWriter(&buf)
 	w.WriteField("s", "localhost")
 	w.WriteField("d", "")
+	w.WriteField("b", "Admin")
 	names := []string{"assets/img/logo.png", "../../evil1.txt", "a/../../evil2.txt", `..\..\evil3.txt`, "/abs/evil4.txt", "x/y/../z.txt"}
 	for _, n := range names {
 		h := make(textproto.MIMEHeader)
 		h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="f"; filename="%s"`, n))
 		p, _ := w.CreatePart(h)
-		p.Write([]byte("contenido " + n))
+		p.Write([]byte("content " + n))
 	}
 	w.Close()
 	req, _ := http.NewRequest("POST", base+"/admin:inside:hardUpload?s=localhost&d=", &buf)
@@ -311,46 +312,50 @@ func TestP_HardUpload(t *testing.T) {
 	}
 	b, _ := io.ReadAll(res.Body)
 	res.Body.Close()
-	t.Logf("respuesta: %d %q", res.StatusCode, b)
+	t.Logf("response: %d %q", res.StatusCode, b)
 	if fileExists(dir + "localhost/@/old/keep.txt") {
-		t.Error("queda old/keep.txt")
+		t.Error("old/keep.txt is still there")
 	}
 	if !strings.Contains(string(b), "evil1.txt") {
-		t.Error("la respuesta no lista los archivos descartados")
+		t.Error("the response doesn't list the discarded files")
 	}
 	for _, f := range []string{"evil1.txt", "evil2.txt", "evil3.txt"} {
 		if fileExists(dir+f) || fileExists(dir+"localhost/"+f) {
-			t.Errorf("%s escrito fuera de @", f)
+			t.Errorf("%s written outside @", f)
 		}
 	}
 }
 
-// DP13: si no se puede vaciar @, hardUpload no escribe nada y lo dice, en vez
-// de mezclar archivos nuevos con los que no se pudieron borrar.
+// DP13: hardUpload never mixes new files with those that couldn't be deleted.
+// The upload is written separately and replaces @ in one go: on Windows, an
+// open file prevents replacing @, which stays as it was; on Unix, @ is replaced
+// and what can't be deleted from the previous content stays outside @ (before,
+// the upload was rejected if @ couldn't be emptied).
 func TestP_HardUploadUndeletable(t *testing.T) {
 	if runtime.GOOS != "windows" && os.Geteuid() == 0 {
-		t.Skip("root puede borrar en una carpeta sin permiso de escritura")
+		t.Skip("root can delete in a folder without write permission")
 	}
 	dir := initForTest(t)
-	locked := dir + "localhost/@/bloqueado"
+	locked := dir + "localhost/@/locked"
 	os.MkdirAll(locked, 0755)
-	os.WriteFile(locked+"/viejo.txt", []byte("x"), 0644)
+	os.WriteFile(locked+"/old.txt", []byte("x"), 0644)
 	if runtime.GOOS == "windows" {
-		f, err := os.Open(locked + "/viejo.txt") // Windows no borra un archivo abierto
+		f, err := os.Open(locked + "/old.txt") // Windows doesn't delete an open file
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer f.Close()
 	} else {
-		os.Chmod(locked, 0500) // sin escritura: no se pueden borrar sus entradas
+		os.Chmod(locked, 0500) // no write permission: its entries can't be deleted
 		defer os.Chmod(locked, 0755)
 	}
 	base := startServer(t)
 	tok := login(t, base)
 	var buf bytes.Buffer
 	w := multipart.NewWriter(&buf)
-	p, _ := w.CreateFormFile("f", "carpeta/nuevo.txt")
-	p.Write([]byte("nuevo"))
+	w.WriteField("b", "Admin")
+	p, _ := w.CreateFormFile("f", "folder/new.txt")
+	p.Write([]byte("new"))
 	w.Close()
 	req, _ := http.NewRequest("POST", base+"/admin:inside:hardUpload?s=localhost&d=", &buf)
 	req.Host = "localhost"
@@ -362,14 +367,24 @@ func TestP_HardUploadUndeletable(t *testing.T) {
 	}
 	b, _ := io.ReadAll(res.Body)
 	res.Body.Close()
-	if res.StatusCode != 400 || !strings.Contains(string(b), "bloqueado") || fileExists(dir+"localhost/@/nuevo.txt") {
-		t.Fatalf("respuesta %d %q, nuevo.txt escrito=%v; se esperaba 400 que nombre bloqueado y nada escrito",
-			res.StatusCode, b, fileExists(dir+"localhost/@/nuevo.txt"))
+	if runtime.GOOS == "windows" {
+		if res.StatusCode != 400 || fileExists(dir+"localhost/@/new.txt") || !fileExists(locked+"/old.txt") {
+			t.Fatalf("response %d %q, new.txt written=%v; expected 400 and @ as it was",
+				res.StatusCode, b, fileExists(dir+"localhost/@/new.txt"))
+		}
+		return
+	}
+	moved, _ := filepath.Glob(dir + "localhost/@.previous-*/locked") // What couldn't be deleted, outside @
+	for _, folder := range moved {
+		os.Chmod(folder, 0755)
+	}
+	if res.StatusCode != 200 || !fileExists(dir+"localhost/@/new.txt") || dirExists(dir+"localhost/@/locked") {
+		t.Fatalf("response %d %q; expected 200 and @ with only new.txt", res.StatusCode, b)
 	}
 }
 
-// #70: un valor con "+" codificado llega intacto (el panel ya no convierte "+"
-// en espacio).
+// #70: a value with an encoded "+" arrives intact (the panel no longer turns
+// "+" into a space).
 func TestW_AddMIMEPlus(t *testing.T) {
 	initForTest(t)
 	base := startServer(t)
@@ -382,11 +397,11 @@ func TestW_AddMIMEPlus(t *testing.T) {
 	got := mimeTypes["localhost"]["svg"]
 	globalMutex.RUnlock()
 	if got != "image/svg+xml" {
-		t.Fatalf("MIME guardado %q; se esperaba image/svg+xml", got)
+		t.Fatalf("MIME saved %q; expected image/svg+xml", got)
 	}
 }
 
-// #38: s y d se aceptan también en el cuerpo multipart, sin la URL.
+// #38: s and d are also accepted in the multipart body, without the URL.
 func TestP_HardUploadBodyParams(t *testing.T) {
 	dir := initForTest(t)
 	base := startServer(t)
@@ -395,8 +410,9 @@ func TestP_HardUploadBodyParams(t *testing.T) {
 	w := multipart.NewWriter(&buf)
 	w.WriteField("s", "localhost")
 	w.WriteField("d", "")
-	p, _ := w.CreateFormFile("f", "carpeta/nuevo.txt")
-	p.Write([]byte("nuevo"))
+	w.WriteField("b", "Admin")
+	p, _ := w.CreateFormFile("f", "folder/new.txt")
+	p.Write([]byte("new"))
 	w.Close()
 	req, _ := http.NewRequest("POST", base+"/admin:inside:hardUpload", &buf)
 	req.Host = "localhost"
@@ -408,13 +424,13 @@ func TestP_HardUploadBodyParams(t *testing.T) {
 	}
 	b, _ := io.ReadAll(res.Body)
 	res.Body.Close()
-	if res.StatusCode != 200 || !fileExists(dir+"localhost/@/nuevo.txt") || fileExists(dir+"localhost/@/index.html") {
-		t.Fatalf("respuesta %d %q; se esperaba @ con solo nuevo.txt", res.StatusCode, b)
+	if res.StatusCode != 200 || !fileExists(dir+"localhost/@/new.txt") || fileExists(dir+"localhost/@/index.html") {
+		t.Fatalf("response %d %q; expected @ with only new.txt", res.StatusCode, b)
 	}
 }
 
-// #68: el panel no se puede incrustar en un iframe ni se guarda en caché, en
-// el login, en el panel y en las respuestas de la API.
+// #68: the panel can't be embedded in an iframe and isn't cached, in the
+// login, in the panel and in the API responses.
 func TestW_PanelHeaders(t *testing.T) {
 	initForTest(t)
 	base := startServer(t)
@@ -443,8 +459,8 @@ func TestW_PanelHeaders(t *testing.T) {
 	}
 }
 
-// DP7: con PA, /admin: responde solo en los hosts o redes de la lista (404
-// fuera); vacío o "*" no restringe; PA se valida y se guarda.
+// DP7: with PA, /admin: answers only on the hosts or networks of the list (404
+// elsewhere); empty or "*" doesn't restrict; PA is validated and saved.
 func TestW_PanelAccessHosts(t *testing.T) {
 	dir := initForTest(t)
 	base := startServer(t)
@@ -455,12 +471,12 @@ func TestW_PanelAccessHosts(t *testing.T) {
 		}
 		return res.StatusCode
 	}
-	if c := adminCode("otro.test"); c != 200 {
-		t.Fatalf("sin PA, /admin: en otro.test -> %d; se esperaba 200", c)
+	if c := adminCode("other.test"); c != 200 {
+		t.Fatalf("without PA, /admin: on other.test -> %d; expected 200", c)
 	}
-	for _, bad := range []string{"10.0.0.0/33", "no válido", "a..b"} {
+	for _, bad := range []string{"10.0.0.0/33", "not valid", "a..b"} {
 		if ok, _ := defaultSettingValidators["."]["PA"](bad, "Admin"); ok {
-			t.Errorf("PA %q aceptado", bad)
+			t.Errorf("PA %q accepted", bad)
 		}
 	}
 	// A7 (D3): with hosts and networks, a request needs both.
@@ -468,75 +484,73 @@ func TestW_PanelAccessHosts(t *testing.T) {
 		t.Fatalf("PA: %q", msg)
 	}
 	if c := adminCode("admin.test"); c != 404 {
-		t.Errorf("/admin: en admin.test desde fuera de 192.0.2.0/24 -> %d; se esperaba 404", c)
+		t.Errorf("/admin: on admin.test from outside 192.0.2.0/24 -> %d; expected 404", c)
 	}
 	if ok, msg := defaultSettingValidators["."]["PA"]("admin.test, 127.0.0.0/8", "Admin"); !ok {
 		t.Fatalf("PA: %q", msg)
 	}
 	if c := adminCode("admin.test"); c != 200 {
-		t.Errorf("/admin: en admin.test -> %d; se esperaba 200", c)
+		t.Errorf("/admin: on admin.test -> %d; expected 200", c)
 	}
-	if c := adminCode("otro.test"); c != 404 {
-		t.Errorf("/admin: en otro.test -> %d; se esperaba 404", c)
+	if c := adminCode("other.test"); c != 404 {
+		t.Errorf("/admin: on other.test -> %d; expected 404", c)
 	}
 	if code, _, _ := get(base, "/", nil); code != 200 {
-		t.Errorf("el sitio dejó de responder: %d", code)
+		t.Errorf("the site stopped answering: %d", code)
 	}
-	if ok, msg := defaultSettingValidators["."]["PA"]("127.0.0.0/8", "Admin"); !ok { // por la IP del cliente
+	if ok, msg := defaultSettingValidators["."]["PA"]("127.0.0.0/8", "Admin"); !ok { // by the client's IP
 		t.Fatalf("PA: %q", msg)
 	}
-	if c := adminCode("otro.test"); c != 200 {
-		t.Errorf("/admin: desde 127.0.0.1 con PA=127.0.0.0/8 -> %d; se esperaba 200", c)
+	if c := adminCode("other.test"); c != 200 {
+		t.Errorf("/admin: from 127.0.0.1 with PA=127.0.0.0/8 -> %d; expected 200", c)
 	}
-	globalMutex.Lock()
-	saveDefaultConfig()
-	globalMutex.Unlock()
+	saveDefaultConfig() // Takes the locks itself (T20)
 	if raw := savedConfig(t, dir); raw["."]["PA"] != "127.0.0.0/8" {
-		t.Errorf("PA guardado = %v", raw["."]["PA"])
+		t.Errorf("PA saved = %v", raw["."]["PA"])
 	}
-	resetTestState(dir) // reinicio: PA se lee de turbo.config
+	resetTestState(dir) // restart: PA is read from turbo.config
 	updateSettings(false)
 	if s := panelAccess.Load().setting; s != "127.0.0.0/8" {
-		t.Errorf("PA tras reiniciar = %q", s)
+		t.Errorf("PA after restarting = %q", s)
 	}
 	if ok, msg := defaultSettingValidators["."]["PA"]("*", "Admin"); !ok {
 		t.Fatalf("PA *: %q", msg)
 	}
-	if c := adminCode("otro.test"); c != 200 {
-		t.Errorf("con PA=* -> %d; se esperaba 200", c)
+	if c := adminCode("other.test"); c != 200 {
+		t.Errorf("with PA=* -> %d; expected 200", c)
 	}
 }
 
-// #72 (revisión de T1.6): al quitar turbo_session, el resto de la cabecera
-// Cookie llega al CGI sin cambios (comillas, espacios, comas, no ASCII, sin
-// valor).
+// #72 (review of T1.6): when turbo_session is removed, the rest of the Cookie
+// header reaches the CGI unchanged (quotes, spaces, commas, non-ASCII, no
+// value).
 func TestW_CGICookiesUnchanged(t *testing.T) {
 	dir := initForTest(t)
 	os.WriteFile(dir+"localhost/@/x.cgi", []byte("x"), 0644)
 	subdomainContentCheckers["?"](true, map[string]interface{}{"cgi": toolPath("cgiecho")}, false, "localhost", "")
 	base := startServer(t)
 	for header, want := range map[string]string{
-		`a=b c; turbo_session=secreto; x="y"; d=1,2; nombre=café; sinvalor`: `a=b c; x="y"; d=1,2; nombre=café; sinvalor`,
-		`turbo_session=secreto; a=1`:                                        `a=1`,
-		`a=b c; x="y"`:                                                      `a=b c; x="y"`,
+		`a=b c; turbo_session=secret; x="y"; d=1,2; name=café; novalue`: `a=b c; x="y"; d=1,2; name=café; novalue`,
+		`turbo_session=secret; a=1`:                                     `a=1`,
+		`a=b c; x="y"`:                                                  `a=b c; x="y"`,
 	} {
 		_, body, err := get(base, "/x.cgi", map[string]string{"Cookie": header})
 		if err != nil || !strings.Contains(body, "HTTP_COOKIE="+want+"\n") {
-			t.Errorf("Cookie %q -> err=%v; se esperaba HTTP_COOKIE=%s\n%s", header, err, want, body)
+			t.Errorf("Cookie %q -> err=%v; expected HTTP_COOKIE=%s\n%s", header, err, want, body)
 		}
 	}
 }
 
-// #72 (revisión de T1.6): una acción del panel autenticada con la cookie solo
-// se acepta desde el mismo origen (CSRF desde otro subdominio del mismo
-// sitio); con la cabecera ok no hace falta.
+// #72 (review of T1.6): a panel action authenticated with the cookie is only
+// accepted from the same origin (CSRF from another subdomain of the same
+// site); with the ok header it isn't needed.
 func TestW_PanelCSRF(t *testing.T) {
 	initForTest(t)
 	base := startServer(t)
 	tok := login(t, base)
 	n := 0
 	action := func(hdr map[string]string) int {
-		n++ // una cabecera distinta en cada petición
+		n++ // a different header in each request
 		req, _ := http.NewRequest("POST", base+"/admin:inside:addHeader?s=localhost&d=&a=X-Csrf-"+strconv.Itoa(n)+"&b=1", nil)
 		req.Host = "localhost"
 		for k, v := range hdr {
@@ -551,56 +565,56 @@ func TestW_PanelCSRF(t *testing.T) {
 	}
 	cookie := "turbo_session=" + tok
 	for name, hdr := range map[string]map[string]string{
-		"Origin de otro subdominio": {"Cookie": cookie, "Origin": "http://evil.localhost"},
-		"Sec-Fetch-Site same-site":  {"Cookie": cookie, "Sec-Fetch-Site": "same-site", "Origin": "http://localhost"},
-		"sin Origin":                {"Cookie": cookie},
+		"Origin from another subdomain": {"Cookie": cookie, "Origin": "http://evil.localhost"},
+		"Sec-Fetch-Site same-site":      {"Cookie": cookie, "Sec-Fetch-Site": "same-site", "Origin": "http://localhost"},
+		"no Origin":                     {"Cookie": cookie},
 	} {
 		if code := action(hdr); code != 403 {
-			t.Errorf("%s -> %d; se esperaba 403", name, code)
+			t.Errorf("%s -> %d; expected 403", name, code)
 		}
 	}
 	for name, hdr := range map[string]map[string]string{
-		"Origin propio":              {"Cookie": cookie, "Origin": "http://localhost"},
+		"own Origin":                 {"Cookie": cookie, "Origin": "http://localhost"},
 		"Sec-Fetch-Site same-origin": {"Cookie": cookie, "Sec-Fetch-Site": "same-origin"},
-		"cabecera ok":                {"ok": tok},
+		"ok header":                  {"ok": tok},
 	} {
 		if code := action(hdr); code != 200 {
-			t.Errorf("%s -> %d; se esperaba 200", name, code)
+			t.Errorf("%s -> %d; expected 200", name, code)
 		}
 	}
 }
 
-// Revisión de T1.7: los PBKDF2 de contraseñas incorrectas no ocupan más que
-// los huecos de passwordHashSlots; con todos ocupados, la comprobación espera.
+// Review of T1.7: PBKDF2 checks of wrong passwords use no more than the slots
+// of passwordHashSlots; with all of them taken, the check waits.
 func TestW_PasswordHashSlots(t *testing.T) {
 	initForTest(t)
 	for i := 0; i < cap(passwordHashSlots); i++ {
 		passwordHashSlots <- struct{}{}
 	}
 	done := make(chan bool)
-	go func() { done <- passwordMatches("incorrecta") }()
+	go func() { done <- passwordMatches("wrong") }()
 	select {
 	case <-done:
-		t.Fatal("se calculó un PBKDF2 con todos los huecos ocupados")
+		t.Fatal("a PBKDF2 was computed with all the slots taken")
 	case <-time.After(300 * time.Millisecond):
 	}
 	for i := 0; i < cap(passwordHashSlots); i++ {
 		<-passwordHashSlots
 	}
 	if <-done {
-		t.Fatal("contraseña incorrecta aceptada")
+		t.Fatal("wrong password accepted")
 	}
 	if !passwordMatches("Admin") {
-		t.Fatal("la contraseña correcta no se acepta")
+		t.Fatal("the right password isn't accepted")
 	}
 }
 
-// T2.6 (#21): la GUI embebida es la de turbo.dev/ (una sola copia), se sirve
-// archivo por archivo y no se sale de la carpeta de cada panel.
+// T2.6 (#21): the embedded GUI is the one in turbo.dev/ (a single copy), it is
+// served file by file and doesn't leave each panel's folder.
 func TestT26_EmbeddedGUI(t *testing.T) {
 	initForTest(t)
 	base := startServer(t)
-	for _, c := range []struct{ path, archivo, tipo string }{
+	for _, c := range []struct{ path, file, contentType string }{
 		{"/admin:", "turbo.dev/admin/#.html", "text/html"},
 		{"/admin:m.css", "turbo.dev/admin/m.css", "text/css"},
 		{"/admin:i.png", "turbo.dev/admin/i.png", "image/png"},
@@ -609,36 +623,36 @@ func TestT26_EmbeddedGUI(t *testing.T) {
 	} {
 		res, body, err := rawGet(base, "localhost", c.path)
 		if err != nil || res.StatusCode != 200 {
-			t.Errorf("%s -> %v %v; se esperaba 200", c.path, res, err)
+			t.Errorf("%s -> %v %v; expected 200", c.path, res, err)
 			continue
 		}
-		disco, err := os.ReadFile(c.archivo)
+		onDisk, err := os.ReadFile(c.file)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if body != string(disco) {
-			t.Errorf("%s no es %s", c.path, c.archivo)
+		if body != string(onDisk) {
+			t.Errorf("%s is not %s", c.path, c.file)
 		}
-		if ct := res.Header.Get("Content-Type"); !strings.HasPrefix(ct, c.tipo) {
-			t.Errorf("%s: Content-Type %q; se esperaba %s", c.path, ct, c.tipo)
+		if ct := res.Header.Get("Content-Type"); !strings.HasPrefix(ct, c.contentType) {
+			t.Errorf("%s: Content-Type %q; expected %s", c.path, ct, c.contentType)
 		}
 	}
-	for _, p := range []string{"/admin:../inside/%23.html", "/admin:inside/%23.html", "/admin:nada.css"} {
+	for _, p := range []string{"/admin:../inside/%23.html", "/admin:inside/%23.html", "/admin:nothing.css"} {
 		if res, _, err := rawGet(base, "localhost", p); err != nil || res.StatusCode != 404 {
-			t.Errorf("%s -> %v %v; se esperaba 404", p, res, err)
+			t.Errorf("%s -> %v %v; expected 404", p, res, err)
 		}
 	}
 }
 
-// La GUI envía los parámetros de la API en el cuerpo de la POST, así que la
-// contraseña actual (b) de los set* no llega a turbo.visits; el servidor los
-// acepta en el cuerpo igual que en la URL.
+// The GUI sends the API parameters in the body of the POST, so the current
+// password (b) of the set* actions doesn't reach turbo.visits; the server
+// accepts them in the body as in the URL.
 func TestW_SettingsInBodyNotLogged(t *testing.T) {
 	dir := initForTest(t)
 	os.WriteFile(dir+"turbo.visits", nil, 0644)
 	updateSettings(false)
-	anterior := *serverTimeLimits.Load()
-	t.Cleanup(func() { withGlobalLock(func() { setTimeLimits(func(t *customNetHttp.Timeouts) { *t = anterior }) }) })
+	previous := *serverTimeLimits.Load()
+	t.Cleanup(func() { withGlobalLock(func() { setTimeLimits(func(t *customNetHttp.Timeouts) { *t = previous }) }) })
 	base := startServer(t)
 	tok := login(t, base)
 	req, _ := http.NewRequest("POST", base+"/admin:inside:setRT", strings.NewReader("a=7s&b=Admin"))
@@ -649,10 +663,10 @@ func TestW_SettingsInBodyNotLogged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cuerpo, _ := io.ReadAll(res.Body)
+	body, _ := io.ReadAll(res.Body)
 	res.Body.Close()
 	if res.StatusCode != 200 || serverTimeLimits.Load().RT != 7*time.Second {
-		t.Fatalf("setRT en el cuerpo: %d %q, RT = %v", res.StatusCode, cuerpo, serverTimeLimits.Load().RT)
+		t.Fatalf("setRT in the body: %d %q, RT = %v", res.StatusCode, body, serverTimeLimits.Load().RT)
 	}
 	serverSetLogState(visitsLogName, nil)
 	b, _ := os.ReadFile(dir + "turbo.visits")
@@ -661,23 +675,23 @@ func TestW_SettingsInBodyNotLogged(t *testing.T) {
 	}
 }
 
-// addDenied rechaza la IP desde la que se usa el panel: el administrador se
-// dejaría fuera a sí mismo.
+// addDenied rejects the IP the panel is used from: the administrator would
+// lock themselves out.
 func TestW_DenyCurrentIP(t *testing.T) {
 	initForTest(t)
 	base := startServer(t)
 	tok := login(t, base)
-	futuro := strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)
-	code, body, err := post(base, "/admin:inside:addDenied?s=127.0.0.1&d="+futuro, tok)
-	if err != nil || code != 400 || body != "IP actual" {
-		t.Fatalf("addDenied de la propia IP: %d %q %v; se esperaba 400 \"IP actual\"", code, body, err)
+	future := strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)
+	code, body, err := post(base, "/admin:inside:addDenied?s=127.0.0.1&d="+future, tok)
+	if err != nil || code != 400 || body != "Current IP" {
+		t.Fatalf("addDenied of the current IP: %d %q %v; expected 400 \"Current IP\"", code, body, err)
 	}
-	if code, body, _ := post(base, "/admin:inside:addDenied?s=203.0.113.5&d="+futuro, tok); code != 200 {
-		t.Fatalf("addDenied de otra IP: %d %q", code, body)
+	if code, body, _ := post(base, "/admin:inside:addDenied?s=203.0.113.5&d="+future, tok); code != 200 {
+		t.Fatalf("addDenied of another IP: %d %q", code, body)
 	}
 	for _, c := range []struct {
 		ip, remote string
-		es         bool
+		want       bool
 	}{
 		{"203.0.113.5", "203.0.113.5:4000", true},
 		{" 203.0.113.5 ", "203.0.113.5:4000", true},
@@ -685,48 +699,48 @@ func TestW_DenyCurrentIP(t *testing.T) {
 		{"2001:db8:0::1", "[2001:db8::1]:443", true},
 		{"no-ip", "203.0.113.5:4000", false},
 	} {
-		if got := isClientIP(c.ip, &customNetHttp.Request{RemoteAddr: c.remote}); got != c.es {
+		if got := isClientIP(c.ip, &customNetHttp.Request{RemoteAddr: c.remote}); got != c.want {
 			t.Errorf("isClientIP(%q, %q) = %v", c.ip, c.remote, got)
 		}
 	}
 }
 
-// Los del* de contenido de un subdominio sin todos sus parámetros responden 400,
-// como el resto de la API, en lugar de 200 vacío.
+// The del* actions for a subdomain's content without all their parameters
+// answer 400, like the rest of the API, instead of an empty 200.
 func TestW_DeleteWithoutParams(t *testing.T) {
 	initForTest(t)
 	base := startServer(t)
 	tok := login(t, base)
-	for _, accion := range []string{"Index", "Alias", "Preprocessor", "Header", "MIME", "Rewrite"} {
-		for _, consulta := range []string{"", "?s=localhost&d=", "?s=localhost&a=x", "?d=&a=x"} {
-			code, body, err := post(base, "/admin:inside:del"+accion+consulta, tok)
+	for _, action := range []string{"Index", "Alias", "Preprocessor", "Header", "MIME", "Rewrite"} {
+		for _, query := range []string{"", "?s=localhost&d=", "?s=localhost&a=x", "?d=&a=x"} {
+			code, body, err := post(base, "/admin:inside:del"+action+query, tok)
 			if err != nil || code != 400 || body != msgMissingData {
-				t.Errorf("del%s%s: %d %q %v; se esperaba 400 %q", accion, consulta, code, body, err, msgMissingData)
+				t.Errorf("del%s%s: %d %q %v; expected 400 %q", action, query, code, body, err, msgMissingData)
 			}
 		}
 	}
 }
 
-// setU y setP rechazan un valor igual al actual, como el resto de los ajustes.
+// setU and setP reject a value equal to the current one, like the rest of the settings.
 func TestW_CredentialsUnchanged(t *testing.T) {
 	initForTest(t)
 	base := startServer(t)
 	tok := login(t, base)
-	for _, c := range []struct{ ruta, esperado string }{
-		{"/admin:inside:setU?a=Turbo&b=Admin", "Usuario sin cambios"},
-		{"/admin:inside:setP?a=Admin&b=Admin", "Contraseña sin cambios"},
+	for _, c := range []struct{ path, want string }{
+		{"/admin:inside:setU?a=Turbo&b=Admin", "User unchanged"},
+		{"/admin:inside:setP?a=Admin&b=Admin", "Password unchanged"},
 	} {
-		if code, body, err := post(base, c.ruta, tok); err != nil || code != 400 || body != c.esperado {
-			t.Errorf("%s: %d %q %v; se esperaba 400 %q", c.ruta, code, body, err, c.esperado)
+		if code, body, err := post(base, c.path, tok); err != nil || code != 400 || body != c.want {
+			t.Errorf("%s: %d %q %v; expected 400 %q", c.path, code, body, err, c.want)
 		}
 	}
 	if code, body, _ := post(base, "/admin:inside:setU?a=Turbo2&b=Admin", tok); code != 200 {
-		t.Errorf("setU con otro usuario: %d %q", code, body)
+		t.Errorf("setU with another user: %d %q", code, body)
 	}
 }
 
-// El 404 de /admin: fuera de PA lleva las mismas cabeceras de seguridad que el
-// resto de las respuestas del panel.
+// The 404 of /admin: outside PA carries the same security headers as the rest
+// of the panel's responses.
 func TestW_PanelAccessDeniedHeaders(t *testing.T) {
 	initForTest(t)
 	if ok, msg := defaultSettingValidators["."]["PA"]("admin.test", "Admin"); !ok {
@@ -735,11 +749,43 @@ func TestW_PanelAccessDeniedHeaders(t *testing.T) {
 	base := startServer(t)
 	res, _, err := rawGet(base, "localhost", "/admin:")
 	if err != nil || res.StatusCode != 404 {
-		t.Fatalf("/admin: fuera de PA -> %v %v; se esperaba 404", res, err)
+		t.Fatalf("/admin: outside PA -> %v %v; expected 404", res, err)
 	}
-	for k, v := range map[string]string{"X-Frame-Options": "DENY", "Content-Security-Policy": "frame-ancestors 'none'", "Cache-Control": "no-store"} {
+	// The 404 is the error template: no scripts (N89)
+	for k, v := range map[string]string{"X-Frame-Options": "DENY", "Content-Security-Policy": panelCSP, "Cache-Control": "no-store"} {
 		if got := res.Header.Get(k); got != v {
-			t.Errorf("%s = %q; se esperaba %q", k, got, v)
+			t.Errorf("%s = %q; expected %q", k, got, v)
 		}
+	}
+}
+
+// N98: the panel's files come only from turbo.dev/<panel>/ (or the embedded copy). A path that would leave it,
+// also through what Windows reads differently (a "/" start, which cleaning took for a network path, "\", a ":"
+// that names a stream), and a device name get 404 without opening anything: before, on Windows, the path
+// "/../secret.txt" read turbo.dev/secret.txt (HTTP/1 stops it earlier, the function didn't), and "nul" was
+// opened as a file.
+func TestN98_PanelFilesStayInTheirFolder(t *testing.T) {
+	dir := initForTest(t)
+	base := startServer(t)
+	os.MkdirAll(dir+"turbo.dev/admin", 0755)
+	os.WriteFile(dir+"turbo.dev/secret.txt", []byte("secret"), 0644)
+	os.WriteFile(dir+"secret.txt", []byte("secret"), 0644)
+	os.WriteFile(dir+"turbo.dev/admin/own.txt", []byte("own"), 0644)
+	for _, path := range []string{"/../secret.txt", "//../secret.txt", "/../../secret.txt", `\..\secret.txt`, `..\..\secret.txt`, "x:/../../secret.txt", "/../x:secret.txt", "..%5Csecreto.txt", "%2F..%2Fsecreto.txt", "nul", "con.txt", "CONIN$", "own.txt::$DATA"} {
+		recorder := &responseRecorder{}
+		request := &customNetHttp.Request{Method: "GET", Header: customNetHttp.Header{}, URL: &url.URL{Path: "/"}, RequestURI: "/admin:" + path}
+		consoleFiles(adminPathPrefix, path, recorder, request)
+		if recorder.code != 404 || strings.Contains(recorder.body.String(), "secret") || strings.Contains(recorder.body.String(), "page not found") {
+			t.Errorf("%q: %d %q; expected the panel's 404, without opening anything", path, recorder.code, recorder.body.String())
+		}
+	}
+	if res, body, err := rawGet(base, "localhost", "/admin:nul"); err != nil || res.StatusCode != 404 || strings.Contains(body, "page not found") {
+		t.Errorf("/admin:nul: %v %q %v; expected the panel's 404, without opening anything", res, body, err)
+	}
+	if res, body, err := rawGet(base, "localhost", "/admin:own.txt"); err != nil || res.StatusCode != 200 || body != "own" {
+		t.Errorf("a file of turbo.dev/admin: %v %q %v", res, body, err)
+	}
+	if res, body, err := rawGet(base, "localhost", "/admin:m.css"); err != nil || res.StatusCode != 200 || body == "" {
+		t.Errorf("an embedded file of the panel: %v %v", res, err)
 	}
 }

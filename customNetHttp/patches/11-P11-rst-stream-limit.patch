@@ -1,0 +1,26 @@
+diff --git a/1.net.http.h2_bundle.go b/1.net.http.h2_bundle.go
+index cdcced3..ab496db 100644
+--- a/1.net.http.h2_bundle.go
++++ b/1.net.http.h2_bundle.go
+@@ -4646,6 +4646,8 @@ func (sc *http2serverConn) rejectConn(err http2ErrCode, debug string) {
+ }
+ 
+ type http2serverConn struct {
++	turboRST turboRSTLimiter // turbo:P11
++
+ 	// Immutable:
+ 	srv              *http2Server
+ 	hs               *Server
+@@ -5793,6 +5795,12 @@ func (sc *http2serverConn) processResetStream(f *http2RSTStreamFrame) error {
+ 	sc.serveG.check()
+ 
+ 	state, st := sc.state(f.StreamID)
++	// turbo:P11: Turbo's own RST_STREAM limit (Rapid Reset). Only those that cancel an open stream
++	// count: a browser that cancels streams already finished doesn't reach it.
++	if limit := turboMaxRSTStreamPerSecond(sc.advMaxStreams); st != nil && sc.turboRST.exceeded(time.Now(), limit) {
++		sc.logf("http2: possible Rapid Reset attack from %v: more than %d RST_STREAM per second", sc.remoteAddrStr, limit)
++		return sc.countError("rapid_reset_detected", http2ConnectionError(http2ErrCodeEnhanceYourCalm))
++	}
+ 	if state == http2stateIdle {
+ 		// 6.4 "RST_STREAM frames MUST NOT be sent for a
+ 		// stream in the "idle" state. If a RST_STREAM frame

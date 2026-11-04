@@ -1,0 +1,62 @@
+diff --git a/1.net.http.h2_bundle.go b/1.net.http.h2_bundle.go
+index 91dd294..786aeec 100644
+--- a/1.net.http.h2_bundle.go
++++ b/1.net.http.h2_bundle.go
+@@ -3212,14 +3212,19 @@ func (fr *http2Framer) readMetaFrame(hf *http2HeadersFrame) (http2Frame, error)
+ 	mh := &http2MetaHeadersFrame{
+ 		http2HeadersFrame: hf,
+ 	}
+-	var headersRemainSize = fr.maxHeaderListSize()
+-	var trailersRemainSize = fr.maxHeaderListSize()
++	// turbo:P5: the header list is limited to TurboMaxHeaderBytes (setting MHB), read once per
++	// header block: the same limit the server announces. An HPACK field can be larger
++	// (turboMaxHeaderStringLen): so one over MHB gets 431 on its stream and doesn't close the connection.
++	maxHeaderBytes := http2turboMaxHeaderBytes()
++	var headersRemainSize = maxHeaderBytes
++	var trailersRemainSize = maxHeaderBytes
++	var longPathSeen bool // turbo:P5
+ 	var sawRegular bool
+ 
+ 	var invalid error // pseudo header field errors
+ 	hdec := fr.ReadMetaHeaders
+ 	hdec.SetEmitEnabled(true)
+-	hdec.SetMaxStringLength(fr.maxHeaderStringLen())
++	hdec.SetMaxStringLength(turboMaxHeaderStringLen()) // turbo:P5
+ 	hdec.SetEmitFunc(func(hf HeaderField) {
+ 		if http2VerboseLogs && fr.logReads {
+ 			fr.debugReadLoggerf("http2: decoded hpack field %+v", hf)
+@@ -3245,6 +3250,14 @@ func (fr *http2Framer) readMetaFrame(hf *http2HeadersFrame) (http2Frame, error)
+ 			return
+ 		}
+ 
++		// turbo:P5: a :path longer than MUB stays out of the MHB budget (P3 answers it with 414), but
++		// only one per block: repeated, it counts as any field, and the block doesn't grow without limit.
++		if hf.Name == ":path" && !longPathSeen && len(hf.Value) > int(TurboMaxURILength.Load()) {
++			longPathSeen = true
++			mh.Fields = append(mh.Fields, hf)
++			return
++		}
++
+ 		var remainSize *uint32
+ 		var size uint32
+ 		if hf.Name == "trailer" {
+@@ -4703,11 +4716,17 @@ type http2serverConn struct {
+ }
+ 
+ func (sc *http2serverConn) maxHeaderListSize() uint32 {
+-	n := sc.hs.MaxHeaderBytes
++	return http2turboMaxHeaderBytes() // turbo:P5: SETTINGS_MAX_HEADER_LIST_SIZE announces the limit readMetaFrame applies
++}
++
++// http2turboMaxHeaderBytes is the limit of the header list (turbo:P5): TurboMaxHeaderBytes (MHB), in the
++// units of HTTP/2 (name and value plus 32 bytes per field), without the margin of http2adjustHTTP1MaxHeaderSize.
++func http2turboMaxHeaderBytes() uint32 {
++	n := TurboMaxHeaderBytes.Load()
+ 	if n <= 0 {
+ 		n = DefaultMaxHeaderBytes
+ 	}
+-	return uint32(http2adjustHTTP1MaxHeaderSize(int64(n)))
++	return uint32(n)
+ }
+ 
+ func (sc *http2serverConn) curOpenStreams() uint32 {

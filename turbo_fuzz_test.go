@@ -1,33 +1,43 @@
 package main
 
-// Fuzzing de las funciones que interpretan entrada externa o de configuración.
-// Cada objetivo solo comprueba que la función no entra en panic.
+// Fuzzing of the functions that parse external or configuration input.
+// Each target only checks that the function doesn't panic.
 
 import (
+	"net/netip"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"turbo/customNetHttp"
 )
 
-// initFuzz deja el estado global limpio, con los sitios localhost,
-// example.com y *.example.com en un directorio temporal.
+// initFuzz leaves the global state clean, with the sites localhost,
+// example.com and *.example.com in a temporary directory.
 func initFuzz(f *testing.F) {
 	resetTestState(filepath.ToSlash(f.TempDir()) + "/")
 	globalMutex.Lock()
 	defer globalMutex.Unlock()
-	_constructSite("localhost", "")
-	_constructSite("example.com", "")
-	_constructSite("example.com", "*")
+	constructSiteWithoutIndex("localhost", "")
+	constructSiteWithoutIndex("example.com", "")
+	constructSiteWithoutIndex("example.com", "*")
 }
 
 func FuzzHost(f *testing.F) {
-	for _, s := range []string{"localhost", "a.b.c", "*.x.com", "[::1]:80", ".", "a..b", "x:80", ""} {
+	for _, s := range []string{"localhost", "a.b.c", "*.x.com", "[::1]:80", ".", "a..b", "x:80", "", "X&a=1.example.com", "Example.COM.", "xn--a.example.com", "a_b.example.com"} {
 		f.Add(s)
 	}
 	initFuzz(f)
 	f.Fuzz(func(t *testing.T, h string) {
-		host(h)
+		globalMutex.RLock()
+		defer globalMutex.RUnlock()
+		// A host accepted for a request has only the characters of a host name (or is an IP): nothing else
+		// reaches the sites nor the placeholders of the rewrites.
+		if valid, wildcard, subdomain, domain := host(h); valid && !(validHostChars(subdomain) && validHostChars(domain) && (wildcard == "" || validHostChars(strings.TrimPrefix(wildcard, "*.")) || wildcard == "*")) {
+			if _, err := netip.ParseAddr(domain); err != nil {
+				t.Fatalf("host(%q) accepted: %q %q %q", h, wildcard, subdomain, domain)
+			}
+		}
 		hostOk(h, true)
 	})
 }
@@ -84,7 +94,7 @@ func FuzzValidators(f *testing.F) {
 	f.Fuzz(func(t *testing.T, kind, k, v string) {
 		chk, ok := subdomainContentCheckers[kind]
 		if !ok || kind == "!" {
-			return // "!" lanza Certbot
+			return // "!" runs Certbot
 		}
 		var val interface{} = v
 		if kind == "-" || kind == "&" {
@@ -94,9 +104,9 @@ func FuzzValidators(f *testing.F) {
 	})
 }
 
-// Altas y bajas de IPs denegadas, respuestas por código HTTP y reemplazos de
-// caracteres: también se ejecutan al cargar turbo.config, así que un panic
-// tumbaría el arranque.
+// Adding and deleting denied IPs, responses per HTTP code and character
+// replacements: they also run when turbo.config is loaded, so a panic would
+// bring the startup down.
 func FuzzAdminHandlers(f *testing.F) {
 	f.Add("@", "203.0.113.7", "9999999999")
 	f.Add("@", "::", "9999999999")

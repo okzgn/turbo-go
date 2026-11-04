@@ -1,28 +1,69 @@
-# Unidad systemd de referencia para Turbo.
+# Reference systemd unit for Turbo.
 #
-# Instalación (ejemplo con el binario y los sitios en /home/server/):
+# Installation (example with the sites in /home/server/):
 #   sudo useradd --system --home-dir /home/server --shell /usr/sbin/nologin turbo
-#   sudo chown -R turbo:turbo /home/server
+#   sudo install -o root -g root -m 0755 turbo /usr/local/bin/turbo
+#   sudo mkdir -p /home/server && sudo chown -R turbo:turbo /home/server
+#   sudo install -d -o root -g root -m 0755 /home/server/turbo.dev
+#   sudo install -d -o root -g root -m 0755 /etc/turbo
+#   sudo install -o root -g root -m 0600 /dev/null /etc/turbo/credentials
+#   sudoedit /etc/turbo/credentials   # TURBO_USER=<user> and TURBO_PASSWORD=<password>, one per line
 #   sudo cp turbo.service /etc/systemd/system/
 #   sudo systemctl daemon-reload && sudo systemctl enable --now turbo
-#   journalctl -u turbo -f     # mensajes de Turbo (stdout) con nivel y hora
+#   journalctl -u turbo -f     # Turbo's messages (stdout) with level and time
 #
-# Turbo corre sin privilegios: CAP_NET_BIND_SERVICE le deja abrir los puertos
-# 80 y 443. Los CGI y Certbot se ejecutan como el usuario turbo. Certbot
-# trabaja en turbo.certificates/ dentro del directorio de sitios; si se usa
-# otra configuración de Certbot que escriba en /etc/letsencrypt, añádala a
-# ReadWritePaths.
+# turbo.dev has to exist and belong to root: the service doesn't start without
+# it. If it were missing, a CGI could create it and customize the panel with it.
 #
-# El panel (/admin:) debe tener un host propio que no sirva ningún sitio, por
-# ejemplo admin.ejemplo.com con su certificado, configurado en "Dónde responde
-# el panel" (PA): con PA vacío responde en los hosts de los sitios y una
-# página servida por Turbo comparte su origen. Turbo lo avisa al arrancar.
+# Credentials: with /etc/turbo/credentials, the panel never answers with the
+# default ones (Turbo/Admin), not even before the first login. Those variables
+# override turbo.config at every start: to change them, edit the file and
+# restart (a change from the panel lasts until the next start). Or, after the
+# first login, change the user and the password from the panel, save the
+# configuration and delete the file: from then on turbo.config rules.
 #
-# Detrás de un proxy, Turbo puede escuchar en otras direcciones, por ejemplo:
+# Turbo runs without privileges: CAP_NET_BIND_SERVICE lets it open ports 80
+# and 443, and Turbo removes it from what the programs it runs inherit. The
+# binary belongs to root, outside the sites folder: a CGI can't replace it.
+#
+# Trust model: the CGIs (PHP, etc.) and Certbot run as the turbo user, so a
+# CGI can modify the sites, turbo.config and the certificates, and read
+# Turbo's environment (the credentials of /etc/turbo/credentials included).
+# The panel's interface, customized in turbo.dev/, is read-only for the
+# service. If a site is not trusted, give it another server, or a user of its
+# own behind a proxy.
+#
+# If you change the sites directory (M, in the panel) to a folder outside
+# /home/server, also change WorkingDirectory, ReadWritePaths and ReadOnlyPaths
+# here (the turbo.dev of that folder, created by root): otherwise the service
+# can't write there and that turbo.dev is not read-only.
+#
+# On stop (systemctl stop), systemd sends SIGTERM only to Turbo (KillMode=mixed),
+# which lets the requests in progress, the CGIs' included, finish for up to
+# 10 s; whatever is still running after that gets SIGKILL.
+#
+# Certbot works in turbo.certificates/ inside the sites directory. With
+# NoNewPrivileges, the snap Certbot doesn't work: install it with apt or with
+# pip, its DNS plugins too (python3-certbot-dns-*). If another Certbot
+# configuration writes to /etc/letsencrypt, add it to ReadWritePaths.
+#
+# PHP-CGI: /tmp is private to the service (PrivateTmp), so file uploads work.
+# Keep the sessions inside /home/server (session.save_path in php.ini), or add
+# their folder to ReadWritePaths.
+#
+# The panel (/admin:) must have a host of its own that serves no site, for
+# example admin.example.com, set in "Where the panel answers" (PA): with PA
+# empty it answers on the hosts of the sites, and a page served by Turbo shares
+# its origin. Turbo warns about it at startup. Its certificate is issued from
+# the panel ("Panel certificate") and kept in turbo.panel/ inside the sites
+# directory; with it, the panel redirects to HTTPS and sends HSTS. Over HTTP,
+# the credentials and the session travel in the clear.
+#
+# Behind a proxy, Turbo can listen on other addresses, for example:
 #   Environment=TURBO_HTTP_ADDR=127.0.0.1:8080
 #   Environment=TURBO_HTTPS_ADDR=127.0.0.1:8443
-# Solo si las dos usan puertos por encima de 1023 deja de necesitar
-# CAP_NET_BIND_SERVICE: sin TURBO_HTTPS_ADDR, HTTPS sigue en :443.
+# Only if both use ports above 1023 does it no longer need
+# CAP_NET_BIND_SERVICE: without TURBO_HTTPS_ADDR, HTTPS stays on :443.
 
 [Unit]
 Description=Turbo
@@ -34,12 +75,16 @@ Type=simple
 User=turbo
 Group=turbo
 WorkingDirectory=/home/server/
-ExecStart=/home/server/turbo
+ExecStart=/usr/local/bin/turbo
+EnvironmentFile=-/etc/turbo/credentials
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
 ProtectSystem=strict
 ReadWritePaths=/home/server/
+ReadOnlyPaths=/home/server/turbo.dev
+PrivateTmp=true
+KillMode=mixed
 Restart=on-failure
 RestartSec=5
 

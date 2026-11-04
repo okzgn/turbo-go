@@ -36,6 +36,7 @@ import (
 	"log/slog"
 	"mime"
 	"net"
+	"net/netip"
 	"os"
 	"path"
 	"path/filepath"
@@ -49,7 +50,7 @@ import (
 	"turbo/customNetHttp"
 )
 
-const passwordHashIterations = 600000 // PBKDF2-HMAC-SHA256 (DP12)
+const passwordHashIterations = 600000 // PBKDF2-HMAC-SHA256
 
 var (
 	// internalAuth authorizes the validators that Turbo runs itself: while loading turbo.config, and in the
@@ -59,6 +60,11 @@ var (
 	// verifiedPassword remembers the last password that matched panelPasswordHash, so checking it again
 	// doesn't cost a PBKDF2; a wrong password always does.
 	verifiedPassword atomic.Pointer[passwordCheck]
+
+	// verifiedLogin is verifiedPassword for logins, together with the username: a login with the right password
+	// and a wrong username costs a PBKDF2, like any other failed login, so its timing doesn't tell whether the
+	// password alone is right.
+	verifiedLogin atomic.Pointer[passwordCheck]
 
 	// passwordHashSlots bounds the PBKDF2 checks running at once (half the CPUs): failed logins wait their turn
 	// instead of taking every core.
@@ -81,15 +87,23 @@ func console(responseWriter customNetHttp.ResponseWriter, request *customNetHttp
 		return false
 	}
 
-	// The panel can't be framed by another site and isn't cached (also its 404 outside PA).
+	// The panel can't be framed by another site and isn't cached (also its 404 outside PA), no browser guesses
+	// another type for its answers than the one they say, and only its own pages run scripts (panelCSP).
 	panelHeaders := responseWriter.Header()
 	panelHeaders.Set("X-Frame-Options", "DENY")
-	panelHeaders.Set("Content-Security-Policy", "frame-ancestors 'none'")
+	panelHeaders.Set("Content-Security-Policy", panelCSP)
 	panelHeaders.Set("Cache-Control", "no-store")
+	panelHeaders.Set("X-Content-Type-Options", "nosniff")
 
-	if !panelAllowed(request) { // PA: the panel answers only on the listed hosts or networks (DP7)
-		reqMsg(responseWriter, request, 404)
+	if !panelAllowed(request) { // PA: the panel answers only on the listed hosts or networks
+		reqMsg(responseWriter, 404)
 		return true
+	}
+	if request.TLS == nil && panelHTTPSRedirect(responseWriter, request) {
+		return true
+	}
+	if request.TLS != nil && panelAccess.Load().hosts[requestHostName(request.Host)] { // Its own host: always HTTPS
+		panelHeaders.Set("Strict-Transport-Security", "max-age=31536000")
 	}
 
 	request.RequestURI = cutAt(request.RequestURI[prefixLen:], '?')
@@ -104,35 +118,106 @@ func console(responseWriter customNetHttp.ResponseWriter, request *customNetHttp
 	return true
 }
 
+// panelHTTPSRedirect sends a panel request that came over HTTP to HTTPS, on the host it asked for, when a
+// certificate covers that host (the panel's own or a site's) and HTTPS is open: 301 for GET and HEAD, 308 for the
+// rest, which keeps the method and the body.
+func panelHTTPSRedirect(responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request) bool {
+	hostname := hostWithoutPort(request)
+	if certificateFor(hostname) == nil || !httpsListening.Load() {
+		return false
+	}
+	code := customNetHttp.StatusPermanentRedirect
+	if request.Method == customNetHttp.MethodGet || request.Method == customNetHttp.MethodHead {
+		code = customNetHttp.StatusMovedPermanently
+	}
+	customNetHttp.Redirect(responseWriter, request, "https://"+hostname+httpsPortSuffix()+request.RequestURI, code)
+	return true
+}
+
+// panelCSP is the Content-Security-Policy of the answers on the panel's origin that are not its pages: its
+// errors, its API answers and, on its own host, everything else. An error template is HTML that the panel's
+// session can set without the password; on the panel's origin, a script in it could read the panel. Without
+// scripts, frames, forms or plugins, a template keeps its styles and data: images.
+const panelCSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+
+// panelPageCSP is the Content-Security-Policy of the panel's own pages, which run their scripts.
+const panelPageCSP = "frame-ancestors 'none'"
+
+// panelPageWriter gives a page of the panel panelPageCSP only when it is served: an error written in its place
+// (the error template) keeps panelCSP.
+type panelPageWriter struct {
+	customNetHttp.ResponseWriter
+	wroteHeader bool
+}
+
+func (w *panelPageWriter) WriteHeader(code int) {
+	if !w.wroteHeader && code < 300 {
+		w.Header().Set("Content-Security-Policy", panelPageCSP)
+	}
+	w.wroteHeader = true
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *panelPageWriter) Write(data []byte) (int, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(customNetHttp.StatusOK)
+	}
+	return w.ResponseWriter.Write(data)
+}
+
+// Unwrap lets ResponseController reach the connection's writer.
+func (w *panelPageWriter) Unwrap() customNetHttp.ResponseWriter { return w.ResponseWriter }
+
 func consoleFiles(panelName string, requestPath string, responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request) {
+	responseWriter = &panelPageWriter{ResponseWriter: responseWriter}
+	// The path follows the rules of a site's files: decoded, without "..", "\\" or control characters and, on
+	// Windows, without ":" nor device names. Cleaned by itself, a path that started with "/" was taken on Windows
+	// for a network path and could leave turbo.dev/<panel>/, and a device name was opened as a file.
+	cleanPath, ok := cleanRequestPath("/" + requestPath)
+	if !ok {
+		reqMsg(responseWriter, 404)
+		return
+	}
 	// Turbo Dev: a file in turbo.dev/<panel>/ replaces the embedded one; what is missing there comes from the
 	// embedded copy.
-	devPath := sitesDir.Get() + putSlash(devGUIDirName) + putSlash(panelName) + filepath.Clean("/" + requestPath)[1:]
-	if info, err := os.Stat(devPath); err == nil && !info.IsDir() {
+	devPath := sitesDir.Get() + putSlash(devGUIDirName) + putSlash(panelName) + cleanPath[1:]
+	if info, err := os.Stat(devPath); err == nil && info.Mode().IsRegular() {
 		customNetHttp.ServeFile(responseWriter, request, devPath)
 		return
 	}
 	// Turbo Dev end
 
-	if content, err := fs.ReadFile(embeddedGUI, path.Join(devGUIDirName, panelName, path.Clean("/"+requestPath))); err == nil {
+	if content, err := fs.ReadFile(embeddedGUI, path.Join(devGUIDirName, panelName, cleanPath)); err == nil {
 		customNetHttp.ServeContent(responseWriter, request, requestPath, time.Time{}, bytes.NewReader(content))
 		return
 	}
 
-	reqMsg(responseWriter, request, 404)
+	reqMsg(responseWriter, 404)
 }
 
-// sessionCookieName holds the panel session. Its path is "/" because a cookie for "/admin:" would not be sent
-// to "/admin:inside:..." (RFC 6265 path matching); dynamic removes it before running a CGI.
-const sessionCookieName = "turbo_session"
+// The panel session cookie: sessionCookieName over HTTP, and sessionCookieNameTLS over TLS, a "__Host-" cookie
+// that browsers only take from the host itself (Secure, Path=/ and no Domain), so another subdomain can't set
+// one in its place. Its path is "/" because a cookie for "/admin:" would not be sent to "/admin:inside:..." (RFC
+// 6265 path matching); dynamic removes it before running a CGI.
+const (
+	sessionCookieName    = "turbo_session"
+	sessionCookieNameTLS = "__Host-turbo_session"
+)
 
-// loginMaxBodyBytes bounds the body of a login, which is read before anything is checked (H46).
+// sessionLifetime is how long a session lasts without requests.
+const sessionLifetime = 600
+
+// loginMaxBodyBytes bounds the body of a login, which is read before anything is checked.
 const loginMaxBodyBytes = 4096
 
 // sessionCookie returns the Set-Cookie value for the panel session. It has no Max-Age, as the server renews
 // the session on each request; deleteIt expires it at once.
 func sessionCookie(token string, deleteIt bool, request *customNetHttp.Request) string {
-	cookie := sessionCookieName + "=" + token + "; Path=/; HttpOnly; SameSite=Strict"
+	name := sessionCookieName
+	if request.TLS != nil {
+		name = sessionCookieNameTLS
+	}
+	cookie := name + "=" + token + "; Path=/; HttpOnly; SameSite=Strict"
 	if deleteIt {
 		cookie += "; Max-Age=0"
 	}
@@ -143,24 +228,69 @@ func sessionCookie(token string, deleteIt bool, request *customNetHttp.Request) 
 }
 
 // sessionKey is the key of a session in signedInTokens: the client's IP and the token, with a separator that
-// neither has, so that no other IP and token make the same key (H22).
+// neither has, so that no other IP and token make the same key.
 func sessionKey(clientIP string, token string) string {
 	return clientIP + "|" + token
 }
 
-// sessionTokenOf returns the session token of a panel request: the cookie, or the "ok" header that API
-// clients send. The token is never read from the URL.
-func sessionTokenOf(request *customNetHttp.Request) (token string, fromCookie bool) {
-	if cookie, err := request.Cookie(sessionCookieName); err == nil && cookie.Value != "" {
-		return cookie.Value, true
+// panelSession finds the session of a panel request: the first session cookie, of either name, or else the "ok"
+// header that API clients send, whose token is an unexpired session of the client's IP. Every session cookie is
+// tried, as a cookie with the same name set by another subdomain may come first. key is "" without a session;
+// viaCookie says the session came in a cookie, and hasCookie that the request had a session cookie, valid or not.
+// The token is never read from the URL.
+func panelSession(request *customNetHttp.Request, clientIP string) (key string, viaCookie bool, hasCookie bool) {
+	now := time.Now().Unix()
+	globalMutex.RLock()
+	defer globalMutex.RUnlock()
+	valid := func(token string) bool {
+		expiry, found := signedInTokens[sessionKey(clientIP, token)]
+		return token != "" && found && expiry > now
 	}
-	return request.Header.Get(sessionHeaderName), false
+	for _, cookie := range request.Cookies() {
+		if cookie.Name != sessionCookieName && cookie.Name != sessionCookieNameTLS {
+			continue
+		}
+		hasCookie = true
+		if valid(cookie.Value) {
+			return sessionKey(clientIP, cookie.Value), true, true
+		}
+	}
+	if token := request.Header.Get(sessionHeaderName); valid(token) {
+		return sessionKey(clientIP, token), false, hasCookie
+	}
+	return "", false, hasCookie
+}
+
+// renewSession extends a session by sessionLifetime from now, if it is still open: a request that found it
+// valid doesn't bring back a session closed meanwhile. Only requests of the panel's own origin renew it (or
+// those without Sec-Fetch-Site, from API clients): a resource of the panel loaded by another page doesn't.
+func renewSession(key string, request *customNetHttp.Request) {
+	if fetchSite := request.Header.Get("Sec-Fetch-Site"); fetchSite != "" && fetchSite != "same-origin" && fetchSite != "none" {
+		return
+	}
+	beforeSessionRenewal()
+	now := time.Now().Unix()
+	withGlobalLock(func() {
+		if expiry, found := signedInTokens[key]; found && expiry > now {
+			signedInTokens[key] = now + sessionLifetime
+		}
+	})
+}
+
+// closeOtherSessions closes every session but keep (all with ""), after the credentials change. Callers hold the
+// global lock.
+func closeOtherSessions(keep string) {
+	for key := range signedInTokens {
+		if key != keep {
+			delete(signedInTokens, key)
+		}
+	}
 }
 
 // sameOriginRequest reports whether the browser says the request comes from the panel's own origin. The
 // session cookie is sent by itself, and SameSite=Strict doesn't stop other origins of the same site (another
 // subdomain served here), so actions authenticated with it need this (CSRF). It can't tell the panel from a
-// page served on the same host: that needs a host of its own for the panel in PA (D3, warnPanelOrigin).
+// page served on the same host: that needs a host of its own for the panel in PA (warnPanelOrigin).
 func sameOriginRequest(request *customNetHttp.Request) bool {
 	if fetchSite := request.Header.Get("Sec-Fetch-Site"); fetchSite != "" {
 		return fetchSite == "same-origin" || fetchSite == "none"
@@ -182,61 +312,52 @@ func consoleActions(actionPath string, responseWriter customNetHttp.ResponseWrit
 		request.RequestURI = panelPageName
 	}
 
-	cleanOldValues(&signedInTokens)
-
-	sessionToken, fromCookie := sessionTokenOf(request)
+	// Expired sessions are no longer valid; main's periodic task removes them, so a panel request takes no lock
+	// for that.
 	clientIP := ipAddr(request.RemoteAddr)
-
-	globalMutex.RLock()
-	_, isSessionValid := signedInTokens[sessionKey(clientIP, sessionToken)]
-	globalMutex.RUnlock()
-
-	responseWriter.Header().Set("Access-Control-Allow-Origin", "default://home")
-	responseWriter.Header().Set("Access-Control-Allow-Headers", "ok") // This is to accept ok header from default://home
+	currentSession, fromCookie, hasSessionCookie := panelSession(request, clientIP)
+	isSessionValid := currentSession != ""
 
 	switch actionPath {
 	case "signout":
 		if request.Method != customNetHttp.MethodPost { // A link or an image of another page doesn't sign out
 			return false
 		}
+		if hasSessionCookie && !sameOriginRequest(request) { // Another page can't close the session
+			reqMsg(responseWriter, 403)
+			return true
+		}
 		if isSessionValid {
-			globalMutex.Lock()
-			delete(signedInTokens, sessionKey(clientIP, sessionToken))
-			globalMutex.Unlock()
+			withGlobalLock(func() { delete(signedInTokens, currentSession) })
 		}
 		responseWriter.Header().Add("Set-Cookie", sessionCookie("", true, request))
 
-		consoleHtmlRedir("/"+adminPathPrefix+":", responseWriter, request)
+		consoleHTMLRedir("/"+adminPathPrefix+":", responseWriter, request)
 		return true
 
 	case adminInsideName:
-		/*if len(I) != 0 && !a { // Only for logging from one IP at time
-			w.Write([]byte("<p data-err>Inautorizado</p>"))
-			return true
-		}*/
-
 		if isSessionValid {
 			if fromCookie && request.Method == customNetHttp.MethodPost && !sameOriginRequest(request) {
-				reqMsg(responseWriter, request, 403)
+				reqMsg(responseWriter, 403)
 				return true
 			}
-			globalMutex.Lock()
-			signedInTokens[sessionKey(clientIP, sessionToken)] = time.Now().Unix() + 600
-			globalMutex.Unlock()
+			renewSession(currentSession, request)
 
-			if consoleActionsApi(request.RequestURI, responseWriter, request) {
+			if consoleActionsAPI(request.RequestURI, currentSession, responseWriter, request) {
 				return true
 			}
 
 			consoleFiles(adminInsideName, request.RequestURI, responseWriter, request)
 			return true
 		}
-		consoleHtmlRedir("/"+adminPathPrefix+":", responseWriter, request)
+		// The same body as always, for the pages that look for it; the GUI looks for the header.
+		responseWriter.Header().Set("X-Turbo-Login", "required")
+		consoleHTMLRedir("/"+adminPathPrefix+":", responseWriter, request)
 		return true
 	case "":
 		// Login: only POST /admin:, with the credentials in a small body (never in the URL, which turbo.visits
 		// records), read before anything is checked.
-		if request.Method != customNetHttp.MethodPost || colonIdx != -1 { // Not "/admin::..." (H60)
+		if request.Method != customNetHttp.MethodPost || colonIdx != -1 { // Not "/admin::..."
 			return false
 		}
 		request.Body = customNetHttp.MaxBytesReader(responseWriter, request.Body, loginMaxBodyBytes)
@@ -249,36 +370,35 @@ func consoleActions(actionPath string, responseWriter customNetHttp.ResponseWrit
 		if err != nil {
 			var tooLarge *customNetHttp.MaxBytesError
 			if errors.As(err, &tooLarge) || errors.Is(err, customNetHttp.ErrMessageTooLarge) {
-				reqMsg(responseWriter, request, 413)
+				reqMsg(responseWriter, 413)
 			} else {
-				reqMsg(responseWriter, request, 400)
+				reqMsg(responseWriter, 400)
 			}
 			return true
 		}
 		_, hasUser := request.PostForm["u"]
 		_, hasPassword := request.PostForm["p"]
 		if hasUser && hasPassword {
-			if retryAfter := startLoginAttempt(clientIP); retryAfter > 0 { // H7: no PBKDF2 for a blocked IP
+			if retryAfter := startLoginAttempt(clientIP); retryAfter > 0 { // no PBKDF2 for a blocked IP
 				responseWriter.Header().Set("Retry-After", strconv.FormatInt(retryAfter, 10))
-				reqMsg(responseWriter, request, 429)
+				reqMsg(responseWriter, 429)
 				return true
 			}
-			userMatches := subtle.ConstantTimeCompare([]byte(request.PostForm["u"][0]), []byte(panelUser.Get())) == 1
-			passwordOK, busy := checkPassword(request.PostForm["p"][0], passwordSlotWait)
+			loginOK, busy := checkLogin(request.PostForm["u"][0], request.PostForm["p"][0], passwordSlotWait)
 			if busy {
 				finishLoginAttempt(clientIP, false)
 				responseWriter.Header().Set("Retry-After", "2")
-				reqMsg(responseWriter, request, 503)
+				reqMsg(responseWriter, 503)
 				return true
 			}
-			if passwordOK && userMatches {
+			if loginOK {
 				finishLoginAttempt(clientIP, false)
 				forgetLoginFailures(clientIP)
 				now := time.Now().Unix()
 				token := newSessionToken()
 
 				globalMutex.Lock()
-				signedInTokens[sessionKey(clientIP, token)] = now + 600
+				signedInTokens[sessionKey(clientIP, token)] = now + sessionLifetime
 				globalMutex.Unlock()
 				// The browser panel uses the cookie; API clients send the token in the "ok" header.
 				responseWriter.Header().Add("Set-Cookie", sessionCookie(token, false, request))
@@ -293,9 +413,9 @@ func consoleActions(actionPath string, responseWriter customNetHttp.ResponseWrit
 	return false
 }
 
-// Failed logins per IP (H7): after loginMaxFailures within loginFailureWindow, the IP gets 429 without any
+// Failed logins per IP: after loginMaxFailures within loginFailureWindow, the IP gets 429 without any
 // PBKDF2 for a while that doubles with each block (1, 2, 4... minutes, up to 15). A correct login forgets them.
-// The attempts still being checked count too, so that concurrent ones can't add up to more (H57).
+// The attempts still being checked count too, so that concurrent ones can't add up to more.
 const (
 	loginMaxFailures   = 5
 	loginFailureWindow = 10 * time.Minute
@@ -320,6 +440,7 @@ var (
 // starting it, the seconds to wait: what is left of its block, or passwordSlotWait while the failures and the
 // attempts being checked already reach loginMaxFailures.
 func startLoginAttempt(ip string) int64 {
+	ip = limiterKey(ip)
 	loginFailuresMutex.Lock()
 	defer loginFailuresMutex.Unlock()
 	now := time.Now()
@@ -344,6 +465,7 @@ func startLoginAttempt(ip string) int64 {
 // finishLoginAttempt ends an attempt of ip started by startLoginAttempt and, if it failed, counts the failure and
 // blocks ip when it reaches loginMaxFailures.
 func finishLoginAttempt(ip string, failed bool) {
+	ip = limiterKey(ip)
 	loginFailuresMutex.Lock()
 	defer loginFailuresMutex.Unlock()
 	failures, found := loginFailuresByIP[ip]
@@ -369,6 +491,7 @@ func finishLoginAttempt(ip string, failed bool) {
 
 // forgetLoginFailures clears the failed logins of ip after a correct one.
 func forgetLoginFailures(ip string) {
+	ip = limiterKey(ip)
 	loginFailuresMutex.Lock()
 	delete(loginFailuresByIP, ip)
 	loginFailuresMutex.Unlock()
@@ -387,14 +510,14 @@ func cleanLoginFailures() {
 	}
 }
 
-// warnDefaultCredentials logs when the panel still has the default username and password (D2).
+// warnDefaultCredentials logs when the panel still has the default username and password.
 func warnDefaultCredentials() {
 	if panelUser.Get() == "Turbo" && passwordMatches("Admin") {
-		slog.Warn("Se usan las credenciales por defecto (Turbo/Admin): cámbielas desde el panel o con TURBO_USER y TURBO_PASSWORD.")
+		slog.Warn("The default credentials (Turbo/Admin) are in use: change them from the panel or with TURBO_USER and TURBO_PASSWORD.")
 	}
 }
 
-func consoleHtmlRedir(redirectURL string, responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request) {
+func consoleHTMLRedir(redirectURL string, responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request) {
 	responseWriter.Header().Set(contentTypeHeader, "text/html; charset=UTF-8")
 	respond(responseWriter, "<meta http-equiv='refresh' content='0; URL="+redirectURL+"'/>")
 }
@@ -405,6 +528,7 @@ type panelAccessList struct {
 	setting  string
 	hosts    map[string]bool
 	networks []*net.IPNet
+	ipHosts  []string // Hosts that are IP addresses, compared with Host as any host (not with the client's IP)
 }
 
 var panelAccess atomic.Pointer[panelAccessList]
@@ -424,7 +548,7 @@ func parsePanelAccess(setting string) (*panelAccessList, string) {
 		return list, ""
 	}
 	if len(setting) > 1024 {
-		return nil, "Lista demasiado larga"
+		return nil, "List too long"
 	}
 	var entries []string
 	for _, entry := range strings.Split(setting, ",") {
@@ -432,22 +556,30 @@ func parsePanelAccess(setting string) (*panelAccessList, string) {
 		if entry == "" {
 			continue
 		}
-		if strings.IndexByte(entry, '/') != -1 {
+		switch {
+		case entry == "*": // Alone it means no restriction; in a list it would match nothing
+			return nil, "The * wildcard is only valid as the only value (no restriction)"
+		case strings.IndexByte(entry, '*') != -1: // The Host is compared exactly: a wildcard would never match
+			return nil, "Wildcards not allowed in panel hosts: " + entry
+		case strings.IndexByte(entry, '/') != -1:
 			_, network, err := net.ParseCIDR(entry)
 			if err != nil {
-				return nil, "Red incorrecta: " + entry
+				return nil, "Invalid network: " + entry
 			}
 			list.networks = append(list.networks, network)
-		} else {
-			if valid, _ := hostOk(entry, false); !valid && net.ParseIP(entry) == nil {
-				return nil, "Host incorrecto: " + entry
+		default:
+			if address, err := netip.ParseAddr(strings.TrimSuffix(strings.TrimPrefix(entry, "["), "]")); err == nil {
+				entry = address.Unmap().String() // As panelAllowed compares it: "[::1]" and "::1" are the same host
+				list.ipHosts = append(list.ipHosts, entry)
+			} else if valid, _ := hostOk(entry, false); !valid {
+				return nil, "Invalid host: " + entry
 			}
 			list.hosts[entry] = true
 		}
 		entries = append(entries, entry)
 	}
 	if len(entries) > 32 {
-		return nil, "Más de 32 hosts o redes"
+		return nil, "More than 32 hosts or networks"
 	}
 	list.setting = strings.Join(entries, ",")
 	return list, ""
@@ -462,24 +594,32 @@ func isClientIP(ip string, request *customNetHttp.Request) bool {
 // panelAllowed reports whether the panel answers this request under "PA": on one of its hosts, if it has any,
 // and from one of its networks, if it has any.
 func panelAllowed(request *customNetHttp.Request) bool {
-	list := panelAccess.Load()
-	if len(list.hosts) > 0 && !list.hosts[strings.ToLower(requestHostname(request))] {
-		return false
+	return panelAccessProblem(panelAccess.Load(), request) == ""
+}
+
+// panelAccessProblem says why list leaves the request out (its host, or its IP), or "" if it lets it in.
+func panelAccessProblem(list *panelAccessList, request *customNetHttp.Request) string {
+	hostName := strings.ToLower(strings.TrimSuffix(strings.TrimPrefix(hostWithoutPort(request), "["), "]"))
+	if address, err := netip.ParseAddr(hostName); err == nil {
+		hostName = address.Unmap().String()
+	}
+	if len(list.hosts) > 0 && !list.hosts[hostName] {
+		return "the host " + hostName + " is not in the list"
 	}
 	if len(list.networks) == 0 {
-		return true
+		return ""
 	}
 	clientIP := net.ParseIP(ipAddr(request.RemoteAddr))
 	for _, network := range list.networks {
 		if clientIP != nil && network.Contains(clientIP) {
-			return true
+			return ""
 		}
 	}
-	return false
+	return "the IP " + ipAddr(request.RemoteAddr) + " is not in any network of the list"
 }
 
 // panelHostConflict says which host of the list serves a site, which would put the panel in the same origin as
-// that site's pages (D3), or "" if none does. Callers hold the global lock.
+// that site's pages, or "" if none does. Callers hold the global lock.
 func panelHostConflict(list *panelAccessList) string {
 	hosts := make([]string, 0, len(list.hosts))
 	for hostName := range list.hosts {
@@ -488,7 +628,7 @@ func panelHostConflict(list *panelAccessList) string {
 	sort.Strings(hosts)
 	for _, hostName := range hosts {
 		if site := servingSite(hostName); site != "" {
-			return "El host del panel " + hostName + " sirve el sitio " + site + ": use un host que no sirva contenido"
+			return "The panel host " + hostName + " serves the site " + site + ": use a host that serves no content"
 		}
 	}
 	return ""
@@ -505,14 +645,14 @@ func panelHostServedBy(siteKey string) string {
 	return ""
 }
 
-// warnPanelOrigin logs when the panel shares an origin with the sites (D3): PA has no host, or one of its hosts
+// warnPanelOrigin logs when the panel shares an origin with the sites: PA has no host, or one of its hosts
 // serves a site (accepted from turbo.config, so as not to break it). Callers hold the global read lock.
 func warnPanelOrigin() {
 	list := panelAccess.Load()
 	if len(list.hosts) == 0 {
-		slog.Warn("El panel responde en los mismos hosts que los sitios: una página servida por Turbo podría usar su sesión. Configure en PA un host dedicado al panel.")
+		slog.Warn("The panel answers on the same hosts as the sites: a page served by Turbo could use its session. Set a host dedicated to the panel in PA.")
 	} else if conflict := panelHostConflict(list); conflict != "" {
-		slog.Warn(conflict + " (PA de turbo.config: se mantiene, pero el panel comparte origen con ese sitio)")
+		slog.Warn(conflict + " (PA of turbo.config: kept, but the panel shares its origin with that site)")
 	}
 }
 
@@ -524,12 +664,16 @@ func newSessionToken() string {
 }
 
 // hashPassword returns "pbkdf2-sha256$<iterations>$<salt>$<key>" (standard base64), the "PH" format of
-// turbo.config, with a random 16-byte salt and a 32-byte key.
-func hashPassword(password string) string {
+// turbo.config, with a random 16-byte salt and a 32-byte key. PBKDF2 can fail (in FIPS 140 mode, for one), and
+// then there is no hash to use.
+func hashPassword(password string) (string, error) {
 	salt := make([]byte, 16)
 	rand.Read(salt) // Never fails (crypto/rand)
-	key, _ := derivePasswordKey(password, salt, passwordHashIterations, 32)
-	return "pbkdf2-sha256$" + strconv.Itoa(passwordHashIterations) + "$" + base64.StdEncoding.EncodeToString(salt) + "$" + base64.StdEncoding.EncodeToString(key)
+	key, err := derivePasswordKey(password, salt, passwordHashIterations, 32)
+	if err != nil {
+		return "", err
+	}
+	return "pbkdf2-sha256$" + strconv.Itoa(passwordHashIterations) + "$" + base64.StdEncoding.EncodeToString(salt) + "$" + base64.StdEncoding.EncodeToString(key), nil
 }
 
 // parsePasswordHash splits a hash made by hashPassword.
@@ -553,31 +697,40 @@ func parsePasswordHash(hash string) (iterations int, salt []byte, key []byte, ok
 	return iterations, salt, key, true
 }
 
-// setPanelPassword replaces the panel password; only its hash is kept.
-func setPanelPassword(password string) {
-	applyPasswordHash(hashPassword(password), password)
+// setPanelPassword replaces the panel password; only its hash is kept. If it can't be hashed, the password in
+// use stays and the error is returned.
+func setPanelPassword(password string) error {
+	hash, err := hashPassword(password)
+	if err != nil {
+		return err
+	}
+	applyPasswordHash(hash, password)
+	return nil
 }
 
 // applyPasswordHash makes hash, made by hashPassword from password, the panel's password.
+// The current username and the new password are a pair that matches: a login with them needs no PBKDF2.
 func applyPasswordHash(hash string, password string) {
 	panelPasswordHash.Set(hash)
 	verifiedPassword.Store(&passwordCheck{hash, sha256.Sum256([]byte(hash + "\x00" + password))})
+	verifiedLogin.Store(&passwordCheck{hash, sha256.Sum256([]byte(hash + "\x00" + panelUser.Get() + "\x00" + password))})
 }
 
-// newPasswordHash checks a new panel password and returns its hash, or why it can't be used. It costs two
-// PBKDF2, so setP runs it before taking the global lock (H16).
-func newPasswordHash(password string) (hash string, problem string) {
+// newPasswordHash checks a new panel password and returns its hash, or why it can't be used (problem), or the
+// error that kept it from being hashed. It costs two PBKDF2, so setP runs it before taking the global lock.
+func newPasswordHash(password string) (hash string, problem string, err error) {
 	if length := len(password); length < 1 || length > 24 {
-		return "", "Contraseña muy larga o corta"
+		return "", "Password too long or too short", nil
 	}
 	if passwordMatches(password) {
-		return "", "Contraseña sin cambios"
+		return "", "Password unchanged", nil
 	}
-	return hashPassword(password), ""
+	hash, err = hashPassword(password)
+	return hash, "", err
 }
 
-// passwordSlotWait is how long a password check from a request waits for a PBKDF2 slot before giving up with 503
-// (H7): a flood of logins can't keep the administrator waiting without limit.
+// passwordSlotWait is how long a password check from a request waits for a PBKDF2 slot before giving up with 503:
+// a flood of logins can't keep the administrator waiting without limit.
 const passwordSlotWait = 2 * time.Second
 
 // passwordMatches reports whether password is the panel's (or internalAuth), comparing in constant time. It
@@ -593,6 +746,28 @@ func checkPassword(password string, wait time.Duration) (matches bool, busy bool
 	if subtle.ConstantTimeCompare([]byte(password), []byte(internalAuth)) == 1 {
 		return true, false
 	}
+	return derivePasswordCheck(password, wait, true)
+}
+
+// checkLogin is checkPassword for a login: both the username and the password must match. Only a pair that
+// already matched skips the PBKDF2, so a wrong username costs the same as a wrong password.
+func checkLogin(user string, password string, wait time.Duration) (matches bool, busy bool) {
+	userMatches := subtle.ConstantTimeCompare([]byte(user), []byte(panelUser.Get())) == 1
+	hash := panelPasswordHash.Get()
+	sum := sha256.Sum256([]byte(hash + "\x00" + user + "\x00" + password))
+	if last := verifiedLogin.Load(); userMatches && last != nil && last.hash == hash && subtle.ConstantTimeCompare(last.sum[:], sum[:]) == 1 {
+		return true, false
+	}
+	passwordOK, busy := derivePasswordCheck(password, wait, false)
+	if passwordOK && userMatches {
+		verifiedLogin.Store(&passwordCheck{hash, sum})
+	}
+	return passwordOK && userMatches, busy
+}
+
+// derivePasswordCheck compares password with panelPasswordHash. With useCache, the last password that matched is
+// accepted without a PBKDF2.
+func derivePasswordCheck(password string, wait time.Duration, useCache bool) (matches bool, busy bool) {
 	// PBKDF2 uses the password as an HMAC key, padded with zeros: "x" and "x\x00" would match the same hash. No
 	// password can have a NUL (the panel rejects control characters, and an environment variable can't hold one).
 	if strings.IndexByte(password, 0) != -1 {
@@ -600,7 +775,7 @@ func checkPassword(password string, wait time.Duration) (matches bool, busy bool
 	}
 	hash := panelPasswordHash.Get()
 	sum := sha256.Sum256([]byte(hash + "\x00" + password))
-	if last := verifiedPassword.Load(); last != nil && last.hash == hash && subtle.ConstantTimeCompare(last.sum[:], sum[:]) == 1 {
+	if last := verifiedPassword.Load(); useCache && last != nil && last.hash == hash && subtle.ConstantTimeCompare(last.sum[:], sum[:]) == 1 {
 		return true, false
 	}
 	iterations, salt, key, ok := parsePasswordHash(hash)
@@ -642,49 +817,66 @@ func loadCredentials(settings map[string]interface{}) {
 			panelPasswordHash.Set(hash)
 			return
 		}
-		slog.Warn("PH incorrecto en turbo.config: se ignora")
+		slog.Warn("Invalid PH in turbo.config: ignored")
 	}
 	if password, isString := settings["P"].(string); isString && len(password) >= 1 && len(password) <= 24 {
-		slog.Warn("Contraseña en texto plano en turbo.config: se guardará solo su hash")
-		setPanelPassword(password)
+		slog.Warn("Plain-text password in turbo.config: only its hash will be saved")
+		if err := setPanelPassword(password); err != nil {
+			slog.Error("Can't hash the password of turbo.config: the previous one is kept", "error", err)
+		}
 	}
 }
 
 // uploadedFilePath returns where an uploaded file goes inside @. The browser sends the chosen folder as the
 // first segment of each name, so it is dropped ("site/css/a.css" -> "css/a.css"). Names that would leave @
-// ("..", absolute or with a volume) are rejected.
+// ("..", absolute or with a volume) are rejected, and so are those the file systems can't hold: a segment
+// longer than maxUploadNameSegment bytes or a path longer than maxUploadPath.
 func uploadedFilePath(name string) (string, bool) {
 	name = strings.ReplaceAll(name, "\\", "/")
 	if _, rest, found := strings.Cut(name, "/"); found {
 		name = rest
 	}
-	if name == "" || strings.HasPrefix(name, "/") || filepath.VolumeName(name) != "" || strings.IndexByte(name, ':') != -1 {
+	if name == "" || len(name) > maxUploadPath || strings.HasPrefix(name, "/") || filepath.VolumeName(name) != "" || strings.IndexByte(name, ':') != -1 {
 		return "", false
 	}
 	for _, segment := range strings.Split(name, "/") {
-		// Names that Windows treats specially are refused on every system, so the site can be moved (H47).
-		if segment == "" || segment == "." || segment == ".." || !pathSegmentAllowed(segment, true) {
+		// Names that Windows treats specially are refused on every system, so the site can be moved.
+		if segment == "" || segment == "." || segment == ".." || len(segment) > maxUploadNameSegment || !pathSegmentAllowed(segment, true) {
 			return "", false
 		}
 	}
 	return name, true
 }
 
+const (
+	maxUploadNameSegment = 255  // Bytes of a file or folder name: what ext4 allows (NTFS, 255 UTF-16 units)
+	maxUploadPath        = 1024 // Bytes of a path inside @, well below what Linux allows with the sites directory
+)
+
 // charsDecodedByValidator lists, per action, the parameters whose character replacements its validator undoes
 // itself; undoCharReplacements undoes them in all the others.
 var charsDecodedByValidator = map[string]map[string]bool{
 	"addRewrite": {"a": true, "b": true}, "addMIME": {"b": true}, "addHeader": {"b": true}, "addPreprocessor": {"b": true},
-	"addIndex": {"a": true}, "addCharsReplace": {"s": true, "d": true}, "delRewrite": {"a": true}, "delIndex": {"a": true},
-	"delCharsReplace": {"s": true},
+	"addIndex": {"a": true}, "delRewrite": {"a": true}, "delIndex": {"a": true},
+}
+
+// credentialParams are the parameters of the panel actions that carry a password besides those of set<KEY> (b):
+// the current password of the dangerous actions (dangerousActionPasswordOK) and the new username or password.
+var credentialParams = map[string]map[string]bool{
+	"setU": {"a": true}, "setP": {"a": true}, "addPreprocessor": {"c": true}, "delPreprocessor": {"b": true}, "delSite": {"b": true},
+	"cfgC": {"b": true}, "cfgPC": {"b": true},
 }
 
 // undoCharReplacements turns the character replacements of §2.1 of the API ("-.-" for ";" and the rest) back
-// into their characters in every parameter of a panel action, once, before the action reads them (H21).
+// into their characters in every parameter of a panel action, once, before the action reads them. The
+// credentials are never touched: the current password (b of the settings, and the parameter of the dangerous
+// actions) and the new username or password are used exactly as they come, as a token can't be told from text
+// typed on purpose. (hardUpload doesn't come here: none of its parameters are replaced.)
 func undoCharReplacements(request *customNetHttp.Request, apiPath string) {
 	globalMutex.RLock() // charReplacements
 	defer globalMutex.RUnlock()
 	for name, values := range request.Form {
-		if charsDecodedByValidator[apiPath][name] {
+		if charsDecodedByValidator[apiPath][name] || credentialParams[apiPath][name] || (strings.HasPrefix(apiPath, "set") && name == "b") {
 			continue
 		}
 		for i := range values {
@@ -699,10 +891,10 @@ func formRejected(responseWriter customNetHttp.ResponseWriter, request *customNe
 	var tooLarge *customNetHttp.MaxBytesError
 	if errors.As(err, &tooLarge) || errors.Is(err, customNetHttp.ErrMessageTooLarge) || strings.Contains(err.Error(), "too large") {
 		responseWriter.WriteHeader(413)
-		respond(responseWriter, "Longitud máxima de contenidos excedida")
+		respond(responseWriter, "Maximum body size exceeded")
 		return
 	}
-	badReq(responseWriter, request, "Parámetros incorrectos")
+	badReq(responseWriter, request, "Invalid parameters")
 }
 
 // formTextProblem checks every parameter of a panel request with textProblem and returns the first problem.
@@ -723,55 +915,205 @@ func formTextProblem(request *customNetHttp.Request, whitespace bool) string {
 // addSite creates a site from the panel: its folder with @ and its settings. Callers hold the global lock.
 func addSite(domain string) (bool, string) {
 	if siteExists(domain, "") {
-		return false, "Sitio existente."
+		return false, "Site already exists."
 	}
 	if valid, message := hostOk(domain, false); !valid {
 		return false, message
 	}
+	if problem := newSiteProblem(domain, ""); problem != "" {
+		return false, problem
+	}
 	// Subdomains map keys coincidence detection
 	if matched, matchedSite, _, subdomain := detectWildcards(domain, ""); matched {
 		if matched, _, _, matchedSite = detectWildcards(matchedSite, subdomain); matched {
-			return false, "Coincidencia con sitio: " + matchedSite + "." + subdomain
+			return false, "Matches site: " + matchedSite + "." + subdomain
 		}
 	}
 	constructSiteLocked(domain, "")
-	if panelHost := panelHostServedBy(domain); panelHost != "" { // D3: undone before anything reaches the disk
+	if panelHost := panelHostServedBy(domain); panelHost != "" { // undone before anything reaches the disk
 		deleteSiteLocked(domain, "")
-		return false, "El sitio serviría el host del panel " + panelHost + ": use otro host para el panel o para el sitio"
+		return false, "The site would serve the panel host " + panelHost + ": use another host for the panel or for the site"
 	}
 	if os.MkdirAll(sitesDir.Get()+changeWildcards(domain)+"/"+publicDirName+"/", 0755) != nil { // #nosec G301 -- public web content of a site, served by Turbo
 		deleteSiteLocked(domain, "")
-		return false, "Error al crear"
+		return false, "Error creating"
 	}
-	return true, "Sitio agregado"
+	return true, "Site added"
 }
 
 // addSubdomain creates a subdomain of an existing site from the panel. Callers hold the global lock.
 func addSubdomain(domain string, subdomain string) (bool, string) {
 	if _, exists := sitesMap[domain]; !exists {
-		return false, "Sitio inexistente"
+		return false, "Site not found"
 	}
 	if valid, message := hostOk(subdomain+"."+changeWildcards(domain, "x"), false); !valid { // A wildcard is only accepted at the beginning
 		return false, message
 	}
 	if siteExists(domain, subdomain) {
-		return false, "Subdominio existente"
+		return false, "Subdomain already exists"
+	}
+	if problem := newSiteProblem(domain, subdomain); problem != "" {
+		return false, problem
 	}
 	// Domains map keys coincidence detection
 	if matched, _, _, matchedSite := detectWildcards(subdomain+"."+domain, ""); matched && matchedSite != domain {
-		return false, "Coincidencia con sitio: " + matchedSite
+		return false, "Matches site: " + matchedSite
 	}
 	constructSiteLocked(domain, subdomain)
-	if panelHost := panelHostServedBy(subdomain + "." + domain); panelHost != "" { // D3: undone before anything reaches the disk
+	if panelHost := panelHostServedBy(subdomain + "." + domain); panelHost != "" { // undone before anything reaches the disk
 		deleteSiteLocked(domain, subdomain)
-		return false, "El subdominio serviría el host del panel " + panelHost + ": use otro host para el panel o para el subdominio"
+		return false, "The subdomain would serve the panel host " + panelHost + ": use another host for the panel or for the subdomain"
 	}
 	if os.MkdirAll(sitesDir.Get()+changeWildcards(domain)+"/"+changeWildcards(subdomain)+"/"+publicDirName+"/", 0755) != nil { // #nosec G301 -- public web content of a site, served by Turbo
 		deleteSiteLocked(domain, subdomain)
-		return false, "Error al crear"
+		return false, "Error creating"
 	}
-	return true, "Subdominio agregado"
+	return true, "Subdomain added"
 }
+
+// currentPasswordOK checks the current password (b) of a panel action as a login does: it counts for the
+// failed-login limit of the client's IP, which gets 429 without any PBKDF2 while it is blocked. When the password
+// isn't accepted, it answers the request itself and reports false.
+func currentPasswordOK(responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request, password string) bool {
+	clientIP := ipAddr(request.RemoteAddr)
+	if retryAfter := startLoginAttempt(clientIP); retryAfter > 0 {
+		responseWriter.Header().Set("Retry-After", strconv.FormatInt(retryAfter, 10))
+		reqMsg(responseWriter, 429)
+		return false
+	}
+	matches, busy := checkPassword(password, passwordSlotWait)
+	finishLoginAttempt(clientIP, !matches && !busy)
+	if busy {
+		responseWriter.Header().Set("Retry-After", "2")
+		reqMsg(responseWriter, 503)
+		return false
+	}
+	if !matches {
+		badReq(responseWriter, request, "Wrong current password")
+		return false
+	}
+	return true
+}
+
+// hardUpload replaces the public folder (@) of a site with the uploaded files, all at once: every name is
+// checked first, the files are written to a folder of their own next to @, and that folder takes the place of @
+// with a rename, holding the global lock and only if the site still exists, so a site deleted meanwhile doesn't
+// come back. Until then, @ is left as it was. It returns the status and the message of the response.
+func hardUpload(domain string, subdomain string, siteDir string, files []*customNetHttp.FileHeader) (int, string) {
+	type upload struct {
+		file *customNetHttp.FileHeader
+		path string
+	}
+	var uploads []upload
+	var discarded []string
+	// A file and a folder can't have the same name: the later one is discarded. Where the file system ignores
+	// case, names are compared that way.
+	foldCase := runtime.GOOS == "windows" || runtime.GOOS == "darwin"
+	filePaths, folderPaths := map[string]bool{}, map[string]bool{}
+	for _, uploadedFile := range files {
+		name := uploadedFile.Filename
+		if _, fileMetadata, err := mime.ParseMediaType(uploadedFile.Header.Get("Content-Disposition")); err == nil {
+			name = fileMetadata["filename"] // As sent: Filename drops the folders
+		}
+		relativePath, ok := uploadedFilePath(name)
+		key := relativePath
+		if foldCase {
+			key = strings.ToLower(key)
+		}
+		var folders []string // The folders the file goes in, none of which may be an uploaded file
+		for i := 0; i < len(key); i++ {
+			if key[i] == '/' {
+				folders = append(folders, key[:i])
+				ok = ok && !filePaths[key[:i]]
+			}
+		}
+		if !ok || folderPaths[key] {
+			discarded = append(discarded, name)
+			continue
+		}
+		filePaths[key] = true
+		for _, folder := range folders {
+			folderPaths[folder] = true
+		}
+		uploads = append(uploads, upload{uploadedFile, relativePath})
+	}
+	if len(uploads) == 0 {
+		return 400, "No valid file; nothing was changed. Discarded: " + strings.Join(discarded, ", ")
+	}
+
+	stagingDir, err := os.MkdirTemp(siteDir, publicDirName+".upload-")
+	if err != nil {
+		return 400, "Directory inaccessible"
+	}
+	stagingDir += "/"
+	defer os.RemoveAll(stagingDir) // #nosec G104 -- after the swap it no longer exists; otherwise, best effort
+	for _, file := range uploads {
+		if err = writeUploadedFile(file.file, stagingDir+file.path); err != nil {
+			slog.Error("hardUpload: can't write the file", "file", file.path, "error", err)
+			return 500, "Error writing " + file.path + "; nothing was changed"
+		}
+	}
+
+	beforeUploadSwap()
+	contentDir := siteDir + publicDirName
+	previousDir := contentDir + ".previous-" + newSessionToken()[:16]
+	siteGone := false
+	withGlobalLock(func() {
+		if siteGone = !siteExists(domain, subdomain); siteGone {
+			return
+		}
+		if err = os.Rename(contentDir, previousDir); err != nil {
+			return
+		}
+		if err = os.Rename(stagingDir, contentDir); err != nil {
+			if os.Rename(previousDir, contentDir) != nil {
+				slog.Error("hardUpload: can't restore the public directory", "directory", contentDir, "backup", previousDir)
+			}
+		}
+	})
+	if siteGone {
+		return 400, "Site not found"
+	}
+	if err != nil { // On Windows, for one, a file of @ that is open
+		slog.Error("hardUpload: can't replace the public directory", "directory", contentDir, "error", err)
+		return 400, "The public directory could not be replaced (open files?); nothing was changed"
+	}
+	if err = os.RemoveAll(previousDir); err != nil {
+		slog.Warn("hardUpload: can't delete the previous content", "directory", previousDir, "error", err)
+	}
+	if len(discarded) > 0 {
+		return 200, "Data uploaded. Discarded: " + strings.Join(discarded, ", ")
+	}
+	return 200, "Data uploaded"
+}
+
+// writeUploadedFile writes an uploaded file to targetPath, creating its folders.
+func writeUploadedFile(uploadedFile *customNetHttp.FileHeader, targetPath string) error {
+	srcFile, err := uploadedFile.Open()
+	if err != nil {
+		return err
+	}
+	defer srcFile.Close() // #nosec G307 -- in memory (P10): closing it can't fail
+
+	if err = os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil { // #nosec G301 -- public web content of a site, served by Turbo
+		return err
+	}
+	dstFile, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644) // #nosec G302 G304 -- public web content; uploadedFilePath rejects .. and absolute paths, so it stays under the upload folder
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(dstFile, srcFile)
+	if closeErr := dstFile.Close(); err == nil { // A failed close can mean an incomplete file
+		err = closeErr
+	}
+	return err
+}
+
+// beforeSessionRenewal runs right before a panel request renews its session (a hook for tests).
+var beforeSessionRenewal = func() {}
+
+// beforeUploadSwap runs right before hardUpload puts the uploaded files in place of @ (a hook for tests).
+var beforeUploadSwap = func() {}
 
 // lockedCheck runs a validator holding the global write lock, releasing it even if the validator panics.
 func lockedCheck(check func() (bool, string)) (bool, string) {
@@ -780,15 +1122,106 @@ func lockedCheck(check func() (bool, string)) (bool, string) {
 	return check()
 }
 
-func consoleActionsApi(apiPath string, responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request) (handled bool) {
+// lockedCheckLooking is lockedCheck with what look saw of the disk for the validator (diskLook).
+func lockedCheckLooking(look *diskLook, check func() (bool, string)) (bool, string) {
+	return lockedCheck(func() (bool, string) {
+		lookedDisk = look
+		defer func() { lookedDisk = nil }()
+		return check()
+	})
+}
+
+// setSitesDir is setM once the current password matched. The new directory is checked before taking any lock;
+// the change and the reload that follows hold settingsUpdateMutex, so the periodic reload can't mix the two
+// directories. Its turbo.config is always read, also with the same date as the one in use. Without one there,
+// the global settings, the credentials and the lists in use stay, to be written there with the next save; a
+// pointer in the start directory counts as none, so going back there stays there. With one, it applies whole and
+// the answer says what it changed of where the panel answers and of its credentials.
+func setSitesDir(value string, currentSession string) (bool, string) {
+	resolved, err := resolveSitesDir(value)
+	if err != nil {
+		return false, "Sites directory not found"
+	}
+	if info, err := os.Stat(resolved); err != nil || !info.IsDir() {
+		return false, "Sites directory not found"
+	}
+	if sameDir(resolved, sitesDir.Get()) {
+		return false, "Sites directory unchanged"
+	}
+	if err := configFileProblem(resolved); err != nil {
+		return false, "The sites directory is not changed. " + configErrorMessage(err, false)
+	}
+	settingsUpdateMutex.Lock()
+	defer settingsUpdateMutex.Unlock()
+	type panelSettings struct{ access, user, hash string }
+	current := func() panelSettings {
+		return panelSettings{panelAccess.Load().setting, panelUser.Get(), panelPasswordHash.Get()}
+	}
+	before := current()
+	look := newDiskLook() // What the validator of M looks at, looked at before the lock
+	look.stat(resolved)
+	if inUse, err := resolveSitesDir(sitesDir.Get()); err == nil {
+		look.stat(inUse)
+	}
+	applied, message := lockedCheckLooking(look, func() (bool, string) { return defaultSettingValidators["."]["M"](value, internalAuth) })
+	if !applied {
+		return false, message
+	}
+	options := reloadOptions{keepWithoutConfig: true, ignorePointer: sameDir(resolved, startDir), keepSession: currentSession}
+	configBytes, readErr := os.ReadFile(resolved + configFileName) // #nosec G304 -- turbo.config of the sites directory chosen by the administrator
+	kept := readErr != nil || options.ignorePointer && isSitesDirPointer(configBytes)
+	resetSettings()
+	withGlobalLock(func() { configFileModTime = 0 }) // Read even with the same date as the one in use
+	if err = updateSettingsFollowing(true, 0, options); err != nil {
+		slog.Error(configErrorMessage(err, false))
+		return true, message + ", but its configuration could not be applied:\n" + err.Error()
+	}
+	if kept {
+		return true, message + ". No turbo.config there: the global settings, the credentials and the lists in use are kept, and they will be written there when saving"
+	}
+	shown := func(access string) string {
+		if access == "" {
+			return "any host and network"
+		}
+		return access
+	}
+	after := current()
+	var changes []string
+	if after.access != before.access {
+		changes = append(changes, "where the panel answers (PA): \""+shown(before.access)+"\" → \""+shown(after.access)+"\"")
+	}
+	if after.user != before.user || after.hash != before.hash {
+		changes = append(changes, "the panel's user or password: those of that directory apply")
+	}
+	if len(changes) > 0 {
+		message += ". Its turbo.config changes " + strings.Join(changes, "; ")
+	}
+	return true, message
+}
+
+// dangerousActionPasswordOK checks the current password that an action able to run programs on the server, to
+// serve the source of a site's scripts, or to delete a site's files or a certificate needs besides the session
+// (addPreprocessor, delPreprocessor, hardUpload, delSite, and cfgC and cfgPC with a=0), sent in param of values: missing, 400; wrong, it counts as a failed login, as in set<KEY>.
+// It reports whether to go on.
+func dangerousActionPasswordOK(responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request, values map[string][]string, param string) bool {
+	password, sent := values[param]
+	if !sent || len(password) == 0 {
+		badReq(responseWriter, request, msgMissingData+": the current password ("+param+")")
+		return false
+	}
+	return currentPasswordOK(responseWriter, request, password[0])
+}
+
+// consoleActionsAPI runs a panel action of the session currentSession.
+func consoleActionsAPI(apiPath string, currentSession string, responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request) (handled bool) {
 	if request.Method != customNetHttp.MethodPost {
 		return false
 	}
 
 	defer func() { // A panic in a validator must not take down the panel
 		if p := recover(); p != nil {
-			slog.Error("Panic en la API del panel", "acción", apiPath, "error", p)
-			reqMsg(responseWriter, request, 500)
+			slog.Error("Panic in the panel API", "action", apiPath, "error", p)
+			reqMsg(responseWriter, 500)
 			handled = true
 		}
 	}()
@@ -796,7 +1229,7 @@ func consoleActionsApi(apiPath string, responseWriter customNetHttp.ResponseWrit
 	if len(apiPath) < 4 {
 		return false
 	}
-	// No saved value may have control characters (H4); a response template may span lines. hardUpload reads
+	// No saved value may have control characters; a response template may span lines. hardUpload reads
 	// its multipart body itself.
 	if apiPath != "hardUpload" {
 		if err := request.ParseForm(); err != nil { // Every action reads its parameters from here on
@@ -819,29 +1252,31 @@ func consoleActionsApi(apiPath string, responseWriter customNetHttp.ResponseWrit
 				if _, paramExists = request.Form["b"]; paramExists {
 					currentPassword = request.Form["b"][0]
 				}
-				if apiPath == "M" { // D11: the sites directory changes only to one whose turbo.config can be read
-					if err := configFileProblem(sitesDirSetting(argumentList[0])); err != nil {
-						badReq(responseWriter, request, "El turbo.config de ese directorio no es JSON válido o no se puede leer; corríjalo antes:\n"+err.Error())
-						return true
-					}
-				}
 				// Every setting needs the current password (b). It is checked here, before taking the lock,
 				// as a wrong one costs a PBKDF2; the validator then gets internalAuth.
 				if _, paramExists = request.Form["b"]; !paramExists {
 					badReq(responseWriter, request, msgMissingData)
 					return true
 				}
-				if matches, busy := checkPassword(currentPassword, passwordSlotWait); busy {
-					responseWriter.Header().Set("Retry-After", "2")
-					reqMsg(responseWriter, request, 503)
+				if !currentPasswordOK(responseWriter, request, currentPassword) {
 					return true
-				} else if !matches {
-					badReq(responseWriter, request, "Contraseña actual incorrecta")
+				}
+				if apiPath == "M" { // Nothing of the new directory is read before the password matched
+					if applied, message := setSitesDir(argumentList[0], currentSession); applied {
+						respond(responseWriter, message)
+					} else {
+						badReq(responseWriter, request, message)
+					}
 					return true
 				}
 				argumentList = append(argumentList, internalAuth)
-				if apiPath == "P" { // PBKDF2 without the global lock (H16)
-					hash, problem := newPasswordHash(argumentList[0])
+				if apiPath == "P" { // PBKDF2 without the global lock
+					hash, problem, err := newPasswordHash(argumentList[0])
+					if err != nil {
+						slog.Error("Can't hash the new password", "error", err)
+						reqMsg(responseWriter, 500)
+						return true
+					}
 					if problem != "" {
 						badReq(responseWriter, request, problem)
 						return true
@@ -849,29 +1284,35 @@ func consoleActionsApi(apiPath string, responseWriter customNetHttp.ResponseWrit
 					argumentList = append(argumentList, hash)
 				}
 
-				var resultMsg string
-				resultBool, resultMsg := lockedCheck(func() (bool, string) {
-					if apiPath == "PA" { // D3: the panel's host can't be a site's
+				if apiPath == "C" { // Saving writes files: it takes the locks itself, without holding the global one meanwhile
+					if applied, message := defaultSettingValidators["."]["C"](argumentList...); applied {
+						respond(responseWriter, message)
+					} else {
+						badReq(responseWriter, request, message)
+					}
+					return true
+				}
+				applied, message := lockedCheck(func() (bool, string) {
+					if apiPath == "PA" { // the panel's host can't be a site's
 						if list, _ := parsePanelAccess(argumentList[0]); list != nil {
 							if conflict := panelHostConflict(list); conflict != "" {
 								return false, conflict
 							}
+							if problem := panelAccessProblem(list, request); problem != "" { // The administrator would lock themselves out
+								return false, "The panel would stop answering this very request: " + problem
+							}
 						}
 					}
-					return defaultSettingValidators["."][apiPath](argumentList...)
-				})
-				if !resultBool {
-					badReq(responseWriter, request, resultMsg)
-				} else {
-					if _, handlerExists = serverRestartRequiredSettings[apiPath]; handlerExists { // serverRestartRequiredSettings: List of settings that use restartServers
-						respond(responseWriter, resultMsg)
-						//time.AfterFunc(50*time.Millisecond, func() {
-						resetSettings()
-						logConfigError(updateSettings(true))
-						//})
-					} else {
-						respond(responseWriter, resultMsg)
+					ok, msg := defaultSettingValidators["."][apiPath](argumentList...)
+					if ok && (apiPath == "U" || apiPath == "P") { // New credentials: the other sessions end
+						closeOtherSessions(currentSession)
 					}
+					return ok, msg
+				})
+				if !applied {
+					badReq(responseWriter, request, message)
+				} else {
+					respond(responseWriter, message)
 				}
 			} else {
 				badReq(responseWriter, request, msgMissingData)
@@ -889,23 +1330,41 @@ func consoleActionsApi(apiPath string, responseWriter customNetHttp.ResponseWrit
 			_, argumentParamExists := request.Form["a"]
 			_, valueParamExists := request.Form["b"]
 			if sourceParamExists && destinationParamExists && argumentParamExists && valueParamExists {
-				resultMsg := "="
-				entries := make(map[string]interface{})
-				entries[request.Form["a"][0]] = request.Form["b"][0]
-				if apiPath[0] == 'M' {
-					resultMsg = "$"
-				} else if apiPath[0] == 'H' {
-					resultMsg = "."
-				} else if apiPath[0] == 'P' {
-					resultMsg = "?"
+				if apiPath == "Preprocessor" && !dangerousActionPasswordOK(responseWriter, request, request.Form, "c") { // b is the executable
+					return true
 				}
-				resultBool, resultMsg := lockedCheck(func() (bool, string) {
-					return subdomainContentCheckers[resultMsg](true, entries, false, request.Form["s"][0], request.Form["d"][0])
+				look := newDiskLook()
+				if apiPath == "Preprocessor" { // The disk is looked at before taking the lock
+					var value string
+					withReadLock(func() { value = replaceURIChars(request.Form["b"][0]) })
+					if executable, problem := preprocessorCommand(value); problem == "" {
+						look.stat(executable)
+						if looked := look.stats[executable]; looked.err != nil {
+							badReq(responseWriter, request, "Preprocessor not found")
+							return true
+						} else if looked.info.IsDir() {
+							badReq(responseWriter, request, "Invalid preprocessor")
+							return true
+						}
+					}
+				}
+				kind := "=" // The key of the validator: rewrites
+				switch apiPath[0] {
+				case 'M':
+					kind = "$"
+				case 'H':
+					kind = "."
+				case 'P':
+					kind = "?"
+				}
+				entries := map[string]interface{}{request.Form["a"][0]: request.Form["b"][0]}
+				applied, message := lockedCheckLooking(look, func() (bool, string) {
+					return subdomainContentCheckers[kind](true, entries, false, request.Form["s"][0], request.Form["d"][0])
 				})
-				if !resultBool {
-					badReq(responseWriter, request, resultMsg)
+				if !applied {
+					badReq(responseWriter, request, message)
 				} else {
-					respond(responseWriter, resultMsg)
+					respond(responseWriter, message)
 				}
 			} else {
 				badReq(responseWriter, request, msgMissingData)
@@ -917,22 +1376,21 @@ func consoleActionsApi(apiPath string, responseWriter customNetHttp.ResponseWrit
 			_, sourceParamExists := request.Form["s"]
 			_, argumentParamExists := request.Form["a"]
 			if destinationParamExists && sourceParamExists && argumentParamExists {
-				argumentValues := make(map[string]interface{})
-				argumentValues[request.Form["a"][0]] = false
-				resultMsg := "-"
+				kind := "-" // The key of the validator: indexes
 				if apiPath[0] == 'A' {
-					resultMsg = "&"
+					kind = "&"
 				}
-				resultBool, resultMsg := lockedCheck(func() (bool, string) {
-					if resultMsg == "&" && panelAccess.Load().hosts[strings.ToLower(request.Form["a"][0])] { // D3
-						return false, "El alias " + request.Form["a"][0] + " es un host del panel: use otro host para el panel o para el alias"
+				argumentValues := map[string]interface{}{request.Form["a"][0]: false}
+				applied, message := lockedCheck(func() (bool, string) {
+					if kind == "&" && panelAccess.Load().hosts[strings.ToLower(request.Form["a"][0])] { // The panel's host is never a site's
+						return false, "The alias " + request.Form["a"][0] + " is a panel host: use another host for the panel or for the alias"
 					}
-					return subdomainContentCheckers[resultMsg](true, argumentValues, false, request.Form["s"][0], request.Form["d"][0])
+					return subdomainContentCheckers[kind](true, argumentValues, false, request.Form["s"][0], request.Form["d"][0])
 				})
-				if !resultBool {
-					badReq(responseWriter, request, resultMsg)
+				if !applied {
+					badReq(responseWriter, request, message)
 				} else {
-					respond(responseWriter, resultMsg)
+					respond(responseWriter, message)
 				}
 			} else {
 				badReq(responseWriter, request, msgMissingData)
@@ -947,13 +1405,13 @@ func consoleActionsApi(apiPath string, responseWriter customNetHttp.ResponseWrit
 				return true
 			}
 			// Checks and creation in one locked section: no map is read without the lock, and nothing changes
-			// between checking and creating (H10).
-			resultBool, resultMsg := lockedCheck(func() (bool, string) { return addSubdomain(request.Form["s"][0], request.Form["d"][0]) })
-			if !resultBool {
-				badReq(responseWriter, request, resultMsg)
+			// between checking and creating.
+			applied, message := lockedCheck(func() (bool, string) { return addSubdomain(request.Form["s"][0], request.Form["d"][0]) })
+			if !applied {
+				badReq(responseWriter, request, message)
 				return true
 			}
-			respond(responseWriter, resultMsg)
+			respond(responseWriter, message)
 			return true
 
 		case "Site":
@@ -961,37 +1419,35 @@ func consoleActionsApi(apiPath string, responseWriter customNetHttp.ResponseWrit
 				badReq(responseWriter, request, msgMissingData)
 				return true
 			}
-			resultBool, resultMsg := lockedCheck(func() (bool, string) { return addSite(request.Form["s"][0]) })
-			if !resultBool {
-				badReq(responseWriter, request, resultMsg)
+			applied, message := lockedCheck(func() (bool, string) { return addSite(request.Form["s"][0]) })
+			if !applied {
+				badReq(responseWriter, request, message)
 				return true
 			}
-			respond(responseWriter, resultMsg)
+			respond(responseWriter, message)
 			return true
 
 		case "Denied", "HttpCodeResponse", "CharsReplace":
 			_, sourceParamExists := request.Form["s"]
 			_, destinationParamExists := request.Form["d"]
 			if sourceParamExists && destinationParamExists {
-				resultMsg := "#"
+				kind := "#" // The key of the handler: responses
 				switch apiPath[0] {
 				case 'C':
-					resultMsg = "_"
+					kind = "_"
 				case 'D':
-					resultMsg = "@"
+					kind = "@"
 					if isClientIP(request.Form["s"][0], request) { // The panel would lock itself out
-						badReq(responseWriter, request, "IP actual")
+						badReq(responseWriter, request, "Current IP")
 						return true
 					}
 				}
-
-				resultBool, resultMsg := lockedCheck(func() (bool, string) { return adminAddHandlers[resultMsg](request.Form["s"][0], request.Form["d"][0]) })
-
-				if !resultBool {
-					badReq(responseWriter, request, resultMsg)
+				applied, message := lockedCheck(func() (bool, string) { return adminAddHandlers[kind](request.Form["s"][0], request.Form["d"][0]) })
+				if !applied {
+					badReq(responseWriter, request, message)
 					return true
 				}
-				respond(responseWriter, resultMsg)
+				respond(responseWriter, message)
 				return true
 			} else {
 				badReq(responseWriter, request, msgMissingData)
@@ -1008,29 +1464,31 @@ func consoleActionsApi(apiPath string, responseWriter customNetHttp.ResponseWrit
 			_, sourceParamExists := request.Form["s"]
 			_, argumentParamExists := request.Form["a"]
 			if destinationParamExists && sourceParamExists && argumentParamExists {
-				argumentValues := make(map[string]interface{})
-				argumentValues[request.Form["a"][0]] = false
-				resultMsg := "="
-				if apiPath[0] == 'A' {
-					resultMsg = "&"
-				} else if apiPath[0] == 'I' {
-					resultMsg = "-"
-				} else if apiPath[0] == 'P' {
-					resultMsg = "?"
-				} else if apiPath[0] == 'H' {
-					resultMsg = "."
-				} else if apiPath[0] == 'M' {
-					resultMsg = "$"
+				// Without its preprocessor, the extension's files would be served as text, their source included
+				if apiPath == "Preprocessor" && !dangerousActionPasswordOK(responseWriter, request, request.Form, "b") {
+					return true
 				}
-
-				resultBool, resultMsg := lockedCheck(func() (bool, string) {
-					return subdomainContentDeleters[resultMsg](true, argumentValues, request.Form["s"][0], request.Form["d"][0])
+				kind := "=" // The key of the deleter: rewrites
+				switch apiPath[0] {
+				case 'A':
+					kind = "&"
+				case 'I':
+					kind = "-"
+				case 'P':
+					kind = "?"
+				case 'H':
+					kind = "."
+				case 'M':
+					kind = "$"
+				}
+				argumentValues := map[string]interface{}{request.Form["a"][0]: false}
+				applied, message := lockedCheck(func() (bool, string) {
+					return subdomainContentDeleters[kind](true, argumentValues, request.Form["s"][0], request.Form["d"][0])
 				})
-
-				if !resultBool {
-					badReq(responseWriter, request, resultMsg)
+				if !applied {
+					badReq(responseWriter, request, message)
 				} else {
-					respond(responseWriter, resultMsg)
+					respond(responseWriter, message)
 				}
 			} else {
 				badReq(responseWriter, request, msgMissingData)
@@ -1041,33 +1499,31 @@ func consoleActionsApi(apiPath string, responseWriter customNetHttp.ResponseWrit
 			_, sourceParamExists := request.Form["s"]
 			_, destinationParamExists := request.Form["d"]
 			if sourceParamExists && destinationParamExists {
-				resultMsg := "Sitio"
-				resultBool := request.Form["d"][0] != ""
-				if resultBool {
-					resultMsg = "Subdominio"
-				}
-
-				globalMutex.RLock()
-				_e := siteExists(request.Form["s"][0], request.Form["d"][0])
-				globalMutex.RUnlock()
-
-				if !_e {
-					badReq(responseWriter, request, resultMsg+" inexistente")
+				if !dangerousActionPasswordOK(responseWriter, request, request.Form, "b") {
 					return true
 				}
-
+				what := "Site"
+				isSubdomain := request.Form["d"][0] != ""
+				if isSubdomain {
+					what = "Subdomain"
+				}
+				var exists bool
+				withReadLock(func() { exists = siteExists(request.Form["s"][0], request.Form["d"][0]) })
+				if !exists {
+					badReq(responseWriter, request, what+" not found")
+					return true
+				}
 				siteDir := sitesDir.Get() + changeWildcards(request.Form["s"][0])
-				if resultBool {
+				if isSubdomain {
 					siteDir += "/" + changeWildcards(request.Form["d"][0])
 				}
 				siteDir += "/"
 				if os.RemoveAll(siteDir) != nil {
-					badReq(responseWriter, request, "Error al borrar")
+					badReq(responseWriter, request, "Error deleting")
 					return true
 				}
-
 				deleteSite(request.Form["s"][0], request.Form["d"][0])
-				respond(responseWriter, resultMsg+" borrado")
+				respond(responseWriter, what+" deleted")
 			} else {
 				badReq(responseWriter, request, msgMissingData)
 			}
@@ -1076,21 +1532,19 @@ func consoleActionsApi(apiPath string, responseWriter customNetHttp.ResponseWrit
 		case "Denied", "HttpCodeResponse", "CharsReplace":
 			_, sourceParamExists := request.Form["s"]
 			if sourceParamExists {
-				resultMsg := "#"
+				kind := "#" // The key of the handler: responses
 				switch apiPath[0] {
 				case 'C':
-					resultMsg = "_"
+					kind = "_"
 				case 'D':
-					resultMsg = "@"
+					kind = "@"
 				}
-
-				resultBool, resultMsg := lockedCheck(func() (bool, string) { return adminDeleteHandlers[resultMsg](request.Form["s"][0]) })
-
-				if !resultBool {
-					badReq(responseWriter, request, resultMsg)
+				applied, message := lockedCheck(func() (bool, string) { return adminDeleteHandlers[kind](request.Form["s"][0]) })
+				if !applied {
+					badReq(responseWriter, request, message)
 					return true
 				}
-				respond(responseWriter, resultMsg)
+				respond(responseWriter, message)
 				return true
 			} else {
 				badReq(responseWriter, request, msgMissingData)
@@ -1101,10 +1555,13 @@ func consoleActionsApi(apiPath string, responseWriter customNetHttp.ResponseWrit
 
 	case "cfg":
 		apiPath = apiPath[3:]
-		if _, handlerExists := siteSSLSettingCheckers[apiPath]; handlerExists {
+		if _, handlerExists := siteSSLSettingCheckers[apiPath]; handlerExists || apiPath == "PC" { // PC: the panel's certificate, of no site
 			_, argumentParamExists := request.Form["a"]
 			_, sourceParamExists := request.Form["s"]
 			_, destinationParamExists := request.Form["d"]
+			if apiPath == "PC" {
+				sourceParamExists, destinationParamExists = true, true
+			}
 			_, zParamExists := request.Form["z"]
 			_, yParamExists := request.Form["y"]
 			email := ""
@@ -1116,21 +1573,40 @@ func consoleActionsApi(apiPath string, responseWriter customNetHttp.ResponseWrit
 				adapter = request.Form["y"][0]
 			}
 			if argumentParamExists && sourceParamExists && destinationParamExists {
-				var resultMsg string
-				resultBool, resultMsg := lockedCheck(func() (bool, string) {
+				if (apiPath == "C" || apiPath == "PC") && request.Form["a"][0] == "0" && !dangerousActionPasswordOK(responseWriter, request, request.Form, "b") { // Deleting a certificate
+					return true
+				}
+				look := newDiskLook() // The certificate files C and S look at, looked at before the lock
+				known := false        // Only the folders of existing sites (PC has no site)
+				if apiPath == "C" || apiPath == "S" {
+					withReadLock(func() { known = siteExists(request.Form["s"][0], request.Form["d"][0]) })
+				}
+				if known {
+					folder := sitesDir.Get() + siteFolder(request.Form["s"][0], request.Form["d"][0])
+					look.siteFiles(folder, apiPath == "S" && request.Form["a"][0] != "0")
+					look.stat(sitesDir.Get() + putSlash(certificatesDirName))
+				}
+				applied, message := lockedCheckLooking(look, func() (bool, string) {
+					if apiPath == "PC" {
+						return panelCertificateAction(request.Form["a"][0], email, adapter, yParamExists)
+					}
 					return siteSSLSettingCheckers[apiPath](false, request.Form["a"][0], request.Form["s"][0], request.Form["d"][0], email, adapter)
 				})
-
-				if !resultBool && strings.Contains(resultMsg, `"status":"WAIT"`) { // In progress, not an error (D8)
+				if !applied && strings.Contains(message, `"status":"WAIT"`) { // In progress, not an error
+					responseWriter.Header().Set(contentTypeHeader, jsonContentType)
 					responseWriter.WriteHeader(202)
-					respond(responseWriter, resultMsg)
+					respond(responseWriter, message)
 					return true
 				}
-				if !resultBool {
-					badReq(responseWriter, request, resultMsg)
+				if !applied {
+					badReq(responseWriter, request, message)
 					return true
 				}
-				respond(responseWriter, resultMsg)
+				if apiPath == "PC" && request.Form["a"][0] == "0" && request.TLS != nil {
+					// Without its certificate the panel's host has no HTTPS: the browser has to be able to come back by HTTP
+					responseWriter.Header().Set("Strict-Transport-Security", "max-age=0")
+				}
+				respond(responseWriter, message)
 			} else {
 				badReq(responseWriter, request, msgMissingData)
 			}
@@ -1142,11 +1618,14 @@ func consoleActionsApi(apiPath string, responseWriter customNetHttp.ResponseWrit
 		switch apiPath {
 		case "hardUpload":
 			// s and d may come in the URL or in the multipart body, which is read only into memory and up to MBB.
-			// A whole site is uploaded at once: up to 10 000 files (D10), each with two headers.
+			// A whole site is uploaded at once: up to 10 000 files, each with two headers.
 			request = customNetHttp.TurboWithFormLimits(request, 10000, 20000)
 			if readErr := request.ParseMultipartForm(maxBodySize.Load()); readErr != nil && readErr != customNetHttp.ErrNotMultipart {
-				badReq(responseWriter, request, "Longitud máxima de contenidos excedida")
+				formRejected(responseWriter, request, readErr) // 413 if too large, 400 if malformed
 				return true
+			}
+			if request.MultipartForm != nil {
+				defer request.MultipartForm.RemoveAll()
 			}
 			_, sourceParamExists := request.Form["s"]
 			_, destinationParamExists := request.Form["d"]
@@ -1154,117 +1633,65 @@ func consoleActionsApi(apiPath string, responseWriter customNetHttp.ResponseWrit
 				badReq(responseWriter, request, msgMissingData)
 				return true
 			}
+			if !dangerousActionPasswordOK(responseWriter, request, request.PostForm, "b") { // Only in the body: the URL is logged
+				return true
+			}
 			if problem := formTextProblem(request, false); problem != "" {
 				badReq(responseWriter, request, problem)
 				return true
 			}
-			globalMutex.RLock()
-			_e := siteExists(request.Form["s"][0], request.Form["d"][0])
-			globalMutex.RUnlock()
+			var exists bool
+			withReadLock(func() { exists = siteExists(request.Form["s"][0], request.Form["d"][0]) })
 
-			if !_e {
+			if !exists {
 				if request.Form["d"][0] != "" {
-					badReq(responseWriter, request, "Subdominio inexistente")
+					badReq(responseWriter, request, "Subdomain not found")
 				} else {
-					badReq(responseWriter, request, "Sitio inexistente")
+					badReq(responseWriter, request, "Site not found")
 				}
 				return true
 			}
 
 			if request.MultipartForm == nil || len(request.MultipartForm.File["f"]) == 0 {
-				badReq(responseWriter, request, "No hay datos")
+				badReq(responseWriter, request, "No data")
 				return true
 			}
-			defer request.MultipartForm.RemoveAll()
 
-			contentDir := sitesDir.Get() + changeWildcards(request.Form["s"][0])
+			siteDir := sitesDir.Get() + changeWildcards(request.Form["s"][0]) + "/"
 			if request.Form["d"][0] != "" {
-				contentDir += "/" + changeWildcards(request.Form["d"][0])
+				siteDir += changeWildcards(request.Form["d"][0]) + "/"
 			}
-			contentDir += "/" + publicDirName + "/"
-
-			dirEntries, readErr := os.ReadDir(contentDir)
-			if readErr != nil {
-				badReq(responseWriter, request, "Directorio inaccesible")
-				return true
+			status, message := hardUpload(request.Form["s"][0], request.Form["d"][0], siteDir, request.MultipartForm.File["f"])
+			if status != 200 {
+				responseWriter.WriteHeader(status)
 			}
-			var undeleted []string
-			for _, entry := range dirEntries { // The upload replaces all of @, folders included (DP13)
-				if os.RemoveAll(contentDir+entry.Name()) != nil {
-					undeleted = append(undeleted, entry.Name())
-				}
-			}
-			if len(undeleted) > 0 { // Don't mix new files with old ones that are still there
-				slog.Error("hardUpload: no se pudo vaciar el directorio público", "directorio", contentDir, "restos", undeleted)
-				badReq(responseWriter, request, "No se pudo vaciar el directorio; no se ha subido nada. Sin borrar: "+strings.Join(undeleted, ", "))
-				return true
-			}
-
-			var discarded []string
-			for _, uploadedFile := range request.MultipartForm.File["f"] {
-				_, fileMetadata, readErr := mime.ParseMediaType(uploadedFile.Header.Get("Content-Disposition"))
-				if readErr != nil {
-					continue
-				}
-				name := fileMetadata["filename"]
-				relativePath, ok := uploadedFilePath(name)
-				if !ok {
-					discarded = append(discarded, name)
-					continue
-				}
-				srcFile, readErr := uploadedFile.Open()
-				if readErr != nil {
-					discarded = append(discarded, name)
-					continue
-				}
-				targetPath := contentDir + relativePath
-				if readErr = os.MkdirAll(filepath.Dir(targetPath), 0755); readErr == nil { // #nosec G301 -- public web content of a site, served by Turbo
-					var dstFile *os.File
-					if dstFile, readErr = os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644); readErr == nil { // #nosec G302 G304 -- public web content; uploadedFilePath rejects .. and absolute paths, so it stays under @
-						_, readErr = io.Copy(dstFile, srcFile)
-						if closeErr := dstFile.Close(); readErr == nil { // A failed close can mean an incomplete file
-							readErr = closeErr
-						}
-					}
-				}
-				_ = srcFile.Close() // In memory (P10): closing it can't fail
-				if readErr != nil {
-					discarded = append(discarded, name)
-				}
-			}
-			if len(discarded) > 0 {
-				respond(responseWriter, "Datos volcados. Descartados: "+strings.Join(discarded, ", "))
-			} else {
-				respond(responseWriter, "Datos volcados")
-			}
+			respond(responseWriter, message)
 			return true
 
 		case "sites":
-			// The response is built with the read lock and written without it (H12): a client that reads slowly
+			// The response is built with the read lock and written without it: a client that reads slowly
 			// doesn't hold back a pending Lock, and through it, every other request.
-			globalMutex.RLock()
-			response := createDefaultConfig(false, true, false)
-			globalMutex.RUnlock()
-			respond(responseWriter, response)
+			var response string
+			withReadLock(func() { response = createDefaultConfig(false, true, false) })
+			respondJSON(responseWriter, response)
 			return true
 
 		case "subdomains":
-
 			_, paramExists := request.Form["s"]
 			if paramExists {
-				globalMutex.RLock()
-				_e := siteExists(request.Form["s"][0], "")
+				var exists bool
 				response := ""
-				if _e {
-					response = createSubdomainsList(false, request.Form["s"][0])
-				}
-				globalMutex.RUnlock()
+				withReadLock(func() {
+					if exists = siteExists(request.Form["s"][0], ""); exists {
+						response = createSubdomainsList(false, request.Form["s"][0])
+					}
+				})
 
-				if !_e {
-					badReq(responseWriter, request, "Sitio inexistente")
+				if !exists {
+					badReq(responseWriter, request, "Site not found")
 					return true
 				}
-				respond(responseWriter, response)
+				respondJSON(responseWriter, response)
 			} else {
 				badReq(responseWriter, request, msgMissingData)
 			}
@@ -1274,19 +1701,19 @@ func consoleActionsApi(apiPath string, responseWriter customNetHttp.ResponseWrit
 			_, sourceParamExists := request.Form["s"]
 			_, destinationParamExists := request.Form["d"]
 			if sourceParamExists && destinationParamExists {
-				globalMutex.RLock()
-				_e := siteExists(request.Form["s"][0], request.Form["d"][0])
+				var exists bool
 				response := ""
-				if _e {
-					response = createSubdomainData(request.Form["s"][0], request.Form["d"][0])
-				}
-				globalMutex.RUnlock()
+				withReadLock(func() {
+					if exists = siteExists(request.Form["s"][0], request.Form["d"][0]); exists {
+						response = createSubdomainData(request.Form["s"][0], request.Form["d"][0])
+					}
+				})
 
-				if !_e {
-					badReq(responseWriter, request, "Subdominio inexistente")
+				if !exists {
+					badReq(responseWriter, request, "Subdomain not found")
 					return true
 				}
-				respond(responseWriter, response)
+				respondJSON(responseWriter, response)
 			} else {
 				badReq(responseWriter, request, msgMissingData)
 			}

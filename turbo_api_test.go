@@ -1,6 +1,6 @@
 package main
 
-// B9 (H17-H21): la API hace lo que dice su especificación.
+// B9 (H17-H21): the API does what its specification says.
 
 import (
 	"net/url"
@@ -12,8 +12,8 @@ import (
 	"turbo/customNetHttp"
 )
 
-// H17 (D7): R (www → raíz) y W (raíz → www) se configuran en la raíz del
-// sitio, que es donde se aplican; en un subdominio se rechazan.
+// H17 (D7): R (www → root) and W (root → www) are set at the root of the
+// site, which is where they apply; on a subdomain they are rejected.
 func TestB9_RootRedirectsOnlyAtRoot(t *testing.T) {
 	dir := initForTest(t)
 	os.MkdirAll(dir+"localhost/www/@", 0755)
@@ -21,21 +21,21 @@ func TestB9_RootRedirectsOnlyAtRoot(t *testing.T) {
 	base := startServer(t)
 	tok := login(t, base)
 	for _, path := range []string{"/admin:inside:cfgR?s=localhost&d=www&a=1", "/admin:inside:cfgW?s=localhost&d=www&a=1"} {
-		if code, body, _ := post(base, path, tok); code != 400 || !strings.Contains(body, "raíz del sitio") {
-			t.Errorf("%s: %d %q; se esperaba 400 por no ser la raíz", path, code, body)
+		if code, body, _ := post(base, path, tok); code != 400 || !strings.Contains(body, "site's root") {
+			t.Errorf("%s: %d %q; expected 400 because it isn't the root", path, code, body)
 		}
 	}
 	if code, body, _ := post(base, "/admin:inside:cfgR?s=localhost&d=&a=1", tok); code != 200 {
-		t.Fatalf("cfgR en la raíz: %d %q", code, body)
+		t.Fatalf("cfgR at the root: %d %q", code, body)
 	}
 	res, _, err := rawGet(base, "www.localhost", "/x")
 	if err != nil || res.StatusCode != 301 || res.Header.Get("Location") != "http://localhost/x" {
-		t.Errorf("www.localhost con R en la raíz: %v %v; se esperaba 301 a http://localhost/x", res, err)
+		t.Errorf("www.localhost with R at the root: %v %v; expected 301 to http://localhost/x", res, err)
 	}
 }
 
-// H18 (D8): "Crear SSL" con la emisión en curso responde 202 con el JSON de
-// espera, no 400.
+// H18 (D8): "Create SSL" with the issuance in progress answers 202 with the
+// wait JSON, not 400.
 func TestB9_CertificateWaitIs202(t *testing.T) {
 	useFakeCertbot(t, "ok")
 	initForTest(t)
@@ -47,26 +47,26 @@ func TestB9_CertificateWaitIs202(t *testing.T) {
 	t.Cleanup(func() { withGlobalLock(func() { currentCertDomain = "" }) })
 	code, body, _ := post(base, "/admin:inside:cfgC?"+url.Values{"s": {"localhost"}, "d": {""}, "a": {"1"}, "z": {"admin@localhost.test"}}.Encode(), tok)
 	if code != 202 || !strings.Contains(body, `"status":"WAIT"`) {
-		t.Errorf("cfgC con la emisión en curso: %d %q; se esperaba 202 con status WAIT", code, body)
+		t.Errorf("cfgC with the issuance in progress: %d %q; expected 202 with status WAIT", code, body)
 	}
 }
 
-// H19: con RT = 0 (sin límite), RHT admite cualquier valor de su rango.
+// H19: with RT = 0 (no limit), RHT accepts any value in its range.
 func TestB9_RHTWithoutRT(t *testing.T) {
 	initForTest(t)
-	anterior := *serverTimeLimits.Load()
-	t.Cleanup(func() { withGlobalLock(func() { setTimeLimits(func(t *customNetHttp.Timeouts) { *t = anterior }) }) })
+	previous := *serverTimeLimits.Load()
+	t.Cleanup(func() { withGlobalLock(func() { setTimeLimits(func(t *customNetHttp.Timeouts) { *t = previous }) }) })
 	globalMutex.Lock()
 	defer globalMutex.Unlock()
 	if ok, msg := defaultSettingValidators["."]["RT"]("0s", internalAuth); !ok {
 		t.Fatalf("RT=0: %q", msg)
 	}
 	if ok, msg := defaultSettingValidators["."]["RHT"]("2s", internalAuth); !ok {
-		t.Errorf("RHT=2s con RT=0: %q; se esperaba aceptado", msg)
+		t.Errorf("RHT=2s with RT=0: %q; expected accepted", msg)
 	}
 }
 
-// H20: "Borrar SSL" borra el certificado aunque tenga más de 75 días.
+// H20: "Delete SSL" deletes the certificate even when it is older than 75 days.
 func TestB9_DeleteOldCertificate(t *testing.T) {
 	dir := initForTest(t)
 	for _, name := range []string{"fullchain.pem", "privkey.pem"} {
@@ -77,13 +77,13 @@ func TestB9_DeleteOldCertificate(t *testing.T) {
 	globalMutex.Lock()
 	ok, msg := siteSSLSettingCheckers["C"](false, "0", "localhost", "")
 	globalMutex.Unlock()
-	if !ok || msg != "Certificado SSL borrado" || fileExists(dir+"localhost/fullchain.pem") || fileExists(dir+"localhost/privkey.pem") {
-		t.Errorf("cfgC a=0 con un certificado de 80 días: %v %q; se esperaba borrado", ok, msg)
+	if !ok || msg != "SSL certificate deleted" || fileExists(dir+"localhost/fullchain.pem") || fileExists(dir+"localhost/privkey.pem") {
+		t.Errorf("cfgC a=0 with an 80-day-old certificate: %v %q; expected deleted", ok, msg)
 	}
 }
 
-// H21: todos los parámetros de texto pasan por el reemplazo de caracteres
-// (§2.1), también la plantilla de respuesta y el nombre de una cabecera.
+// H21: every text parameter goes through the character replacement (§2.1),
+// also the response template and the name of a header.
 func TestB9_AllTextParametersReplaced(t *testing.T) {
 	initForTest(t)
 	base := startServer(t)
@@ -91,11 +91,11 @@ func TestB9_AllTextParametersReplaced(t *testing.T) {
 	if code, body, _ := post(base, "/admin:inside:addCharsReplace?"+url.Values{"s": {"Q"}, "d": {"zz"}}.Encode(), tok); code != 200 {
 		t.Fatalf("addCharsReplace: %d %q", code, body)
 	}
-	if code, body, _ := post(base, "/admin:inside:addHttpCodeResponse?"+url.Values{"s": {"404"}, "d": {"No -,- existe"}}.Encode(), tok); code != 200 {
+	if code, body, _ := post(base, "/admin:inside:addHttpCodeResponse?"+url.Values{"s": {"404"}, "d": {"-,- does not exist"}}.Encode(), tok); code != 200 {
 		t.Fatalf("addHttpCodeResponse: %d %q", code, body)
 	}
-	if got := (*httpResponses.Load())[404]; got != "No # existe" {
-		t.Errorf("plantilla guardada %q; se esperaba \"No # existe\"", got)
+	if got := (*httpResponses.Load())[404]; got != "# does not exist" {
+		t.Errorf("saved template %q; expected \"# does not exist\"", got)
 	}
 	if code, body, _ := post(base, "/admin:inside:addHeader?"+url.Values{"s": {"localhost"}, "d": {""}, "a": {"X-zz"}, "b": {"1"}}.Encode(), tok); code != 200 {
 		t.Fatalf("addHeader: %d %q", code, body)
@@ -104,9 +104,30 @@ func TestB9_AllTextParametersReplaced(t *testing.T) {
 	_, replaced := customHeaders["localhost"]["X-Q"]
 	globalMutex.RUnlock()
 	if !replaced {
-		t.Error("el nombre de la cabecera X-zz no se guardó como X-Q")
+		t.Error("the header name X-zz was not saved as X-Q")
 	}
 	if code, body, _ := post(base, "/admin:inside:delHeader?"+url.Values{"s": {"localhost"}, "d": {""}, "a": {"X-zz"}}.Encode(), tok); code != 200 {
 		t.Errorf("delHeader X-zz: %d %q", code, body)
+	}
+}
+
+// CAL8: a MIME or a preprocessor written with the leading dot (".css") is the
+// same one as without it: if it already exists with the same value, the answer
+// is "unchanged"; if the value changes, "changed", never "created".
+func TestCAL8_ExtensionWithDot(t *testing.T) {
+	servingFixture(t)
+	check := func(kind string, value string) (bool, string) {
+		globalMutex.Lock()
+		defer globalMutex.Unlock()
+		return subdomainContentCheckers[kind](true, map[string]interface{}{".zzq": value}, false, "localhost", "")
+	}
+	if ok, msg := check("$", "text/x-one"); !ok || msg != "MIME created" {
+		t.Fatalf("first MIME .zzq: %v %q", ok, msg)
+	}
+	if ok, msg := check("$", "text/x-one"); ok || msg != "MIME unchanged" {
+		t.Errorf("same MIME .zzq again: %v %q; expected \"MIME unchanged\"", ok, msg)
+	}
+	if ok, msg := check("$", "text/x-two"); !ok || msg != "MIME changed" {
+		t.Errorf("another MIME for .zzq: %v %q; expected \"MIME changed\"", ok, msg)
 	}
 }

@@ -1,0 +1,68 @@
+diff --git a/1.net.http.server.go b/1.net.http.server.go
+index 085a71d..75842d6 100644
+--- a/1.net.http.server.go
++++ b/1.net.http.server.go
+@@ -255,6 +255,11 @@ type conn struct {
+ 	// Immutable; never nil.
+ 	server *Server
+ 
++	// turboReadLimit is the read limit the last request started with, so
++	// that StateActive doesn't read TurboMaxHeaderBytes again.
++	// turbo:P4
++	turboReadLimit int64
++
+ 	// cancelCtx cancels the connection-level context.
+ 	cancelCtx context.CancelFunc
+ 
+@@ -894,14 +899,13 @@ func putBufioWriter(bw *bufio.Writer) {
+ const DefaultMaxHeaderBytes = 1 << 20 // 1 MB
+ 
+ func (s *Server) maxHeaderBytes() int {
+-	if s.MaxHeaderBytes > 0 {
+-		return s.MaxHeaderBytes
+-	}
+-	return DefaultMaxHeaderBytes
++	// turbo:P4: the limit is TurboMaxHeaderBytes (setting MHB), read on each request;
++	// Server.MaxHeaderBytes is not used.
++	return int(TurboMaxHeaderBytes.Load())
+ }
+ 
+ func (s *Server) initialReadLimitSize() int64 {
+-	return int64(s.maxHeaderBytes()) + 4096 // bufio slop
++	return int64(s.maxHeaderBytes()) // turbo:P4: exact, without the 4096 bytes of margin
+ }
+ 
+ // tlsHandshakeTimeout returns the time limit permitted for the TLS
+@@ -988,7 +992,14 @@ func (c *conn) readRequest(ctx context.Context) (w *response, err error) {
+ 		}()
+ 	}
+ 
+-	c.r.setReadLimit(c.server.initialReadLimitSize())
++	// turbo:P4: the limit is read once per request, and the bytes already in the buffer (read while
++	// waiting for the request, or from the previous one when pipelining) count towards it.
++	readLimit, buffered := c.server.initialReadLimitSize(), int64(c.bufr.Buffered())
++	if buffered > readLimit && !turboHeadersInBuffer(c.bufr, readLimit) {
++		return nil, errTooLarge
++	}
++	c.turboReadLimit = max(readLimit-buffered, 0)
++	c.r.setReadLimit(c.turboReadLimit)
+ 	if c.lastMethod == "POST" {
+ 		// RFC 7230 section 3 tolerance for old buggy clients.
+ 		peek, _ := c.bufr.Peek(4) // ReadRequest will get err below
+@@ -2006,7 +2017,7 @@ func (c *conn) serve(ctx context.Context) {
+ 
+ 	for {
+ 		w, err := c.readRequest(ctx)
+-		if c.r.remain != c.server.initialReadLimitSize() {
++		if c.r.remain != c.turboReadLimit { // turbo:P4
+ 			// If we read any bytes off the wire, we're active.
+ 			c.setState(c.rwc, StateActive, runHooks)
+ 		}
+@@ -2121,6 +2132,7 @@ func (c *conn) serve(ctx context.Context) {
+ 		// read the next request. This prevents a ReadHeaderTimeout or
+ 		// ReadTimeout from starting until the first bytes of the next request
+ 		// have been received.
++		c.r.setReadLimit(c.server.initialReadLimitSize()) // turbo:P4: what is read while waiting counts towards the request's limit
+ 		if _, err := c.bufr.Peek(4); err != nil {
+ 			return
+ 		}

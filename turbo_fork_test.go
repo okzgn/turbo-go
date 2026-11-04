@@ -1,6 +1,6 @@
 package main
 
-// Parches de seguridad de Go portados al fork (#66, T0.11).
+// Go security patches ported to the fork (#66, T0.11).
 
 import (
 	"bufio"
@@ -25,27 +25,26 @@ import (
 	"turbo/customNetHttp"
 )
 
-// CVE-2025-22871: las líneas de un cuerpo chunked deben terminar en CRLF; un
-// LF solo, o un CR antes del final, es un error (contrabando de peticiones
-// tras un proxy).
+// CVE-2025-22871: the lines of a chunked body must end in CRLF; a bare LF, or
+// a CR before the end, is an error (request smuggling behind a proxy).
 func TestT011_ChunkedBareLF(t *testing.T) {
 	for _, body := range []string{
-		"1\nX\r\n0\r\n\r\n",      // tamaño terminado en LF
-		"1\r\nX\r\n0\n\r\n",      // último tamaño terminado en LF
-		"1\rx\r\nX\r\n0\r\n\r\n", // CR antes del final
+		"1\nX\r\n0\r\n\r\n",      // Size line ended by a bare LF
+		"1\r\nX\r\n0\n\r\n",      // Last size line ended by a bare LF
+		"1\rx\r\nX\r\n0\r\n\r\n", // CR before the end
 	} {
 		if b, err := io.ReadAll(customNetHttp.NewChunkedReader(strings.NewReader(body))); err == nil {
-			t.Errorf("%q aceptado: %q", body, b)
+			t.Errorf("%q accepted: %q", body, b)
 		}
 	}
 	b, err := io.ReadAll(customNetHttp.NewChunkedReader(strings.NewReader("1;ext=1 \r\nX\r\n0\r\n\r\n")))
 	if err != nil || string(b) != "X" {
-		t.Errorf("cuerpo chunked válido: %q %v", b, err)
+		t.Errorf("valid chunked body: %q %v", b, err)
 	}
 }
 
-// CVE-2023-39326: un emisor no puede añadir sin límite datos que no son
-// contenido (extensiones de chunk).
+// CVE-2023-39326: a sender can't add an unlimited amount of data that isn't
+// content (chunk extensions).
 func TestT011_ChunkedExcess(t *testing.T) {
 	var sb strings.Builder
 	for i := 0; i < 64; i++ {
@@ -53,12 +52,12 @@ func TestT011_ChunkedExcess(t *testing.T) {
 	}
 	sb.WriteString("0\r\n\r\n")
 	if _, err := io.ReadAll(customNetHttp.NewChunkedReader(strings.NewReader(sb.String()))); err == nil {
-		t.Fatal("128 KiB de extensiones para 64 bytes de datos aceptados")
+		t.Fatal("128 KiB of extensions for 64 bytes of data accepted")
 	}
 }
 
-// CVE-2026-78667: una cabecera Range con más de 200 rangos se ignora y se
-// sirve el archivo completo.
+// CVE-2026-78667: a Range header with more than 200 ranges is ignored and the
+// whole file is served.
 func TestT011_RangeLimit(t *testing.T) {
 	dir := initForTest(t)
 	content := strings.Repeat("0123456789", 100)
@@ -73,16 +72,16 @@ func TestT011_RangeLimit(t *testing.T) {
 	}
 	code, _, err := get(base, "/r.txt", map[string]string{"Range": ranges(2)})
 	if err != nil || code != 206 {
-		t.Errorf("2 rangos -> %d %v; se esperaba 206", code, err)
+		t.Errorf("2 ranges -> %d %v; expected 206", code, err)
 	}
 	code, body, err := get(base, "/r.txt", map[string]string{"Range": ranges(201)})
 	if err != nil || code != 200 || body != content {
-		t.Errorf("201 rangos -> %d (%d bytes) %v; se esperaba 200 con el archivo completo", code, len(body), err)
+		t.Errorf("201 ranges -> %d (%d bytes) %v; expected 200 with the whole file", code, len(body), err)
 	}
 }
 
-// CVE-2026-94439: tras responder a un CONNECT, el servidor no reutiliza la
-// conexión para otra petición.
+// CVE-2026-94439: after answering a CONNECT, the server doesn't reuse the
+// connection for another request.
 func TestT011_ConnectNoReuse(t *testing.T) {
 	srv := &customNetHttp.Server{Handler: customNetHttp.HandlerFunc(func(w customNetHttp.ResponseWriter, r *customNetHttp.Request) {
 		w.WriteHeader(200)
@@ -103,19 +102,20 @@ func TestT011_ConnectNoReuse(t *testing.T) {
 	br := bufio.NewReader(conn)
 	res, err := http.ReadResponse(br, &http.Request{Method: "CONNECT"})
 	if err != nil {
-		t.Fatalf("respuesta al CONNECT: %v", err)
+		t.Fatalf("response to the CONNECT: %v", err)
 	}
 	if res.StatusCode != 200 {
 		t.Fatalf("CONNECT -> %d", res.StatusCode)
 	}
 	if res2, err := http.ReadResponse(br, nil); err == nil {
-		t.Fatalf("la conexión se reutilizó tras el CONNECT: segunda respuesta %d", res2.StatusCode)
+		t.Fatalf("the connection was reused after the CONNECT: second response %d", res2.StatusCode)
 	}
 }
 
-// selfSignedTLS devuelve una configuración TLS de servidor con un certificado
-// autofirmado para localhost y HTTP/2 habilitado.
-func selfSignedTLS(t *testing.T) *tls.Config {
+// selfSignedTLS returns a server TLS configuration with a self-signed
+// certificate for localhost and HTTP/2 enabled.
+func selfSignedTLS(t testing.TB) *tls.Config {
+	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -138,13 +138,13 @@ func selfSignedTLS(t *testing.T) *tls.Config {
 	}
 }
 
-// Prueba de humo de HTTP/2 tras portar los parches del control de flujo y de
-// HPACK (CVE-2026-78663, CVE-2026-97032): peticiones con cuerpo, cabeceras de
-// respuesta grandes (escritura asíncrona) y peticiones canceladas a medias.
+// HTTP/2 smoke test after porting the flow control and HPACK patches
+// (CVE-2026-78663, CVE-2026-97032): requests with a body, large response
+// headers (asynchronous write) and requests cancelled halfway.
 func TestT011_HTTP2Smoke(t *testing.T) {
 	srv := &customNetHttp.Server{Handler: customNetHttp.HandlerFunc(func(w customNetHttp.ResponseWriter, r *customNetHttp.Request) {
 		n, _ := io.Copy(io.Discard, r.Body)
-		w.Header().Set("X-Grande", strings.Repeat("v", 8000))
+		w.Header().Set("X-Big", strings.Repeat("v", 8000))
 		fmt.Fprintf(w, "%s %d", r.Proto, n)
 	})}
 	cfg := selfSignedTLS(t)
@@ -169,7 +169,7 @@ func TestT011_HTTP2Smoke(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			req, _ := http.NewRequestWithContext(ctx, "POST", url, strings.NewReader(body))
-			if i%4 == 0 { // cancelada mientras envía el cuerpo
+			if i%4 == 0 { // Cancelled while it sends the body
 				pr, pw := io.Pipe()
 				req, _ = http.NewRequestWithContext(ctx, "POST", url, pr)
 				go func() { pw.Write([]byte(body[:20000])); cancel(); pw.Close() }()
@@ -186,7 +186,7 @@ func TestT011_HTTP2Smoke(t *testing.T) {
 			b, _ := io.ReadAll(res.Body)
 			res.Body.Close()
 			if want := fmt.Sprintf("HTTP/2.0 %d", len(body)); string(b) != want {
-				errs <- fmt.Errorf("respuesta %q; se esperaba %q", b, want)
+				errs <- fmt.Errorf("response %q; expected %q", b, want)
 			}
 		}(i)
 	}
@@ -197,9 +197,9 @@ func TestT011_HTTP2Smoke(t *testing.T) {
 	}
 }
 
-// P6: los timeouts se aplican sin reiniciar. Una conexión HTTP/2 abierta con
-// IT = 0 no debe romperse cuando el panel activa IT (el temporizador de
-// inactividad no existía todavía).
+// P6: the timeouts apply without a restart. An HTTP/2 connection opened with
+// IT = 0 must not break when the panel enables IT (the idle timer didn't exist
+// yet).
 func TestT04_HTTP2IdleTimeoutEnabledLater(t *testing.T) {
 	previous := *serverTimeLimits.Load()
 	t.Cleanup(func() { withGlobalLock(func() { setTimeLimits(func(t *customNetHttp.Timeouts) { *t = previous }) }) })
@@ -230,10 +230,10 @@ func TestT04_HTTP2IdleTimeoutEnabledLater(t *testing.T) {
 			t.Fatalf("%s: %s %q", step, res.Proto, b)
 		}
 	}
-	fetch("con IT = 0")
+	fetch("with IT = 0")
 	withGlobalLock(func() { setTimeLimits(func(t *customNetHttp.Timeouts) { t.IT = 300 * time.Millisecond }) })
-	fetch("tras activar IT") // misma conexión: cierra un stream con el temporizador sin crear
-	fetch("tercera petición")
-	time.Sleep(time.Second) // el temporizador creado al vuelo cierra la conexión inactiva
-	fetch("tras el cierre por inactividad")
+	fetch("after enabling IT") // Same connection: it closes a stream while the timer doesn't exist yet
+	fetch("third request")
+	time.Sleep(time.Second) // The timer created on the fly closes the idle connection
+	fetch("after the idle close")
 }

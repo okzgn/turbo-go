@@ -1,8 +1,7 @@
 package main
 
-// Arnés de pruebas: reproduce la inicialización de main() en un directorio
-// temporal y arranca servidores en 127.0.0.1:0. Las pruebas que dependen de un
-// arreglo pendiente empiezan con t.Skip("pendiente de T…").
+// Test harness: reproduces the initialization of main() in a temporary
+// directory and starts servers on 127.0.0.1:0.
 
 import (
 	"bytes"
@@ -24,10 +23,9 @@ import (
 	"turbo/customNetHttp"
 )
 
-// TestMain compila las herramientas auxiliares (CGI de eco y Certbot simulado)
-// en TOOLS_BIN, o en una carpeta temporal si no está definida. En Windows debe
-// ser una ruta corta: Turbo rechaza rutas de preprocesador de más de 128
-// caracteres.
+// TestMain builds the helper tools (the echo CGI and the fake Certbot) in
+// TOOLS_BIN, or in a temporary folder if it isn't set. On Windows it must be
+// a short path: Turbo rejects preprocessor paths longer than 128 characters.
 func TestMain(m *testing.M) {
 	toolsDir := os.Getenv("TOOLS_BIN")
 	cleanup := false
@@ -49,7 +47,7 @@ func TestMain(m *testing.M) {
 		}
 		cmd := exec.Command("go", "build", "-o", out, "./internal/testtools/"+map[string]string{"cgiecho": "cgiecho", "certbot": "fakecertbot"}[tool])
 		if b, err := cmd.CombinedOutput(); err != nil {
-			fmt.Fprintf(os.Stderr, "no se pudo compilar %s: %v\n%s", tool, err, b)
+			fmt.Fprintf(os.Stderr, "could not build %s: %v\n%s", tool, err, b)
 			os.Exit(1)
 		}
 	}
@@ -60,11 +58,11 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// resetTestState deja el estado global como lo deja main() antes de leer la
-// configuración, con el directorio de sitios en dir.
+// resetTestState leaves the global state as main() leaves it before reading
+// the configuration, with the sites directory in dir.
 func resetTestState(dir string) {
-	// Una emisión de certificado de la prueba anterior escribiría en los mapas
-	// recién creados.
+	// A certificate issuance from the previous test would write into the maps
+	// just created.
 	waitIdle()
 
 	serverSetLogState(visitsLogName, nil)
@@ -74,6 +72,7 @@ func resetTestState(dir string) {
 	setPanelPassword("Admin")
 	userFromEnv, passwordFromEnv = false, false
 	sitesDir.Set(dir)
+	sitesDirValue.Set(dir)
 	startDir = dir
 
 	resetSettings()
@@ -96,31 +95,37 @@ func resetTestState(dir string) {
 	globalMutex.Unlock()
 
 	ipReferences.Clear()
+	ipReferenceCount.Store(0)
+	// Wrong current passwords count as failed logins: one test's must not block the next one's IP.
+	loginFailuresMutex.Lock()
+	clear(loginFailuresByIP)
+	loginFailuresMutex.Unlock()
 	globalRequestLimit.Store(0)
 	globalRequestWindow.Store(0)
 }
 
-// initForTest crea un directorio de sitios temporal con el sitio localhost
-// (index.html = "hola") y carga la configuración por defecto.
+// initForTest creates a temporary sites directory with the site localhost
+// (index.html = "hello") and loads the default configuration.
 func initForTest(t testing.TB) string {
+	t.Helper()
 	dir := filepath.ToSlash(t.TempDir()) + "/"
 	resetTestState(dir)
-	// Se registra después de TempDir, así que se ejecuta antes de borrarlo:
-	// Windows no deja borrar un log abierto.
+	// Registered after TempDir, so it runs before the directory is deleted:
+	// Windows doesn't let an open log be deleted.
 	t.Cleanup(func() {
 		serverSetLogState(visitsLogName, nil)
 		serverSetLogState(denialsLogName, nil)
 	})
 	os.MkdirAll(dir+"localhost/@", 0755)
-	os.WriteFile(dir+"localhost/@/index.html", []byte("hola"), 0644)
+	os.WriteFile(dir+"localhost/@/index.html", []byte("hello"), 0644)
 	updateSettings(false)
 	globalMutex.Lock()
-	addIndex("localhost", "index.html") // ya lo añade constructSite; se deja explícito
+	addIndex("localhost", "index.html") // constructSite already adds it; it is kept explicit
 	globalMutex.Unlock()
 	return dir
 }
 
-// syncBuffer recoge el ErrorLog del servidor (avisos como "superfluous
+// syncBuffer collects the server's ErrorLog (warnings such as "superfluous
 // response.WriteHeader").
 type syncBuffer struct {
 	mu  sync.Mutex
@@ -140,13 +145,15 @@ func (b *syncBuffer) String() string {
 }
 
 func startServer(t testing.TB) string {
+	t.Helper()
 	base, _ := startServerLog(t)
 	return base
 }
 
-// startServerLog arranca un servidor HTTP como el de main() y devuelve su URL
-// base y el ErrorLog del servidor.
+// startServerLog starts an HTTP server like the one of main() and returns its
+// base URL and the server's ErrorLog.
 func startServerLog(t testing.TB) (string, *syncBuffer) {
+	t.Helper()
 	errLog := &syncBuffer{}
 	srv := &customNetHttp.Server{
 		ReadHeaderTimeout: serverTimeLimits.Load().RHT,
@@ -209,6 +216,7 @@ func post(base, path, token string) (int, string, error) {
 }
 
 func login(t testing.TB, base string) string {
+	t.Helper()
 	var buf bytes.Buffer
 	w := multipart.NewWriter(&buf)
 	w.WriteField("u", "Turbo")
@@ -225,12 +233,12 @@ func login(t testing.TB, base string) string {
 	res.Body.Close()
 	s := string(b)
 	if !strings.HasPrefix(s, "ok") {
-		t.Fatalf("login falló: %d %q", res.StatusCode, s)
+		t.Fatalf("login failed: %d %q", res.StatusCode, s)
 	}
 	return strings.TrimPrefix(s, "ok")
 }
 
-// toolPath devuelve la ruta de una herramienta compilada por TestMain.
+// toolPath returns the path of a tool built by TestMain.
 func toolPath(name string) string {
 	p := filepath.Join(os.Getenv("TOOLS_BIN"), name)
 	if runtime.GOOS == "windows" {
@@ -252,9 +260,10 @@ func rawGet(base, host, path string) (*http.Response, string, error) {
 	return res, string(b), nil
 }
 
-// useFakeCertbot pone el Certbot simulado en el PATH y devuelve el archivo
-// donde registra cada invocación. mode "ok" emite un certificado autofirmado.
+// useFakeCertbot puts the fake Certbot in the PATH and returns the file where
+// it logs each invocation. Mode "ok" issues a self-signed certificate.
 func useFakeCertbot(t *testing.T, mode string) string {
+	t.Helper()
 	logf := filepath.ToSlash(filepath.Join(t.TempDir(), "certbot.log"))
 	t.Setenv("PATH", os.Getenv("TOOLS_BIN")+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("FAKE_CERTBOT_LOG", logf)
@@ -263,15 +272,27 @@ func useFakeCertbot(t *testing.T, mode string) string {
 	return logf
 }
 
-// waitIdle espera a que no haya ninguna emisión de certificado en curso.
+// waitIdle waits until no certificate issuance is in progress and no retry is
+// pending, and gives whatever that issuance left running 300 ms more; with
+// nothing in progress, the usual case, it doesn't wait.
 func waitIdle() {
 	busy := func() bool {
 		globalMutex.RLock()
 		defer globalMutex.RUnlock()
-		return currentCertDomain != ""
+		return currentCertDomain != "" || len(certPending) > 0
 	}
+	waited := false
 	for i := 0; i < 100 && busy(); i++ {
+		waited = true
 		time.Sleep(100 * time.Millisecond)
 	}
-	time.Sleep(300 * time.Millisecond)
+	if waited {
+		time.Sleep(300 * time.Millisecond)
+	}
+}
+
+// fileExists says whether path exists and is a file (not a folder).
+func fileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }

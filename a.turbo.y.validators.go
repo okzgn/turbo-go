@@ -32,7 +32,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 	"turbo/customNetHttp"
 )
@@ -41,9 +40,8 @@ var (
 	currentDirPlaceholder = "TURBO_CURRENT_DIR"
 	rawConfigMap          map[string]map[string]interface{}
 
-	siteExistenceResetFallbacks = map[string]func(string, string){ // Site & subdomains existence check reset fallback
-		"/": func(domain string, subdomain string) {},
-	}
+	// siteDirStat looks at the folders of a site (a variable so that tests can make it slow).
+	siteDirStat = os.Stat
 
 	siteExistenceCheckers = map[string]func(bool, string, string) (bool, string){ // Site & subdomains existence check
 		"/": func(checkExists bool, domain string, subdomain string) (bool, string) {
@@ -58,7 +56,7 @@ var (
 				targetPath = domainDir
 			}
 			if isValidHost, _ := hostOk(targetPath, false); !isValidHost {
-				return false, "Nombre incorrecto de directorio de sitio"
+				return false, "Invalid site directory name"
 			}
 			domainDir = changeWildcards(domainDir)
 			pathSeparator := ""
@@ -66,18 +64,20 @@ var (
 				pathSeparator = "/"
 				subdomainDir = changeWildcards(subdomainDir)
 			}
-			_, readErr := os.ReadDir(sitesDir.Get() + domainDir + pathSeparator + subdomainDir)
-			if readErr != nil {
-				return false, "Directorio de sitio inexistente: " + domainDir + pathSeparator + subdomainDir
+			if info, statErr := siteDirStat(sitesDir.Get() + domainDir + pathSeparator + subdomainDir); statErr != nil || !info.IsDir() {
+				return false, "Site directory not found: " + domainDir + pathSeparator + subdomainDir
 			}
-			_, readErr = os.ReadDir(sitesDir.Get() + domainDir + pathSeparator + subdomainDir + "/" + publicDirName)
-			if readErr != nil {
-				return false, "Directorio de contenido de sitio inexistente: " + domainDir + pathSeparator + subdomainDir + "/" + publicDirName
+			if info, statErr := siteDirStat(sitesDir.Get() + domainDir + pathSeparator + subdomainDir + "/" + publicDirName); statErr != nil || !info.IsDir() {
+				return false, "Site content directory not found: " + domainDir + pathSeparator + subdomainDir + "/" + publicDirName
 			}
 			if checkExists && !siteExists(origDomain, origSubdomain) {
-				_constructSite(origDomain, origSubdomain)
+				if problem := siteNameProblem(origDomain, origSubdomain); problem != "" {
+					slog.Warn("turbo.config site discarded", "site", origDomain, "subdomain", origSubdomain, "reason", problem)
+					return false, problem
+				}
+				constructSiteWithoutIndex(origDomain, origSubdomain)
 			}
-			return true, "Directorio de sitio procesado"
+			return true, "Site directory processed"
 		},
 	}
 
@@ -89,13 +89,14 @@ var (
 			"M":   func() {},
 			"PA":  func() { panelAccess.Store(&panelAccessList{}) },
 			"MUB": func() { maxURILength.Store(1000) },
-			"MHB": func() { maxHeaderBytes.Store(5000) }, // Need to be set first.
+			"MHB": func() { maxHeaderBytes.Store(5000) },
 			"MBB": func() { maxBodySize.Store(1048576) }, // 1 Mb
-			"CIL": func() { atomic.StoreInt64(&serverRequestLimits[0], 10000*int64(time.Millisecond)) },
-			"CIS": func() { atomic.StoreInt64(&serverRequestLimits[1], 1000*int64(time.Millisecond)) }, // Need to be first to be set
-			"CII": func() { atomic.StoreInt64(&serverRequestLimits[2], 100) },
+			"CIL": func() { serverRequestLimits.CIL.Store(10000 * int64(time.Millisecond)) },
+			"CIS": func() { serverRequestLimits.CIS.Store(1000 * int64(time.Millisecond)) },
+			"CII": func() { serverRequestLimits.CII.Store(100) },
 			"CGL": func() { globalRequestLimit.Store(0) },
-			"RT":  func() { setTimeLimits(func(limits *customNetHttp.Timeouts) { limits.RT = 5 * time.Second }) }, // Need to be first to be set
+			"CGP": func() { cgiProcesses.Store(0) },
+			"RT":  func() { setTimeLimits(func(limits *customNetHttp.Timeouts) { limits.RT = 5 * time.Second }) },
 			"RHT": func() { setTimeLimits(func(limits *customNetHttp.Timeouts) { limits.RHT = 1 * time.Second }) },
 			"WT":  func() { setTimeLimits(func(limits *customNetHttp.Timeouts) { limits.WT = 10 * time.Second }) },
 			"IT":  func() { setTimeLimits(func(limits *customNetHttp.Timeouts) { limits.IT = 2 * time.Second }) },
@@ -104,40 +105,38 @@ var (
 
 	adminDeleteHandlers = map[string]func(string) (bool, string){
 		"@": func(ip string) (bool, string) {
-			ip = ipAddr(strings.TrimSpace(ip)) // As it was saved: canonical (H23)
+			ip = ipAddr(strings.TrimSpace(ip)) // As it was saved: canonical
 			if _, exists := deniedIPList()[ip]; !exists {
-				return false, "IP inexistente"
+				return false, "IP not found"
 			}
 			setDeniedIPs(func(list map[string]int64) { delete(list, ip) })
-			return true, "IP denegado eliminado"
+			return true, "Denied IP removed"
 		},
 		"#": func(httpCode string) (bool, string) {
 			code, err := strconv.Atoi(httpCode)
 			if err != nil {
-				return false, "Código HTTP inválido"
+				return false, "Invalid HTTP code"
 			}
 			var exists bool
 			if _, exists = (*httpResponses.Load())[code]; !exists {
-				return false, "Respuesta inexistente"
+				return false, "Response not found"
 			}
 			if _, exists = fixedHTTPResponses[code]; exists {
-				return false, "Respuesta inmutable"
+				return false, "Fixed response"
 			}
 			setHTTPResponses(func(responses map[int]string) { delete(responses, code) })
-			return true, "Respuesta a código HTTP eliminada"
+			return true, "HTTP code response removed"
 		},
-		"_": func(char string) (bool, string) {
-			unescaped := char
-			unescaped = replaceURIChars(unescaped)
+		"_": func(char string) (bool, string) { // The API already undid the replacements of the parameter
 			var exists bool
-			if _, exists = charReplacements[unescaped]; !exists {
-				return false, "Reemplazo inexistente"
+			if _, exists = charReplacements[char]; !exists {
+				return false, "Replacement not found"
 			}
-			if _, exists = fixedCharReplacements[unescaped]; exists {
-				return false, "Reemplazo inmutable"
+			if _, exists = fixedCharReplacements[char]; exists {
+				return false, "Fixed replacement"
 			}
-			delete(charReplacements, unescaped)
-			return true, "Reemplazo a caracter(es) eliminado"
+			delete(charReplacements, char)
+			return true, "Character replacement removed"
 		},
 	}
 
@@ -146,91 +145,81 @@ var (
 			ip = strings.TrimSpace(ip)
 			parsedIP := net.ParseIP(ip)
 			if parsedIP == nil || parsedIP.IsUnspecified() {
-				return false, "IP incorrecto"
+				return false, "Invalid IP"
 			}
 			if parsedIP.IsLoopback() {
-				return false, "IP localhost"
+				return false, "Loopback IP"
 			}
 			address := ipAddr(ip)
 			dateText := strings.TrimSpace(unixDate)
 			parsedUnix, parseErr := strconv.ParseInt(dateText, 10, 64)
 			if parseErr != nil {
-				return false, "Fecha UNIX incorrecta"
+				return false, "Invalid UNIX date"
 			}
 			existingUnix, exists := deniedIPList()[address]
 			if parsedUnix == 0 || time.Now().Unix() > parsedUnix {
 				if exists {
 					setDeniedIPs(func(list map[string]int64) { delete(list, address) })
-					return true, "IP denegado eliminado"
+					return true, "Denied IP removed"
 				}
-				return false, "Fecha UNIX expirada"
+				return false, "Expired UNIX date"
 			}
 			isModified := true
-			change := "agregado"
+			change := "added"
 			if strconv.FormatInt(existingUnix, 10) == dateText {
 				isModified = false
-				change = "sin cambios"
+				change = "unchanged"
 			} else if exists {
-				change = "modificado"
+				change = "modified"
 			}
 			setDeniedIPs(func(list map[string]int64) { list[address] = parsedUnix })
-			return isModified, "IP denegado " + change
+			return isModified, "Denied IP " + change
 		},
 		"#": func(httpCode string, response string) (bool, string) {
 			value := response
 			codeInt, parseErr := strconv.Atoi(httpCode)
 			if parseErr != nil {
-				return false, "Código HTTP inválido"
+				return false, "Invalid HTTP code"
 			}
 			if (codeInt < 400 || codeInt > 599) && codeInt != 0 {
-				return false, "Código HTTP incorrecto"
+				return false, "HTTP code out of range"
 			}
 			value = strings.TrimSpace(value)
 			length := len(value)
 			if length < 1 || length > 2048 {
-				return false, "Respuesta muy corta o larga"
+				return false, "Response too short or too long"
 			}
 			current, exists := (*httpResponses.Load())[codeInt]
 			if exists && current == value {
-				return false, "Respuesta sin cambios"
+				return false, "Response unchanged"
 			}
 			setHTTPResponses(func(responses map[int]string) { responses[codeInt] = value })
-			return true, "Respuesta guardada"
+			return true, "Response saved"
 		},
-		"_": func(char string, replacement string) (bool, string) {
-			unescapedChar := replaceURIChars(char)
-			unescapedRepl := replaceURIChars(replacement)
-			for fixedChar := range fixedCharReplacements {
-				if (strings.IndexByte(char, fixedChar[0]) != -1 && char != fixedChar) || (strings.IndexByte(unescapedChar, fixedChar[0]) != -1 && unescapedChar != fixedChar) {
-					return false, "Caracter de reemplazo inválido"
-				}
-				if strings.IndexByte(replacement, fixedChar[0]) != -1 || strings.IndexByte(unescapedRepl, fixedChar[0]) != -1 {
-					return false, "Reemplazo inválido"
-				}
+		"_": func(char string, replacement string) (bool, string) { // replacement is the token that stands for char
+			if fixedCharReplacements[char] {
+				return false, "Fixed replacement"
 			}
-			var length int
-			if unescapedChar != " " {
-				unescapedChar = strings.TrimSpace(unescapedChar)
-				length = len(unescapedChar)
-				if length < 1 {
-					return false, "Sin caracter"
-				}
-				if length > 4 {
-					return false, "Muchos caracteres"
-				}
+			if char != " " {
+				char = strings.TrimSpace(char)
 			}
-			if unescapedRepl != " " {
-				unescapedRepl = strings.TrimSpace(unescapedRepl)
-				length = len(unescapedRepl)
-				if length < 1 || length > 16 {
-					return false, "Reemplazo muy corto o largo"
-				}
+			if length := len(char); length < 1 {
+				return false, "No character"
+			} else if length > 4 {
+				return false, "Too many characters"
 			}
-			if current, exists := charReplacements[unescapedChar]; exists && current == unescapedRepl {
-				return false, "Reemplazo sin cambios"
+			replacement = strings.TrimSpace(replacement)
+			if length := len(replacement); length < 2 || length > 16 {
+				return false, "Replacement too short or too long"
 			}
-			charReplacements[unescapedChar] = unescapedRepl
-			return true, "Reemplazo de caracter(es) guardado"
+			if problem := replacementTokenProblem(char, replacement); problem != "" {
+				return false, problem
+			}
+			if current, exists := charReplacements[char]; exists && current == replacement {
+				return false, "Replacement unchanged"
+			}
+			charReplacements[char] = replacement
+			return true, "Character replacement saved"
 		},
 	}
 
@@ -245,24 +234,25 @@ var (
 	}
 
 	defaultSettingKeysGroup = map[string][]string{
-		".": {"C", "M", "PA", "MUB", "MHB", "MBB", "CIL", "CIS", "CII", "CGL", "RT", "RHT", "WT", "IT"},
+		".": {"M", "PA", "MUB", "MHB", "MBB", "CIL", "CIS", "CII", "CGL", "CGP", "RT", "RHT", "WT", "IT"}, // Not "C": saving is an action
 	}
 
-	defaultSettingErrorExceptions = map[string]map[string]map[string]bool{ // ME (E, for exceptions). There are some exceptions on errors, some cause unnecessary resets
+	defaultSettingErrorExceptions = map[string]map[string]map[string]bool{ // Refusals that keep the setting as it is, instead of resetting it to its default
 		".": {
-			"M":   map[string]bool{"Directorio de sitios sin cambios": true},
-			"PA":  map[string]bool{"Valor sin cambios": true},
-			"MUB": map[string]bool{"Valor sin cambios": true},
-			"MHB": map[string]bool{"Valor sin cambios": true},
-			"MBB": map[string]bool{"Valor sin cambios": true},
-			"CIL": map[string]bool{"Valor sin cambios": true},
-			"CIS": map[string]bool{"Valor sin cambios": true},
-			"CII": map[string]bool{"Valor sin cambios": true},
-			"CGL": map[string]bool{"Valor sin cambios": true},
-			"RT":  map[string]bool{"Valor sin cambios": true},
-			"RHT": map[string]bool{"Valor sin cambios": true},
-			"WT":  map[string]bool{"Valor sin cambios": true},
-			"IT":  map[string]bool{"Valor sin cambios": true},
+			"M":   map[string]bool{"Sites directory unchanged": true},
+			"PA":  map[string]bool{"Value unchanged": true},
+			"MUB": map[string]bool{"Value unchanged": true},
+			"MHB": map[string]bool{"Value unchanged": true},
+			"MBB": map[string]bool{"Value unchanged": true},
+			"CIL": map[string]bool{"Value unchanged": true},
+			"CIS": map[string]bool{"Value unchanged": true},
+			"CII": map[string]bool{"Value unchanged": true},
+			"CGL": map[string]bool{"Value unchanged": true},
+			"CGP": map[string]bool{"Value unchanged": true},
+			"RT":  map[string]bool{"Value unchanged": true},
+			"RHT": map[string]bool{"Value unchanged": true},
+			"WT":  map[string]bool{"Value unchanged": true},
+			"IT":  map[string]bool{"Value unchanged": true},
 		},
 	}
 
@@ -270,380 +260,429 @@ var (
 		".": {
 			"C": func(args ...string) (bool, string) {
 				if len(args) != 2 {
-					return false, msgMissingData + " en C"
+					return false, msgMissingData + " for C"
 				}
 				if !passwordMatches(args[1]) {
-					return false, "Contraseña incorrecta"
+					return false, "Wrong password"
 				}
-				if configSchemaRead > configSchema && args[0] != "sobrescribir" {
-					return false, "turbo.config es de una versión posterior de Turbo (esquema " + strconv.Itoa(configSchemaRead) + "): guardar perdería sus ajustes nuevos. Para sobrescribirlo, confírmelo (en la API, a=sobrescribir)"
+				var schemaRead int // Saving takes the locks itself: callers of "C" don't hold the global lock
+				withReadLock(func() { schemaRead = configSchemaRead })
+				if schemaRead > configSchema && args[0] != "overwrite" {
+					return false, "turbo.config is from a later version of Turbo (schema " + strconv.Itoa(schemaRead) + "): saving would lose its new settings. To overwrite it, confirm (in the API, a=overwrite)"
 				}
 				if !saveDefaultConfig() {
-					return false, "Error al guardar"
+					return false, "Error saving"
 				}
-				return true, "Configuración guardada"
+				return true, "Configuration saved"
 			},
 			"U": func(args ...string) (bool, string) {
 				if len(args) != 2 {
-					return false, msgMissingData + " en U"
+					return false, msgMissingData + " for U"
 				}
 				if !passwordMatches(args[1]) {
-					return false, "Contraseña actual incorrecta"
+					return false, "Wrong current password"
 				}
 				length := len(args[0])
 				if length < 1 || length > 24 {
-					return false, "Usuario muy largo o corto"
+					return false, "User too long or too short"
 				}
 				if args[0] == panelUser.Get() {
-					return false, "Usuario sin cambios"
+					return false, "User unchanged"
 				}
 				panelUser.Set(args[0])
-				return true, "Usuario cambiado"
+				return true, "User changed"
 			},
 			"P": func(args ...string) (bool, string) { // args[2], if given, is newPasswordHash(args[0]), computed before the lock
 				if len(args) != 2 && len(args) != 3 {
-					return false, msgMissingData + " en P"
+					return false, msgMissingData + " for P"
 				}
 				if !passwordMatches(args[1]) {
-					return false, "Contraseña actual incorrecta"
+					return false, "Wrong current password"
 				}
-				hash, problem := "", ""
+				hash := ""
 				if len(args) == 3 {
 					hash = args[2]
-				} else if hash, problem = newPasswordHash(args[0]); problem != "" {
+				} else if newHash, problem, err := newPasswordHash(args[0]); err != nil {
+					return false, "Error hashing the password"
+				} else if problem != "" {
 					return false, problem
+				} else {
+					hash = newHash
 				}
 				applyPasswordHash(hash, args[0])
-				return true, "Contraseña cambiada"
+				return true, "Password changed"
 			},
 			"M": func(args ...string) (bool, string) {
 				if len(args) < 2 {
-					return false, msgMissingData + " en D"
+					return false, msgMissingData + " for M"
 				}
 				if !passwordMatches(args[1]) {
-					return false, "Contraseña actual incorrecta"
+					return false, "Wrong current password"
 				}
 
-				if putSlash(args[0]) == sitesDir.Get() {
-					return false, "Directorio de sitios sin cambios"
+				resolved, err := resolveSitesDir(args[0])
+				if err != nil {
+					return false, "Sites directory not found"
 				}
-
-				args[0] = sitesDirSetting(args[0])
-				info, err := os.Stat(args[0])
+				if sameDirWith(resolved, sitesDir.Get(), diskStat) {
+					if loadingConfig { // The same folder written another way: saved as the file writes it
+						sitesDirValue.Set(args[0])
+					}
+					return false, "Sites directory unchanged"
+				}
+				info, err := diskStat(resolved)
 				if err != nil || !info.IsDir() { // Doesn't exist or the path isn't valid on this system
-					return false, "Directorio de sitios inexistente"
+					return false, "Sites directory not found"
 				}
-				sitesDir.Set(args[0])
-				return true, "Directorio de sitios configurado"
+				sitesDir.Set(resolved)
+				sitesDirValue.Set(args[0])
+				return true, "Sites directory set"
 			},
-			"PA": func(args ...string) (bool, string) { // Where the panel answers (DP7)
+			"PA": func(args ...string) (bool, string) { // Where the panel answers
 				if len(args) != 2 {
-					return false, msgMissingData + " en PA"
+					return false, msgMissingData + " for PA"
 				}
 				if !passwordMatches(args[1]) {
-					return false, "Contraseña actual incorrecta"
+					return false, "Wrong current password"
 				}
 				list, errorMsg := parsePanelAccess(args[0])
 				if list == nil {
 					return false, errorMsg
 				}
 				if list.setting == panelAccess.Load().setting {
-					return false, "Valor sin cambios"
+					return false, "Value unchanged"
 				}
 				panelAccess.Store(list)
 				if list.setting == "" {
-					return true, "Panel accesible desde cualquier host"
+					return true, "Panel reachable from any host"
 				}
-				return true, "Hosts y redes del panel guardados"
+				message := "Panel hosts and networks saved"
+				for _, ip := range list.ipHosts { // Easy to take for a network
+					mask := "/32"
+					if strings.IndexByte(ip, ':') != -1 {
+						mask = "/128"
+					}
+					message += ". " + ip + " is a host (it is compared with the Host header); to limit the client's IP, use " + ip + mask
+				}
+				return true, message
 			},
 			"MUB": func(args ...string) (bool, string) {
 				if len(args) != 2 {
-					return false, msgMissingData + " en MUB"
+					return false, msgMissingData + " for MUB"
 				}
 				if !passwordMatches(args[1]) {
-					return false, "Contraseña actual incorrecta"
+					return false, "Wrong current password"
 				}
 				value, err := strconv.Atoi(args[0])
 				if err != nil {
-					return false, "Valor incorrecto"
+					return false, "Invalid value"
 				}
 				if int64(value) == maxURILength.Load() {
-					return false, "Valor sin cambios"
+					return false, "Value unchanged"
 				}
 				if value < 40 {
-					return false, "Inferior a 40 bytes"
+					return false, "Less than 40 bytes"
 				}
 				if value > 10240 {
-					return false, "Superior a 10240 bytes"
+					return false, "More than 10240 bytes"
 				}
 				maxURILength.Store(int64(value))
-				return true, "Longitud máxima de URIs guardada"
+				return true, "Maximum URI length saved"
 			},
 			"MHB": func(args ...string) (bool, string) {
 				if len(args) != 2 {
-					return false, msgMissingData + " en MHB"
+					return false, msgMissingData + " for MHB"
 				}
 				if !passwordMatches(args[1]) {
-					return false, "Contraseña actual incorrecta"
+					return false, "Wrong current password"
 				}
 				value, err := strconv.Atoi(args[0])
 				if err != nil {
-					return false, "Valor incorrecto"
+					return false, "Invalid value"
 				}
 				if int64(value) == maxHeaderBytes.Load() {
-					return false, "Valor sin cambios"
+					return false, "Value unchanged"
 				}
 				if value < 600 {
-					return false, "Inferior a 600 bytes"
+					return false, "Less than 600 bytes"
 				}
 				if value > 20480 {
-					return false, "Superior a 20480 bytes"
+					return false, "More than 20480 bytes"
 				}
 				maxHeaderBytes.Store(int64(value))
-				return true, "Longitud máxima de cabeceras guardada"
+				return true, "Maximum header length saved"
 			},
 			"MBB": func(args ...string) (bool, string) {
 				if len(args) != 2 {
-					return false, msgMissingData + " en MBB"
+					return false, msgMissingData + " for MBB"
 				}
 				if !passwordMatches(args[1]) {
-					return false, "Contraseña actual incorrecta"
+					return false, "Wrong current password"
 				}
 				value, err := strconv.ParseInt(args[0], 10, 64)
 				if err != nil {
-					return false, "Valor incorrecto"
+					return false, "Invalid value"
 				}
 				if value == maxBodySize.Load() {
-					return false, "Valor sin cambios"
+					return false, "Value unchanged"
 				}
 				if value < 1 {
-					return false, "Inferior a 1 byte"
+					return false, "Less than 1 byte"
 				}
 				if value > 104857600 {
-					return false, "Superior a 104857600 bytes (100 Mb)"
+					return false, "More than 104857600 bytes (100 MB)"
 				}
 				maxBodySize.Store(value)
-				return true, "Longitud máxima de contenidos guardada"
+				return true, "Maximum body size saved"
 			},
 			"CIL": func(args ...string) (bool, string) {
 				if len(args) != 2 {
-					return false, msgMissingData + " en CIL"
+					return false, msgMissingData + " for CIL"
 				}
 				if !passwordMatches(args[1]) {
-					return false, "Contraseña actual incorrecta"
+					return false, "Wrong current password"
 				}
 				value, err := strconv.ParseInt(args[0], 10, 64)
 				if err != nil {
-					return false, "Valor incorrecto"
+					return false, "Invalid value"
 				}
-				if value*int64(time.Millisecond) == serverRequestLimits[0] {
-					return false, "Valor sin cambios"
+				if value*int64(time.Millisecond) == serverRequestLimits.CIL.Load() {
+					return false, "Value unchanged"
 				}
 				if value < 1000 {
-					return false, "Inferior a 1000 milisegundos"
+					return false, "Less than 1000 milliseconds"
 				}
 				if value > 800000 {
-					return false, "Superior a 800000 milisegundos"
+					return false, "More than 800000 milliseconds"
 				}
-				atomic.StoreInt64(&serverRequestLimits[0], value*int64(time.Millisecond))
-				return true, "Límite de intervalo para peticiones guardado"
+				serverRequestLimits.CIL.Store(value * int64(time.Millisecond))
+				return true, "Request interval limit saved"
 			},
 			"CIS": func(args ...string) (bool, string) {
 				if len(args) != 2 {
-					return false, msgMissingData + " en CIS"
+					return false, msgMissingData + " for CIS"
 				}
 				if !passwordMatches(args[1]) {
-					return false, "Contraseña actual incorrecta"
+					return false, "Wrong current password"
 				}
 				value, err := strconv.ParseInt(args[0], 10, 64)
 				if err != nil {
-					return false, "Valor incorrecto"
-				}
-				if value*int64(time.Millisecond) == serverRequestLimits[1] {
-					return false, "Valor sin cambios"
+					return false, "Invalid value"
 				}
 				if value < 10 {
-					return false, "Inferior a 10 milisegundos"
+					return false, "Less than 10 milliseconds"
 				}
 				if value > 50000 {
-					return false, "Superior a 50000 milisegundos"
+					return false, "More than 50000 milliseconds"
 				}
-				atomic.StoreInt64(&serverRequestLimits[1], value*int64(time.Millisecond))
-				return true, "Intervalo para peticiones guardado"
+				if problem := rateLimitProblem(value, serverRequestLimits.CII.Load()); problem != "" && !loadingConfig {
+					return false, "Value incompatible with CII (" + strconv.FormatInt(serverRequestLimits.CII.Load(), 10) + "): " + problem
+				}
+				if value*int64(time.Millisecond) == serverRequestLimits.CIS.Load() {
+					return false, "Value unchanged"
+				}
+				serverRequestLimits.CIS.Store(value * int64(time.Millisecond))
+				return true, "Request interval saved"
 			},
 			"CII": func(args ...string) (bool, string) {
 				if len(args) != 2 {
-					return false, msgMissingData + " en CII"
+					return false, msgMissingData + " for CII"
 				}
 				if !passwordMatches(args[1]) {
-					return false, "Contraseña actual incorrecta"
+					return false, "Wrong current password"
 				}
 				value, err := strconv.ParseInt(args[0], 10, 64)
 				if err != nil {
-					return false, "Valor incorrecto"
-				}
-				if value == serverRequestLimits[2] {
-					return false, "Valor sin cambios"
+					return false, "Invalid value"
 				}
 				if value < 1 {
-					return false, "Inferior a 1"
+					return false, "Less than 1"
 				}
-				cisMillis := serverRequestLimits[1] / int64(time.Millisecond) // CIS in milliseconds
-				if value > cisMillis {
-					return false, "Superior a " + strconv.FormatInt(cisMillis, 10)
+				if problem := rateLimitProblem(serverRequestLimits.CIS.Load()/int64(time.Millisecond), value); problem != "" && !loadingConfig {
+					return false, problem
 				}
-				if cisMillis/value > 66 { // Represent minimum capability for panel, 1000ms => 2000 / 30 reqs = 66
-					return false, "Valor incompatible con el panel"
+				if value == serverRequestLimits.CII.Load() {
+					return false, "Value unchanged"
 				}
-				atomic.StoreInt64(&serverRequestLimits[2], value)
-				return true, "Peticiones máximas por intervalo guardado"
+				serverRequestLimits.CII.Store(value)
+				return true, "Maximum requests per interval saved"
 			},
-			"CGL": func(args ...string) (bool, string) { // Requests per second for the whole server (D4)
+			"CGL": func(args ...string) (bool, string) { // Requests per second for the whole server
 				if len(args) != 2 {
-					return false, msgMissingData + " en CGL"
+					return false, msgMissingData + " for CGL"
 				}
 				if !passwordMatches(args[1]) {
-					return false, "Contraseña actual incorrecta"
+					return false, "Wrong current password"
 				}
 				value, err := strconv.ParseInt(args[0], 10, 64)
 				if err != nil {
-					return false, "Valor incorrecto"
+					return false, "Invalid value"
 				}
 				if value == globalRequestLimit.Load() {
-					return false, "Valor sin cambios"
+					return false, "Value unchanged"
 				}
 				if value != 0 && (value < 10 || value > 1000000) {
-					return false, "Debe ser 0 (sin límite) o de 10 a 1000000"
+					return false, "Must be 0 (no limit) or from 10 to 1000000"
 				}
 				globalRequestLimit.Store(value)
 				if value == 0 {
-					return true, "Límite global de peticiones desactivado"
+					return true, "Global request limit disabled"
 				}
-				return true, "Límite global de peticiones guardado"
+				return true, "Global request limit saved"
+			},
+			"CGP": func(args ...string) (bool, string) { // CGI processes at a time
+				if len(args) != 2 {
+					return false, msgMissingData + " for CGP"
+				}
+				if !passwordMatches(args[1]) {
+					return false, "Wrong current password"
+				}
+				value, err := strconv.ParseInt(args[0], 10, 64)
+				if err != nil {
+					return false, "Invalid value"
+				}
+				if value == cgiProcesses.Load() {
+					return false, "Value unchanged"
+				}
+				if value < 0 || value > 100000 {
+					return false, "Must be 0 (automatic) or from 1 to 100000"
+				}
+				cgiProcesses.Store(value)
+				if value == 0 {
+					return true, "Concurrent CGI processes: automatic (" + strconv.FormatInt(cgiProcessLimit(), 10) + " on this machine)"
+				}
+				return true, "Concurrent CGI processes saved"
 			},
 			"RT": func(args ...string) (bool, string) {
-				settingArgs := args // Need to be the first to be set
+				settingArgs := args
 				if len(settingArgs) != 2 {
-					return false, msgMissingData + " en RT"
+					return false, msgMissingData + " for RT"
 				}
 				if !passwordMatches(settingArgs[1]) {
-					return false, "Contraseña actual incorrecta"
+					return false, "Wrong current password"
 				}
 				value, err := time.ParseDuration(settingArgs[0])
 				if err != nil {
-					return false, "Valor incorrecto"
-				}
-				if value == serverTimeLimits.Load().RT {
-					return false, "Valor sin cambios"
+					return false, "Invalid value"
 				}
 				if value != 0 {
 					if value < 100*time.Millisecond {
-						return false, "Inferior a 100 milisegundos"
+						return false, "Less than 100 milliseconds"
 					}
 					if value > 900000*time.Millisecond {
-						return false, "Superior a 15 minutos"
+						return false, "More than 15 minutes"
 					}
 				}
+				if readTimeProblem(value, serverTimeLimits.Load().RHT) && !loadingConfig {
+					return false, "Less than twice the header read timeout (RHT " + serverTimeLimits.Load().RHT.String() + ")"
+				}
+				if value == serverTimeLimits.Load().RT {
+					return false, "Value unchanged"
+				}
 				setTimeLimits(func(limits *customNetHttp.Timeouts) { limits.RT = value })
-				return true, "Valor guardado lectura de peticiones"
+				return true, "Request read timeout saved"
 			},
 			"RHT": func(args ...string) (bool, string) {
 				if len(args) != 2 {
-					return false, msgMissingData + " en RHT"
+					return false, msgMissingData + " for RHT"
 				}
 				if !passwordMatches(args[1]) {
-					return false, "Contraseña actual incorrecta"
+					return false, "Wrong current password"
 				}
 				value, err := time.ParseDuration(args[0])
 				if err != nil {
-					return false, "Valor incorrecto"
-				}
-				if value == serverTimeLimits.Load().RHT {
-					return false, "Valor sin cambios"
+					return false, "Invalid value"
 				}
 				if value != 0 {
 					if value < 50*time.Millisecond {
-						return false, "Inferior a 50 milisegundos"
+						return false, "Less than 50 milliseconds"
 					}
-					if rt := serverTimeLimits.Load().RT; rt > 0 && value > rt/2 { // With RT = 0 there is no limit to be half of
-						return false, "Más que la mitad de lectura de peticiones"
+					if readTimeProblem(serverTimeLimits.Load().RT, value) && !loadingConfig {
+						return false, "More than half the request read timeout"
 					}
 					if value > 450000*time.Millisecond {
-						return false, "Superior a 7.5 minutos"
+						return false, "More than 7.5 minutes"
 					}
 				}
+				if value == serverTimeLimits.Load().RHT {
+					return false, "Value unchanged"
+				}
 				setTimeLimits(func(limits *customNetHttp.Timeouts) { limits.RHT = value })
-				return true, "Valor guardado de lectura de cabeceras"
+				return true, "Header read timeout saved"
 			},
 			"WT": func(args ...string) (bool, string) {
 				if len(args) != 2 {
-					return false, msgMissingData + " en WT"
+					return false, msgMissingData + " for WT"
 				}
 				if !passwordMatches(args[1]) {
-					return false, "Contraseña actual incorrecta"
+					return false, "Wrong current password"
 				}
 				value, err := time.ParseDuration(args[0])
 				if err != nil {
-					return false, "Valor incorrecto"
+					return false, "Invalid value"
 				}
 				if value == serverTimeLimits.Load().WT {
-					return false, "Valor sin cambios"
+					return false, "Value unchanged"
 				}
 				if value != 0 {
 					if value < 100*time.Millisecond {
-						return false, "Inferior a 100 milisegundos"
+						return false, "Less than 100 milliseconds"
 					}
 					if value > 1800000*time.Millisecond {
-						return false, "Superior a 30 minutos"
+						return false, "More than 30 minutes"
 					}
 				}
 				setTimeLimits(func(limits *customNetHttp.Timeouts) { limits.WT = value })
-				return true, "Valor guardado de escritura de respuestas"
+				return true, "Response write timeout saved"
 			},
 			"IT": func(args ...string) (bool, string) {
 				if len(args) != 2 {
-					return false, msgMissingData + " en IT"
+					return false, msgMissingData + " for IT"
 				}
 				if !passwordMatches(args[1]) {
-					return false, "Contraseña actual incorrecta"
+					return false, "Wrong current password"
 				}
 				value, err := time.ParseDuration(args[0])
 				if err != nil {
-					return false, "Valor incorrecto"
+					return false, "Invalid value"
 				}
 				if value == serverTimeLimits.Load().IT {
-					return false, "Valor sin cambios"
+					return false, "Value unchanged"
 				}
 				if value != 0 {
 					if value < 100*time.Millisecond {
-						return false, "Inferior a 100 milisegundos"
+						return false, "Less than 100 milliseconds"
 					}
 					if value > 300000*time.Millisecond {
-						return false, "Superior a 5 minutos"
+						return false, "More than 5 minutes"
 					}
 				}
 				setTimeLimits(func(limits *customNetHttp.Timeouts) { limits.IT = value })
-				return true, "Valor guardado de conexiones inactivas"
+				return true, "Idle connection timeout saved"
 			},
 		},
 	}
 
+	// siteSSLSettingOrder is the order of the settings of "!": with R and W both at 1, R comes first and W is
+	// refused (only one of the two redirections can be on).
+	siteSSLSettingOrder = []string{"S", "C", "R", "W", "E", "A"}
+
 	subdomainContentCheckers = map[string]func(bool, interface{}, bool, ...string) (bool, string){ // Subdomains content check
 		"!": func(printErrors bool, configData interface{}, isFromFile bool, siteKeys ...string) (bool, string) { // SSLs check
 			if len(siteKeys) != 2 {
-				return false, msgMissingData + " en configuraciones"
+				return false, msgMissingData + " for configurations"
 			}
 			mapData, isMap := configData.(map[string]interface{})
 			if !isMap {
-				return false, "Datos de configuraciones incorrectos"
+				return false, "Invalid configuration data"
 			}
 
-			for setting := range siteSSLSettingCheckers {
+			for _, setting := range siteSSLSettingOrder {
 				if _, exists := mapData[setting]; !exists {
 					continue
 				}
 
-				strVal, isValue := mapData[setting].(string) // String is only for config file entries reading
+				strVal, isValue := configNumberOrString(mapData[setting]) // A string, or a JSON integer ("S": 1)
 				if !isValue {
 					boolVal, isBool := mapData[setting].(bool)
 					if isBool {
@@ -664,8 +703,9 @@ var (
 
 				if !isValue {
 					if printErrors {
-						return false, "Valor de configuración incorrecto"
+						return false, "Invalid configuration value"
 					}
+					slog.Warn("turbo.config site setting discarded: wrong type", "site", siteKeys[0], "subdomain", siteKeys[1], "setting", setting)
 					continue
 				}
 
@@ -673,41 +713,50 @@ var (
 					if printErrors {
 						return false, msg
 					}
+					// The state of the certificate (C), an empty e-mail or adapter, and R or W off in a subdomain (as
+					// Turbo itself saves them, and v2.3.rc3 too) aren't errors of the file.
+					redirectOffInSubdomain := (setting == "R" || setting == "W") && siteKeys[1] != "" && strVal == "0"
+					if setting != "C" && strVal != "" && !redirectOffInSubdomain {
+						slog.Warn("turbo.config site setting discarded", "site", siteKeys[0], "subdomain", siteKeys[1], "setting", setting, "value", strVal, "reason", msg)
+					}
 				}
 			}
-			return true, "Configuraciones procesadas"
+			return true, "Configurations processed"
 		},
 		"=": func(printErrors bool, rewriteData interface{}, isFromFile bool, siteKeys ...string) (bool, string) { // Rewrites check
 			if len(siteKeys) != 2 {
-				return false, msgMissingData + " en reescrituras"
+				return false, msgMissingData + " for rewrites"
 			}
 			mapData, isMap := rewriteData.(map[string]interface{})
 			if !isMap {
-				return false, "Contenido de reescrituras incorrecto"
+				return false, "Invalid rewrites content"
 			}
 
 			if printErrors && !siteExists(siteKeys[0], siteKeys[1]) {
 				if siteKeys[1] != "" {
-					return false, "Subdominio inexistente"
+					return false, "Subdomain not found"
 				}
-				return false, "Sitio inexistente"
+				return false, "Site not found"
 			}
 
-			for targetURI, rawTarget := range mapData {
+			for _, targetURI := range sortedKeys(mapData) {
+				rawTarget := mapData[targetURI]
 				strVal, isString := rawTarget.(string)
 				if !isString {
 					if printErrors {
-						return false, "Valor de reescritura incorrecto"
+						return false, "Invalid rewrite value"
 					}
 					continue
 				}
 
 				var isExisting bool
-				targetURI = replaceURIChars(targetURI)
+				if !isFromFile { // turbo.config keeps the values decoded
+					targetURI = replaceURIChars(targetURI)
+				}
 				if _, isExisting = sitesMap[siteKeys[0]][siteKeys[1]][targetURI]; isExisting {
 					if sitesMap[siteKeys[0]][siteKeys[1]][targetURI][1:] == strVal {
 						if printErrors {
-							return false, "Reescritura sin cambios"
+							return false, "Rewrite unchanged"
 						}
 						continue
 					}
@@ -715,82 +764,98 @@ var (
 				valueLen := len(targetURI)
 				if valueLen < 1 || strings.Contains(targetURI, "//") || strings.Contains(targetURI, "..") || targetURI[0] != '/' {
 					if printErrors {
-						return false, "Dirección relativa incorrecta"
+						return false, "Invalid relative address"
 					}
 					continue
 				}
 				if valueLen > 128 {
 					if printErrors {
-						return false, "Dirección relativa excesiva"
+						return false, "Relative address too long"
 					}
 					continue
 				}
-				strVal = replaceURIChars(strVal)
+				if !isFromFile {
+					strVal = replaceURIChars(strVal)
+				}
 				valueLen = len(strVal)
 				if valueLen < 1 || strings.Contains(strVal, "..") {
 					if printErrors {
-						return false, "Reescritura incorrecta"
+						return false, "Invalid rewrite"
 					}
 					continue
 				}
 				schemeMode := "N"
-				if valueLen > 7 {
-					if (strVal[0] == 'h' || strVal[0] == 'H') && (strVal[1] == 't' || strVal[1] == 'T') && (strVal[2] == 't' || strVal[2] == 'T') && (strVal[3] == 'p' || strVal[3] == 'P') {
-						if strVal[4] == ':' && strVal[5] == '/' && strVal[6] == '/' {
-							schemeMode = "H"
-							strVal = strVal[7:]
-						} else if strVal[4] == 's' && strVal[5] == ':' && strVal[6] == '/' && strVal[7] == '/' {
-							schemeMode = "S"
-							strVal = strVal[8:]
-						}
+				if lower := strings.ToLower(strVal); strings.HasPrefix(lower, "http://") { // The scheme in any case
+					schemeMode = "H"
+					strVal = strVal[7:]
+				} else if strings.HasPrefix(lower, "https://") {
+					schemeMode = "S"
+					strVal = strVal[8:]
+				}
+				if schemeMode != "N" && (strVal == "" || strVal[0] == '/' || strVal[0] == '?') { // "https://" alone would redirect anywhere
+					if printErrors {
+						return false, "The target needs a host"
 					}
+					if isFromFile {
+						slog.Warn("Rewrite discarded: the target has no host", "site", siteKeys[0], "subdomain", siteKeys[1], "source", targetURI)
+					}
+					continue
+				}
+				if unknown := unknownPlaceholder(strVal); unknown != "" {
+					if printErrors {
+						return false, "Unknown keyword: " + unknown
+					}
+					if isFromFile {
+						slog.Warn("Rewrite discarded: unknown keyword", "site", siteKeys[0], "subdomain", siteKeys[1], "source", targetURI, "keyword", unknown)
+					}
+					continue
 				}
 				if strings.Contains(strVal, "//") {
 					if printErrors {
-						return false, "Reescritura incorrecta"
+						return false, "Invalid rewrite"
 					}
 					continue
 				}
 				if schemeMode == "N" && strVal[0] != '/' {
 					if printErrors {
-						return false, "La reescritura debe empezar por /, http:// o https://"
+						return false, "The rewrite must start with /, http:// or https://"
 					}
 					if isFromFile { // Accepted by older versions: say why it disappears from the config
-						slog.Warn("Reescritura descartada: el destino debe empezar por /, http:// o https://", "sitio", siteKeys[0], "subdominio", siteKeys[1], "origen", targetURI, "destino", strVal)
+						slog.Warn("Rewrite discarded: the target must start with /, http:// or https://", "site", siteKeys[0], "subdomain", siteKeys[1], "source", targetURI, "target", strVal)
 					}
 					continue
 				}
 				if valueLen > 512 {
 					if printErrors {
-						return false, "Reescritura excesiva"
+						return false, "Rewrite too long"
 					}
 					continue
 				}
 				sitesMap[siteKeys[0]][siteKeys[1]][targetURI] = schemeMode + strVal
 				if printErrors {
 					if !isExisting {
-						return true, "Reescritura creada"
+						return true, "Rewrite created"
 					} else {
-						return true, "Reescritura cambiada"
+						return true, "Rewrite changed"
 					}
 				}
 			}
-			return true, "Reescrituras procesadas"
+			return true, "Rewrites processed"
 		},
 		"$": func(printErrors bool, mimeData interface{}, isFromFile bool, siteKeys ...string) (bool, string) { // MIMEs check
 			if len(siteKeys) != 2 {
-				return false, msgMissingData + " en MIMEs"
+				return false, msgMissingData + " for MIMEs"
 			}
 			entries, isMap := mimeData.(map[string]interface{})
 			if !isMap {
-				return false, "Contenido de MIMEs incorrecto"
+				return false, "Invalid MIMEs content"
 			}
 
 			if printErrors && !siteExists(siteKeys[0], siteKeys[1]) {
 				if siteKeys[1] != "" {
-					return false, "Subdominio inexistente"
+					return false, "Subdomain not found"
 				}
-				return false, "Sitio inexistente"
+				return false, "Site not found"
 			}
 			if siteKeys[1] != "" {
 				siteKeys[1] += "." + siteKeys[0]
@@ -799,26 +864,29 @@ var (
 			}
 
 			if _, exists := mimeTypes[siteKeys[1]]; !exists {
-				return false, "MIMEs indefinidos"
+				return false, "No MIMEs defined"
 			}
 
-			for ext, rawMIME := range entries {
-				ext = strings.ToLower(ext) // Looked up in lower case (ext): ".PHP" is also preprocessed (H3)
+			for _, writtenExt := range sortedKeys(entries) {
+				rawMIME := entries[writtenExt]
+				ext := strings.ToLower(writtenExt) // Looked up in lower case (ext): ".PHP" is also preprocessed
 				mimeType, isString := rawMIME.(string)
 				if !isString {
 					if printErrors {
-						return false, "Valor de MIME incorrecto"
+						return false, "Invalid MIME value"
 					}
 					continue
 				}
 
 				var existed bool
-				mimeType = replaceURIChars(mimeType)
-				if _, exists := mimeTypes[siteKeys[1]][ext]; exists {
+				if !isFromFile {
+					mimeType = replaceURIChars(mimeType)
+				}
+				if current, exists := mimeTypes[siteKeys[1]][strings.TrimPrefix(ext, ".")]; exists {
 					existed = true
-					if mimeTypes[siteKeys[1]][ext] == mimeType {
+					if current == mimeType {
 						if printErrors {
-							return false, "MIME sin cambios"
+							return false, "MIME unchanged"
 						}
 						continue
 					}
@@ -828,13 +896,13 @@ var (
 				extLen := len(ext)
 				if extLen > 12 {
 					if printErrors {
-						return false, "Extensión excesiva"
+						return false, "Extension too long"
 					}
 					continue
 				}
 				if extLen > 0 && !extChars(ext) {
 					if printErrors {
-						return false, "Extensión incorrecta"
+						return false, "Invalid extension"
 					}
 					continue
 				}
@@ -843,42 +911,42 @@ var (
 				}
 				if mimeLen := len(mimeType); mimeLen < 4 || mimeLen > 128 {
 					if printErrors {
-						return false, "MIME muy largo o corto"
+						return false, "MIME too long or too short"
 					}
 					continue
 				}
 				_, _, parseErr := mime.ParseMediaType(mimeType)
 				if parseErr != nil {
 					if printErrors {
-						return false, "MIME incorrecto"
+						return false, "Invalid MIME"
 					}
 					continue
 				}
 				mimeTypes[siteKeys[1]][ext] = mimeType
 				if printErrors {
 					if !existed {
-						return true, "MIME creado"
+						return true, "MIME created"
 					} else {
-						return true, "MIME cambiado"
+						return true, "MIME changed"
 					}
 				}
 			}
-			return true, "MIMEs procesados"
+			return true, "MIMEs processed"
 		},
 		".": func(printErrors bool, headerData interface{}, isFromFile bool, siteKeys ...string) (bool, string) { // Headers check
 			if len(siteKeys) != 2 {
-				return false, msgMissingData + " en cabeceras"
+				return false, msgMissingData + " for headers"
 			}
 			entries, isMap := headerData.(map[string]interface{})
 			if !isMap {
-				return false, "Contenido de cabeceras incorrecto"
+				return false, "Invalid headers content"
 			}
 
 			if printErrors && !siteExists(siteKeys[0], siteKeys[1]) {
 				if siteKeys[1] != "" {
-					return false, "Subdominio inexistente"
+					return false, "Subdomain not found"
 				}
-				return false, "Sitio inexistente"
+				return false, "Site not found"
 			}
 			if siteKeys[1] != "" {
 				siteKeys[1] += "." + siteKeys[0]
@@ -887,25 +955,32 @@ var (
 			}
 
 			if _, exists := customHeaders[siteKeys[1]]; !exists {
-				return false, "Cabeceras indefinidas"
+				return false, "No headers defined"
 			}
 
-			for header, rawValue := range entries {
+			for _, header := range sortedKeys(entries) {
+				rawValue := entries[header]
+				if isFromFile && headerSetCaseInsensitive(customHeaders[siteKeys[1]], header) {
+					slog.Warn("Header repeated in turbo.config (in upper or lower case): the first one is kept", "site", siteKeys[1], "header", header)
+					continue
+				}
 				value, isString := rawValue.(string)
 				if !isString {
 					if printErrors {
-						return false, "Valor de cabecera incorrecto"
+						return false, "Invalid header value"
 					}
 					continue
 				}
 
 				var existed bool
-				value = replaceURIChars(value)
+				if !isFromFile {
+					value = replaceURIChars(value)
+				}
 				if _, exists := customHeaders[siteKeys[1]][header]; exists {
 					existed = true
 					if customHeaders[siteKeys[1]][header] == value {
 						if printErrors {
-							return false, "Cabecera sin cambios"
+							return false, "Header unchanged"
 						}
 						continue
 					}
@@ -914,47 +989,47 @@ var (
 				}
 				if !headerChars(header) {
 					if printErrors {
-						return false, "Cabecera incorrecta"
+						return false, "Invalid header"
 					}
 					continue
 				}
 				if nameLen := len(header); nameLen < 1 || nameLen > maxHeaderKeyLength {
 					if printErrors {
-						return false, "Cabecera muy larga o corta"
+						return false, "Header too long or too short"
 					}
 					continue
 				}
 				if valueLen := len(value); valueLen < 1 || valueLen > maxHeaderValueLength {
 					if printErrors {
-						return false, "Contenido muy largo o corto"
+						return false, "Content too long or too short"
 					}
 					continue
 				}
 				customHeaders[siteKeys[1]][header] = value
 				if printErrors {
 					if !existed {
-						return true, "Cabecera creada"
+						return true, "Header created"
 					} else {
-						return true, "Cabecera cambiada"
+						return true, "Header changed"
 					}
 				}
 			}
-			return true, "Cabeceras procesadas"
+			return true, "Headers processed"
 		},
 		"?": func(printErrors bool, preprocessorData interface{}, isFromFile bool, siteKeys ...string) (bool, string) { // Preprocessors check
 			if len(siteKeys) != 2 {
-				return false, msgMissingData + " en preprocesadores"
+				return false, msgMissingData + " for preprocessors"
 			}
 			entries, isMap := preprocessorData.(map[string]interface{})
 			if !isMap {
-				return false, "Contenido de preprocesadores incorrecto"
+				return false, "Invalid preprocessors content"
 			}
 
 			if printErrors && !siteExists(siteKeys[0], siteKeys[1]) {
 				if siteKeys[1] != "" {
-					return false, "Subdominio inexistente"
+					return false, "Subdomain not found"
 				}
-				return false, "Sitio inexistente"
+				return false, "Site not found"
 			}
 			if siteKeys[1] != "" {
 				siteKeys[1] += "." + siteKeys[0]
@@ -963,111 +1038,104 @@ var (
 			}
 
 			if _, exists := preprocessors[siteKeys[1]]; !exists {
-				return false, "Preprocesadores no definidos"
+				return false, "No preprocessors defined"
 			}
 
-			for ext, rawPath := range entries {
-				ext = strings.ToLower(ext) // Looked up in lower case (ext): ".PHP" is also preprocessed (H3)
-				executable, isString := rawPath.(string)
-				if !isString {
-					if printErrors {
-						return false, "Valor de preprocesador incorrecto"
-					}
+			for _, writtenExt := range sortedKeys(entries) {
+				rawValue := entries[writtenExt]
+				ext := strings.ToLower(writtenExt) // Looked up in lower case (ext): ".PHP" is also preprocessed
+				site := siteKeys[1]
+				if _, repeated := preprocessors[site][strings.TrimPrefix(ext, ".")]; repeated && isFromFile {
+					slog.Warn("Preprocessor repeated in turbo.config (in upper or lower case): the first one is kept", "site", site, "extension", writtenExt)
 					continue
 				}
+				// From turbo.config, an entry that can't be used is kept and its extension answers 500: never the
+				// source of the files it should run, and saving doesn't lose it.
+				keepFailing := func(value string, reason string) {
+					if value == "" { // An empty value would mean no preprocessor
+						value = invalidPreprocessorMark
+					}
+					slog.Warn("turbo.config preprocessor that can't be used: the extension will answer 500", "site", site, "extension", ext, "reason", reason)
+					preprocessors[site][strings.TrimPrefix(ext, ".")] = value
+				}
+				value, isString := rawValue.(string)
+				if !isString {
+					if printErrors {
+						return false, "Invalid preprocessor value"
+					}
+					keepFailing(invalidPreprocessorMark, "the value is not a string")
+					continue
+				}
+				if !isFromFile {
+					value = replaceURIChars(value)
+				}
+				if extLen := len(ext); extLen > 12 || extLen > 0 && !extChars(ext) {
+					reason := "Invalid extension"
+					if extLen > 12 {
+						reason = "Extension too long"
+					}
+					if printErrors {
+						return false, reason
+					}
+					keepFailing(invalidPreprocessorMark+value, reason)
+					continue
+				}
+				ext = strings.TrimPrefix(ext, ".")
 
 				var existed bool
-				executable = replaceURIChars(executable)
-				if _, exists := preprocessors[siteKeys[1]][ext]; exists {
+				if current, exists := preprocessors[site][ext]; exists {
 					existed = true
-					if preprocessors[siteKeys[1]][ext] == executable {
+					if current == value {
 						if printErrors {
-							return false, "Preprocesador sin cambios"
+							return false, "Preprocessor unchanged"
 						}
 						continue
 					}
-				} else {
-					existed = false
 				}
-				extLen := len(ext)
-				if extLen > 12 {
+				executable, problem := preprocessorCommand(value)
+				if problem != "" {
 					if printErrors {
-						return false, "Extensión excesiva"
+						return false, problem
 					}
+					keepFailing(value, problem)
 					continue
 				}
-				if extLen > 0 && !extChars(ext) {
-					if printErrors {
-						return false, "Extensión incorrecta"
-					}
-					continue
-				}
-				if extLen > 0 && ext[0] == '.' {
-					ext = ext[1:]
-				}
-				if pathLen := len(executable); pathLen < 1 || pathLen > 128 {
-					if printErrors {
-						return false, "Ruta del preprocesador muy larga o corta"
-					}
-					continue
-				}
-
-				protocolEnd := strings.Index(executable, ">")
-				_q := "cgi"
-				if protocolEnd != -1 {
-					_q = strings.ToLower(cutAt(executable, '>'))
-					executable = executable[protocolEnd+1:]
-				}
-
-				// From turbo.config, a preprocessor that can't run is kept: serving that extension answers 500
-				// instead of the file's source, and saving doesn't lose the entry.
-				if _q != "cgi" { // "dx>" isn't implemented
-					if printErrors {
-						return false, "Protocolo de preprocesador incorrecto."
-					}
-					slog.Warn("Preprocesador \""+_q+">\" no disponible: la extensión responderá 500", "extensión", ext)
-					preprocessors[siteKeys[1]][ext] = _q + ">" + executable
-					continue
-				}
-
-				executable = strings.Replace(executable, "{"+currentDirPlaceholder+"}", currentDir(), 1)
-
-				info, err := os.Stat(executable)
-				if err != nil || info.IsDir() { // Doesn't exist, the path isn't valid on this system or it is a folder
+				if info, err := diskStat(executable); err != nil || info.IsDir() { // Doesn't exist, the path isn't valid on this system or it is a folder
 					if printErrors {
 						if err != nil {
-							return false, "Preprocesador inexistente"
+							return false, "Preprocessor not found"
 						}
-						return false, "Preprocesador incorrecto"
+						return false, "Invalid preprocessor"
 					}
-					slog.Warn("Preprocesador inexistente: la extensión responderá 500", "extensión", ext, "preprocesador", executable)
+					keepFailing(value, "the executable does not exist or is a folder: "+executable)
+					continue
 				}
 
-				preprocessors[siteKeys[1]][ext] = executable
+				preprocessors[site][ext] = value // As written: {TURBO_CURRENT_DIR} is replaced when it runs
 				if printErrors {
 					if !existed {
-						return true, "Preprocesador agregado"
+						return true, "Preprocessor added"
 					} else {
-						return true, "Preprocesador modificado"
+						return true, "Preprocessor modified"
 					}
 				}
 			}
-			return true, "Preprocesadores procesados"
+			return true, "Preprocessors processed"
 		},
 		"-": func(printErrors bool, indexData interface{}, isFromFile bool, siteKeys ...string) (bool, string) { // Indexes check
 			if len(siteKeys) != 2 {
-				return false, msgMissingData + " en índices"
+				return false, msgMissingData + " for indexes"
 			}
 			entries, isMap := indexData.(map[string]interface{})
 			if !isMap {
-				return false, "Contenido de índices incorrecto"
+				return false, "Invalid indexes content"
 			}
 
 			if printErrors && !siteExists(siteKeys[0], siteKeys[1]) {
 				if siteKeys[1] != "" {
-					return false, "Subdominio inexistente"
+					return false, "Subdomain not found"
 				}
-				return false, "Sitio inexistente"
+				return false, "Site not found"
 			}
 			if siteKeys[1] != "" {
 				siteKeys[1] += "." + siteKeys[0]
@@ -1076,53 +1144,57 @@ var (
 			}
 
 			if _, exists := indexFiles[siteKeys[1]]; !exists {
-				return false, "Índices no definidos"
+				return false, "No indexes defined"
 			}
 
 			// From turbo.config, each index comes with its position; from the panel, it goes after the rest.
-			names := make([]string, 0, len(entries))
-			for name := range entries {
-				names = append(names, name)
-			}
+			names := sortedKeys(entries) // Indexes with the same position go by name
 			sort.SliceStable(names, func(left, right int) bool {
 				return indexPosition(entries[names[left]]) < indexPosition(entries[names[right]])
 			})
 			for _, name := range names {
-				name = replaceURIChars(name)
+				if !isFromFile {
+					name = replaceURIChars(name)
+				}
 				length := len(name)
 				if length < 1 || length > 48 {
 					if printErrors {
-						return false, "Archivo de índice muy largo o corto"
+						return false, "Index file too long or too short"
 					}
 					continue
 				}
-				if strings.IndexByte(name, '\\') != -1 || strings.IndexByte(name, '/') != -1 || strings.Contains(name, "..") {
+				// The rules of the request paths, with those of Windows on every system: there, "index.php." or
+				// "INDEX~1.PHT" would open another file than the name says, and its extension wouldn't be preprocessed.
+				if strings.IndexByte(name, '\\') != -1 || strings.IndexByte(name, '/') != -1 || strings.Contains(name, "..") || !textAllowed(name, false) || !pathSegmentAllowed(name, true) {
 					if printErrors {
-						return false, "Archivo de índice incorrecto"
+						return false, "Invalid index file"
+					}
+					if isFromFile {
+						slog.Warn("turbo.config index discarded: name not allowed", "site", siteKeys[1], "index", name)
 					}
 					continue
 				}
 				addIndex(siteKeys[1], name)
 				if printErrors {
-					return true, "Índice asignado"
+					return true, "Index assigned"
 				}
 			}
-			return true, "Índices procesados"
+			return true, "Indexes processed"
 		},
 		"&": func(printErrors bool, aliasData interface{}, isFromFile bool, siteKeys ...string) (bool, string) { // Alias check
 			if len(siteKeys) != 2 {
-				return false, msgMissingData + " en alias"
+				return false, msgMissingData + " for aliases"
 			}
 			entries, isMap := aliasData.(map[string]interface{})
 			if !isMap {
-				return false, "Contenido de alias incorrecto"
+				return false, "Invalid aliases content"
 			}
 
 			if printErrors && !siteExists(siteKeys[0], siteKeys[1]) {
 				if siteKeys[1] != "" {
-					return false, "Subdominio inexistente"
+					return false, "Subdomain not found"
 				}
-				return false, "Sitio inexistente"
+				return false, "Site not found"
 			}
 			if siteKeys[1] != "" {
 				siteKeys[1] += "." + siteKeys[0]
@@ -1130,10 +1202,10 @@ var (
 				siteKeys[1] = siteKeys[0]
 			}
 
-			for alias := range entries {
+			for _, alias := range sortedKeys(entries) {
 				if strings.IndexByte(alias, '*') != -1 {
 					if printErrors {
-						return false, "Wildcards inadmitidos"
+						return false, "Wildcards not allowed"
 					}
 					continue
 				}
@@ -1144,76 +1216,79 @@ var (
 					}
 					continue
 				}
+				if served, _, _, _ := hostExist(alias); served { // The alias would hide the site (aliases go first)
+					if printErrors {
+						return false, "The alias is a site's host"
+					}
+					continue // The site wins: dropAliasesOfSites says so, once every site is in
+				}
 				if target, assigned := domainAliases[alias]; assigned {
 					if target == siteKeys[1] && printErrors {
-						return false, "Alias sin cambios"
+						return false, "Alias unchanged"
 					}
 					if printErrors {
-						return false, "Alias preasignado"
+						return false, "Alias already assigned"
+					}
+					if isFromFile && target != siteKeys[1] {
+						slog.Warn("Alias of two sites in turbo.config: the first one is kept", "alias", alias, "site", target, "discarded", siteKeys[1])
 					}
 					continue
 				}
 				domainAliases[alias] = siteKeys[1]
 				if printErrors {
-					return true, "Alias asignado"
+					return true, "Alias assigned"
 				}
 			}
-			return true, "Alias procesados"
+			return true, "Aliases processed"
 		},
 	}
 
 	subdomainContentDeleters = map[string]func(bool, interface{}, ...string) (bool, string){ // Subdomains content deletion check
-		"!": func(printErrors bool, configData interface{}, siteKeys ...string) (bool, string) {
-			if len(siteKeys) != 2 {
-				return false, msgMissingData + " en borrado de SSLs"
-			}
-			return true, "Certificados SSL procesados"
-		},
 		"=": func(printErrors bool, rewriteData interface{}, siteKeys ...string) (bool, string) {
 			if len(siteKeys) != 2 {
-				return false, msgMissingData + " en borrado de reescrituras"
+				return false, msgMissingData + " for deleting rewrites"
 			}
 			entries, isMap := rewriteData.(map[string]interface{})
 			if !isMap {
-				return false, "Contenido de reescrituras incorrecto"
+				return false, "Invalid rewrites content"
 			}
 
 			if !siteExists(siteKeys[0], siteKeys[1]) {
 				if siteKeys[1] != "" {
-					return false, "Subdominio inexistente"
+					return false, "Subdomain not found"
 				}
-				return false, "Sitio inexistente"
+				return false, "Site not found"
 			}
 
 			for rewriteKey := range entries {
 				rewriteKey = replaceURIChars(rewriteKey)
 				if _, exists := sitesMap[siteKeys[0]][siteKeys[1]][rewriteKey]; !exists {
 					if printErrors {
-						return false, "Reescritura inexistente"
+						return false, "Rewrite not found"
 					}
 					continue
 				}
 				delete(sitesMap[siteKeys[0]][siteKeys[1]], rewriteKey)
 				if printErrors {
-					return true, "Reescritura borrada"
+					return true, "Rewrite deleted"
 				}
 			}
-			return true, "Reescrituras procesadas"
+			return true, "Rewrites processed"
 		},
 		"$": func(printErrors bool, mimeData interface{}, siteKeys ...string) (bool, string) {
 			if len(siteKeys) != 2 {
-				return false, msgMissingData + " en borrado de MIMEs"
+				return false, msgMissingData + " for deleting MIMEs"
 			}
 			entries, isMap := mimeData.(map[string]interface{})
 			if !isMap {
-				return false, "Contenido de MIMEs incorrecto"
+				return false, "Invalid MIMEs content"
 			}
 
 			if !siteExists(siteKeys[0], siteKeys[1]) {
 				if siteKeys[1] != "" {
-					return false, "Subdominio inexistente"
+					return false, "Subdomain not found"
 				}
-				return false, "Sitio inexistente"
+				return false, "Site not found"
 			}
 
 			if siteKeys[1] != "" {
@@ -1223,7 +1298,7 @@ var (
 			}
 
 			if _, exists := mimeTypes[siteKeys[1]]; !exists {
-				return false, "MIMEs indefinidos"
+				return false, "No MIMEs defined"
 			}
 
 			for ext := range entries {
@@ -1233,31 +1308,31 @@ var (
 				}
 				if _, exists := mimeTypes[siteKeys[1]][ext]; !exists {
 					if printErrors {
-						return false, "MIME inexistente"
+						return false, "MIME not found"
 					}
 					continue
 				}
 				delete(mimeTypes[siteKeys[1]], ext)
 				if printErrors {
-					return true, "MIME borrado"
+					return true, "MIME deleted"
 				}
 			}
-			return true, "MIMEs procesados"
+			return true, "MIMEs processed"
 		},
 		".": func(printErrors bool, headerData interface{}, siteKeys ...string) (bool, string) {
 			if len(siteKeys) != 2 {
-				return false, msgMissingData + " en borrado de cabeceras"
+				return false, msgMissingData + " for deleting headers"
 			}
 			entries, isMap := headerData.(map[string]interface{})
 			if !isMap {
-				return false, "Contenido de cabeceras incorrecto"
+				return false, "Invalid headers content"
 			}
 
 			if !siteExists(siteKeys[0], siteKeys[1]) {
 				if siteKeys[1] != "" {
-					return false, "Subdominio inexistente"
+					return false, "Subdomain not found"
 				}
-				return false, "Sitio inexistente"
+				return false, "Site not found"
 			}
 
 			if siteKeys[1] != "" {
@@ -1267,37 +1342,37 @@ var (
 			}
 
 			if _, exists := customHeaders[siteKeys[1]]; !exists {
-				return false, "Cabeceras indefinidas"
+				return false, "No headers defined"
 			}
 
 			for header := range entries {
 				if _, exists := customHeaders[siteKeys[1]][header]; !exists {
 					if printErrors {
-						return false, "Cabecera inexistente"
+						return false, "Header not found"
 					}
 					continue
 				}
 				delete(customHeaders[siteKeys[1]], header)
 				if printErrors {
-					return true, "Cabecera borrada"
+					return true, "Header deleted"
 				}
 			}
-			return true, "Cabeceras procesadas"
+			return true, "Headers processed"
 		},
 		"?": func(printErrors bool, preprocessorData interface{}, siteKeys ...string) (bool, string) {
 			if len(siteKeys) != 2 {
-				return false, msgMissingData + " en borrado de preprocesadores"
+				return false, msgMissingData + " for deleting preprocessors"
 			}
 			entries, isMap := preprocessorData.(map[string]interface{})
 			if !isMap {
-				return false, "Contenido de preprocesadores incorrecto"
+				return false, "Invalid preprocessors content"
 			}
 
 			if !siteExists(siteKeys[0], siteKeys[1]) {
 				if siteKeys[1] != "" {
-					return false, "Subdominio inexistente"
+					return false, "Subdomain not found"
 				}
-				return false, "Sitio inexistente"
+				return false, "Site not found"
 			}
 
 			if siteKeys[1] != "" {
@@ -1307,7 +1382,7 @@ var (
 			}
 
 			if _, exists := preprocessors[siteKeys[1]]; !exists {
-				return false, "Preprocesadores no definidos"
+				return false, "No preprocessors defined"
 			}
 
 			for ext := range entries {
@@ -1317,31 +1392,31 @@ var (
 				}
 				if _, exists := preprocessors[siteKeys[1]][ext]; !exists {
 					if printErrors {
-						return false, "Preprocesador inexistente"
+						return false, "Preprocessor not found"
 					}
 					continue
 				}
 				delete(preprocessors[siteKeys[1]], ext)
 				if printErrors {
-					return true, "Preprocesador borrado"
+					return true, "Preprocessor deleted"
 				}
 			}
-			return true, "Preprocesadores procesados"
+			return true, "Preprocessors processed"
 		},
 		"-": func(printErrors bool, indexData interface{}, siteKeys ...string) (bool, string) {
 			if len(siteKeys) != 2 {
-				return false, msgMissingData + " en borrado de índices"
+				return false, msgMissingData + " for deleting indexes"
 			}
 			entries, isMap := indexData.(map[string]interface{})
 			if !isMap {
-				return false, "Contenido de índices incorrecto"
+				return false, "Invalid indexes content"
 			}
 
 			if !siteExists(siteKeys[0], siteKeys[1]) {
 				if siteKeys[1] != "" {
-					return false, "Subdominio inexistente"
+					return false, "Subdomain not found"
 				}
-				return false, "Sitio inexistente"
+				return false, "Site not found"
 			}
 
 			if siteKeys[1] != "" {
@@ -1351,38 +1426,38 @@ var (
 			}
 
 			if _, exists := indexFiles[siteKeys[1]]; !exists {
-				return false, "Índices no definidos"
+				return false, "No indexes defined"
 			}
 
 			for indexName := range entries {
 				indexName = replaceURIChars(indexName)
 				if _, exists := indexFiles[siteKeys[1]][indexName]; !exists {
 					if printErrors {
-						return false, "Índice inexistente"
+						return false, "Index not found"
 					}
 					continue
 				}
 				delete(indexFiles[siteKeys[1]], indexName)
 				if printErrors {
-					return true, "Índice borrado"
+					return true, "Index deleted"
 				}
 			}
-			return true, "Índices procesados"
+			return true, "Indexes processed"
 		},
 		"&": func(printErrors bool, aliasData interface{}, siteKeys ...string) (bool, string) {
 			if len(siteKeys) != 2 {
-				return false, msgMissingData + " en borrado de alias"
+				return false, msgMissingData + " for deleting aliases"
 			}
 			entries, isMap := aliasData.(map[string]interface{})
 			if !isMap {
-				return false, "Contenido de alias incorrecto"
+				return false, "Invalid aliases content"
 			}
 
 			if !siteExists(siteKeys[0], siteKeys[1]) {
 				if siteKeys[1] != "" {
-					return false, "Subdominio inexistente"
+					return false, "Subdomain not found"
 				}
-				return false, "Sitio inexistente"
+				return false, "Site not found"
 			}
 
 			if siteKeys[1] != "" {
@@ -1394,50 +1469,47 @@ var (
 			for alias := range entries {
 				if _, exists := domainAliases[alias]; !exists {
 					if printErrors {
-						return false, "Alias inexistente"
+						return false, "Alias not found"
 					}
 					continue
 				} else if domainAliases[alias] != siteKeys[1] {
 					if printErrors {
-						return false, "Alias impertinente"
+						return false, "Alias of another site"
 					}
 					continue
 				}
 				delete(domainAliases, alias)
 				if printErrors {
-					return true, "Alias borrado"
+					return true, "Alias deleted"
 				}
 			}
-			return true, "Alias procesados"
+			return true, "Aliases processed"
 		},
 	}
 
-	serverRestartRequiredSettings = map[string]bool{"M": true} // List of settings that use restartServers
-
-	validDomainRegex       = regexp.MustCompile(`^[a-zA-Z0-9\-\.]+$`)
 	validCertbotAdapter    = regexp.MustCompile(`^dns-[a-z0-9-]{2,30}$`) // Certbot DNS plugins, passed as --<adapter>
 	siteSSLSettingCheckers = map[string]func(bool, ...string) (bool, string){
-		"E": func(printErrors bool, args ...string) (bool, string) {
+		"E": func(fromFile bool, args ...string) (bool, string) {
 			argCount := len(args)
 			if argCount < 3 || argCount > 5 {
-				return false, msgMissingData + " en E"
+				return false, msgMissingData + " for E"
 			}
-			email, err := url.QueryUnescape(args[0])
-			args[0] = email
-			if err != nil || !textAllowed(args[0], false) || strings.IndexByte(args[0], '#') != -1 || strings.Contains(args[0], "--") || strings.IndexByte(args[0], ' ') != -1 || strings.IndexByte(args[0], '@') == -1 || strings.IndexByte(args[0], '.') == -1 {
-				return false, "Valor de e-mail incorrecto"
+			if fromFile { // From turbo.config, which keeps it URL-encoded (createSiteSettingsList); the API gets it decoded
+				email, err := url.QueryUnescape(args[0])
+				if err != nil {
+					return false, "Invalid e-mail value"
+				}
+				args[0] = email
 			}
-
-			args[0] = validDomainRegex.ReplaceAllString(args[0], "")
-			if len(args[0]) < 5 || len(args[0]) > 40 {
-				return false, "Longitud de e-mail incorrecta"
+			if problem := certbotEmailProblem(args[0]); problem != "" {
+				return false, problem
 			}
 
 			if !siteExists(args[1], args[2]) {
 				if args[2] != "" {
-					return false, "Subdominio inexistente"
+					return false, "Subdomain not found"
 				}
-				return false, "Sitio inexistente"
+				return false, "Site not found"
 			}
 			if args[2] != "" {
 				args[2] += "." + args[1]
@@ -1446,28 +1518,28 @@ var (
 			}
 
 			if _, exists := siteSSLConfig[args[2]]; !exists {
-				return false, "Configuración indefinida"
+				return false, "No configuration defined"
 			}
 			siteSSLConfig[args[2]]["E"] = args[0]
-			return true, "E-mail guardado"
+			return true, "E-mail saved"
 		},
-		"A": func(printErrors bool, args ...string) (bool, string) {
+		"A": func(fromFile bool, args ...string) (bool, string) {
 			argCount := len(args)
 			if argCount < 3 || argCount > 5 {
-				return false, msgMissingData + " en A"
+				return false, msgMissingData + " for A"
 			}
 
 			adapter, err := url.QueryUnescape(args[0])
 			if err != nil || (adapter != "" && !validCertbotAdapter.MatchString(adapter)) { // Empty means webroot
-				return false, "Adaptador incorrecto: se admite dns-<proveedor>"
+				return false, "Invalid adapter: dns-<provider> is accepted"
 			}
 			args[0] = adapter
 
 			if !siteExists(args[1], args[2]) {
 				if args[2] != "" {
-					return false, "Subdominio inexistente"
+					return false, "Subdomain not found"
 				}
-				return false, "Sitio inexistente"
+				return false, "Site not found"
 			}
 			if args[2] != "" {
 				args[2] += "." + args[1]
@@ -1476,150 +1548,138 @@ var (
 			}
 
 			if _, exists := siteSSLConfig[args[2]]; !exists {
-				return false, "Configuración indefinida"
+				return false, "No configuration defined"
 			}
 
 			siteSSLConfig[args[2]]["A"] = args[0]
-			return true, "Adaptador guardado"
+			return true, "Adapter saved"
 		},
-		"C": func(printErrors bool, args ...string) (bool, string) {
+		"C": func(fromFile bool, args ...string) (bool, string) {
 			argCount := len(args)
 			if argCount < 3 || argCount > 5 {
-				return false, msgMissingData + " en C"
+				return false, msgMissingData + " for C"
 			}
 
 			if !siteExists(args[1], args[2]) {
 				if args[2] != "" {
-					return false, "Subdominio inexistente"
+					return false, "Subdomain not found"
 				}
-				return false, "Sitio inexistente"
+				return false, "Site not found"
 			}
 
-			var siteKey string
+			siteKey := args[1]
 			if args[2] != "" {
 				siteKey = args[2] + "." + args[1]
-				args[1] = changeWildcards(args[1]) + "/" + changeWildcards(args[2]) + "/"
-			} else {
-				siteKey = args[1]
-				args[1] = changeWildcards(args[1]) + "/"
 			}
+			siteDir := sitesDir.Get() + siteFolder(args[1], args[2]) // Where the certificate stays, with the site
 
+			if _, exists := siteSSLConfig[siteKey]; !exists {
+				return false, "No configuration defined"
+			}
 			if argCount == 5 {
 				if args[3] != "" {
-					if len(args[3]) < 5 || len(args[3]) > 40 || strings.IndexByte(args[3], '#') != -1 || strings.Contains(args[3], "--") || strings.Contains(args[3], "--") || strings.IndexByte(args[3], ' ') != -1 || strings.IndexByte(args[3], '@') == -1 || strings.IndexByte(args[3], '.') == -1 {
-						return false, "E-mail incorrecto"
+					if problem := certbotEmailProblem(args[3]); problem != "" {
+						return false, problem
 					}
 					siteSSLConfig[siteKey]["E"] = args[3]
 				}
 				if args[4] != "" {
 					if !validCertbotAdapter.MatchString(args[4]) {
-						return false, "Adaptador incorrecto: se admite dns-<proveedor>"
+						return false, "Invalid adapter: dns-<provider> is accepted"
 					}
 					siteSSLConfig[siteKey]["A"] = args[4]
 				}
 			}
 
-			var exists bool
-			if _, exists = siteSSLConfig[siteKey]; !exists {
-				return false, "Configuración indefinida"
+			filesExist := true
+			fileInfo, statErr := diskStat(siteDir + certFileName)
+			if statErr != nil || fileInfo.IsDir() {
+				filesExist = false
+			}
+			fileInfo, statErr = diskStat(siteDir + keyFileName)
+			if statErr != nil || fileInfo.IsDir() {
+				filesExist = false
 			}
 
-			exists = true
-			fileInfo, statErr := os.Stat(sitesDir.Get() + args[1] + certFileName)
-			if statErr != nil || fileInfo.IsDir() {
-				exists = false
-			}
-			fileInfo, statErr = os.Stat(sitesDir.Get() + args[1] + keyFileName)
-			if statErr != nil || fileInfo.IsDir() {
-				exists = false
-			}
-
-			if exists && !printErrors && args[0] == "0" { // "Borrar SSL", also for a certificate older than 75 days (H20)
-				if os.Remove(sitesDir.Get()+args[1]+certFileName) != nil ||
-					os.Remove(sitesDir.Get()+args[1]+keyFileName) != nil {
-					return false, "Error al borrar archivos SSL"
+			if filesExist && !fromFile && args[0] == "0" { // "Delete SSL", also for a certificate older than certificateStaleAfter
+				if os.Remove(siteDir+certFileName) != nil ||
+					os.Remove(siteDir+keyFileName) != nil {
+					return false, "Error deleting the SSL files"
 				}
 				siteSSLConfig[siteKey]["C"] = false
-				return true, "Certificado SSL borrado"
+				return true, "SSL certificate deleted"
 			}
 
-			if exists && (time.Now().Unix()-fileInfo.ModTime().Unix()) > 6480000 {
-				exists = false
+			if filesExist && time.Since(fileInfo.ModTime()) > certificateStaleAfter {
+				filesExist = false
 			}
 
-			if exists {
-
+			if filesExist {
 				siteSSLConfig[siteKey]["C"] = true
-				return true, "Certificado SSL activo"
+				return true, "SSL certificate active"
 			}
 
-			// If there is no valid cert files, Certbot only runs when the administrator asks for it (a=1):
-
-			if printErrors { // Read from the config file or found with the site folder: only record the state
+			// Without valid certificate files, Certbot only runs when the administrator asks for it (a=1):
+			if fromFile { // Read from the config file or found with the site folder: only record the state
 				siteSSLConfig[siteKey]["C"] = false
-				return false, "Sin certificado"
+				return false, "No certificate"
 			}
 			if args[0] != "1" {
-				return false, "Sin certificado"
+				return false, "No certificate"
 			}
 
-			_, isBool := siteSSLConfig[siteKey]["C"].(bool)
-			if !isBool {
-				args[1] = siteKey
-				var certificateMsg string
-				certificateMsg, isBool = siteSSLConfig[siteKey]["C"].(string)
-				if !isBool {
-					certificateMsg = "Respuesta incorrecta de certificado"
+			if _, isBool := siteSSLConfig[siteKey]["C"].(bool); !isBool { // The error of the last attempt is answered once
+				message, isString := siteSSLConfig[siteKey]["C"].(string)
+				if !isString {
+					message = "Invalid certificate response"
 				}
-				siteSSLConfig[args[1]]["C"] = false
-				return false, certificateMsg
+				siteSSLConfig[siteKey]["C"] = false
+				return false, message
 			}
 
 			if email, _ := siteSSLConfig[siteKey]["E"].(string); email == "" {
-				return false, "E-mail obligatorio para crear el certificado"
+				return false, "E-mail required to create the certificate"
 			}
 
 			siteSSLConfig[siteKey]["C"] = false
 
-			args[0] = sitesDir.Get() + args[1]                       // Dir where the certificate will remain with sites
-			args[1] = sitesDir.Get() + putSlash(certificatesDirName) // Dir of certificates
-			fileInfo, statErr = os.Stat(args[1])
+			certificatesDir := sitesDir.Get() + putSlash(certificatesDirName)
+			fileInfo, statErr = diskStat(certificatesDir)
 			if statErr != nil || !fileInfo.IsDir() {
-				slog.Info("Creando el directorio de certificados", "directorio", args[1])
-				if os.Mkdir(args[1], 0700) != nil {
-					return false, "Error al crear directorio de certificados"
+				slog.Info("Creating the certificates directory", "directory", certificatesDir)
+				if os.Mkdir(certificatesDir, 0700) != nil {
+					return false, "Error creating the certificates directory"
 				}
 			}
-
-			args[1] += changeWildcards(siteKey) // One Certbot folder per site: obtainCertificate empties it before each attempt
+			certDir := certificatesDir + changeWildcards(siteKey) // One Certbot folder per site: obtainCertificate empties it before each attempt
 
 			if currentCertDomain == siteKey {
-				return false, "{\"message\":\"Espere, certificado procesándose\",\"status\":\"WAIT\"}"
+				return false, "{\"message\":\"Please wait, certificate being processed\",\"status\":\"WAIT\"}"
 			}
 
-			obtainCertificate(siteKey, args[1], args[0]) // Creates a loop of attempts to get a certificate
+			obtainCertificate(siteKey, certDir, siteDir) // Creates a loop of attempts to get a certificate
 
 			if currentCertDomain != siteKey {
-				return false, "{\"message\":\"Espere, certificado ocupado en " + currentCertDomain + "\",\"status\":\"WAIT\"}"
+				return false, "{\"message\":\"Please wait, certificate busy on " + currentCertDomain + "\",\"status\":\"WAIT\"}"
 			}
-			return false, "{\"message\":\"Espere, certificado en proceso\",\"status\":\"WAIT\"}"
+			return false, "{\"message\":\"Please wait, certificate in process\",\"status\":\"WAIT\"}"
 		},
-		"S": func(printErrors bool, args ...string) (bool, string) {
+		"S": func(fromFile bool, args ...string) (bool, string) {
 			argCount := len(args)
 			if argCount < 3 || argCount > 5 {
-				return false, msgMissingData + " en S"
+				return false, msgMissingData + " for S"
 			}
 
 			value, err := strconv.Atoi(args[0])
 			if err != nil {
-				return false, "Valor incorrecto"
+				return false, "Invalid value"
 			}
 
 			if !siteExists(args[1], args[2]) {
 				if args[2] != "" {
-					return false, "Subdominio inexistente"
+					return false, "Subdomain not found"
 				}
-				return false, "Sitio inexistente"
+				return false, "Site not found"
 			}
 			var configKey string
 			if args[2] != "" {
@@ -1629,112 +1689,85 @@ var (
 			}
 
 			if _, exists := siteSSLConfig[configKey]; !exists {
-				return false, "Configuración indefinida"
+				return false, "No configuration defined"
 			}
 
 			if value != 0 { // S is 0 or 1; older turbo.config files kept a certificate index, any value but 0 means on
 				if _, exists := siteCertificates[configKey]; exists {
-					return false, "Redirección a HTTPS existente"
+					return false, "HTTPS redirect already enabled"
 				}
-				if args[2] != "" {
-					args[1] = changeWildcards(args[1]) + "/" + changeWildcards(args[2]) + "/"
-				} else {
-					args[1] = changeWildcards(args[1]) + "/"
-				}
-				if loadSiteCertificate(configKey, sitesDir.Get()+args[1]) != nil {
-					return false, "Certificados SSL incorrectos o inexistentes"
+				if loadSiteCertificate(configKey, sitesDir.Get()+siteFolder(args[1], args[2])) != nil {
+					return false, "SSL certificates invalid or missing"
 				}
 				siteSSLConfig[configKey]["S"] = 1
-				if servers[0] != nil && !httpsListening {
+				if servers[0] != nil && !httpsListening.Load() {
 					safeServerStart(servers[0], tlsConfig) // Opens httpsAddr (:443) with the first certificate
 				}
 
-				slog.Info("HTTPS activado", "sitio", configKey)
-				return true, "Redirección a HTTPS activada"
+				slog.Info("HTTPS enabled", "site", configKey)
+				return true, "HTTPS redirect enabled"
 			}
 
 			// If the setting values is 0:
 			setSiteCertificate(configKey, nil)
 			siteSSLConfig[configKey]["S"] = 0
-			return true, "Redirección a HTTPS desactivada"
+			return true, "HTTPS redirect disabled"
 		},
-		"R": func(printErrors bool, args ...string) (bool, string) {
+		"R": func(fromFile bool, args ...string) (bool, string) {
 			argCount := len(args)
 			if argCount < 3 || argCount > 5 {
-				return false, msgMissingData + " en R"
+				return false, msgMissingData + " for R"
 			}
-			if args[2] != "" { // D7: read at the root, it applies to www.<site> (H17)
-				return false, "Solo se configura en la raíz del sitio (d vacío): redirige www.<sitio> a <sitio>"
+			if args[2] != "" { // Read at the root, it applies to www.<site>
+				return false, "Only set at the site's root (empty d): it redirects www.<site> to <site>"
 			}
 			if args[0] != "0" && args[0] != "1" {
-				return false, "Valor incorrecto"
+				return false, "Invalid value"
 			}
-			if !siteExists(args[1], args[2]) {
-				if args[2] != "" {
-					return false, "Subdominio inexistente"
-				}
-				return false, "Sitio inexistente"
+			if !siteExists(args[1], "") {
+				return false, "Site not found"
 			}
-			if args[2] != "" {
-				args[2] += "." + args[1]
-			} else {
-				args[2] = args[1]
+			siteKey := args[1]
+			if _, exists := siteSSLConfig[siteKey]; !exists {
+				return false, "No configuration defined"
 			}
-
-			if _, exists := siteSSLConfig[args[2]]; !exists {
-				return false, "Configuración indefinida"
+			if args[0] == "0" {
+				siteSSLConfig[siteKey]["R"] = false
+				return true, "Redirect to root disabled"
 			}
-
-			if args[0] != "0" {
-				if siteSSLConfig[args[2]]["W"] == true {
-					return false, "Redirección a www activada"
-				}
-				siteSSLConfig[args[2]]["R"] = true
-				args[1] = ""
-			} else {
-				siteSSLConfig[args[2]]["R"] = false
-				args[1] = "des"
+			if siteSSLConfig[siteKey]["W"] == true {
+				return false, "Redirect to www enabled"
 			}
-			return true, "Redirección a raíz " + args[1] + "activada"
+			siteSSLConfig[siteKey]["R"] = true
+			return true, "Redirect to root enabled"
 		},
-		"W": func(printErrors bool, args ...string) (bool, string) {
+		"W": func(fromFile bool, args ...string) (bool, string) {
 			argCount := len(args)
 			if argCount < 3 || argCount > 5 {
-				return false, msgMissingData + " en W"
+				return false, msgMissingData + " for W"
 			}
 			if args[2] != "" { // Read at the root, it applies to <site>
-				return false, "Solo se configura en la raíz del sitio (d vacío): redirige <sitio> a www.<sitio>"
+				return false, "Only set at the site's root (empty d): it redirects <site> to www.<site>"
 			}
 			if args[0] != "0" && args[0] != "1" {
-				return false, "Valor incorrecto"
+				return false, "Invalid value"
 			}
-			if !siteExists(args[1], args[2]) {
-				if args[2] != "" {
-					return false, "Subdominio inexistente"
-				}
-				return false, "Sitio inexistente"
+			if !siteExists(args[1], "") {
+				return false, "Site not found"
 			}
-			if args[2] != "" {
-				args[2] += "." + args[1]
-			} else {
-				args[2] = args[1]
+			siteKey := args[1]
+			if _, exists := siteSSLConfig[siteKey]; !exists {
+				return false, "No configuration defined"
 			}
-
-			if _, exists := siteSSLConfig[args[2]]; !exists {
-				return false, "Configuración indefinida"
+			if args[0] == "0" {
+				siteSSLConfig[siteKey]["W"] = false
+				return true, "Redirect to WWW disabled"
 			}
-
-			if args[0] != "0" {
-				if siteSSLConfig[args[2]]["R"] == true {
-					return false, "Redirección a raíz activada"
-				}
-				siteSSLConfig[args[2]]["W"] = true
-				args[1] = ""
-			} else {
-				siteSSLConfig[args[2]]["W"] = false
-				args[1] = "des"
+			if siteSSLConfig[siteKey]["R"] == true {
+				return false, "Redirect to root enabled"
 			}
-			return true, "Redirección a WWW " + args[1] + "activada"
+			siteSSLConfig[siteKey]["W"] = true
+			return true, "Redirect to WWW enabled"
 		},
 	}
 
@@ -1766,38 +1799,35 @@ var (
 			}
 			return wildcardParts[4]
 		},
+		// The path ones come from the decoded, clean path of the request (wildcardParts[7]); the values are not encoded
+		// here, shortcutWords does it for where they go.
 		"FIRST_REQUEST": func(request *customNetHttp.Request, wildcardParts ...string) string {
-			return url.QueryEscape(request.RequestURI)
+			return wildcardParts[7]
 		},
 		"FIRST_QUERY": func(request *customNetHttp.Request, wildcardParts ...string) string {
-			queryStart := strings.IndexByte(request.RequestURI, '?')
-			if queryStart != -1 {
-				return url.QueryEscape(request.RequestURI[queryStart+1:])
+			_, query, _ := strings.Cut(request.RequestURI, "?")
+			return query
+		},
+		"DIR": func(request *customNetHttp.Request, wildcardParts ...string) string {
+			if requestDir := dir(wildcardParts[7]); requestDir != "/" {
+				return requestDir
 			}
 			return ""
 		},
-		"DIR": func(request *customNetHttp.Request, wildcardParts ...string) string {
-			requestDir := dir(cutAt(request.RequestURI, '?'))
-			if requestDir == "/" {
-				return ""
-			}
-			return url.QueryEscape(requestDir)
-		},
 		"FILE": func(request *customNetHttp.Request, wildcardParts ...string) string {
-			requestPath := cutAt(request.RequestURI, '?')
-			if requestPath[len(requestPath)-1] != '/' {
-				return url.QueryEscape(serverFuncBase(requestPath))
+			if requestPath := wildcardParts[7]; requestPath != "" && requestPath[len(requestPath)-1] != '/' {
+				return serverFuncBase(requestPath)
 			}
 			return ""
 		},
 		"EXT": func(request *customNetHttp.Request, wildcardParts ...string) string {
-			return ext(cutAt(request.RequestURI, '?'))
+			return ext(wildcardParts[7])
 		},
 		"REWRITE": func(request *customNetHttp.Request, wildcardParts ...string) string {
-			return url.QueryEscape(wildcardParts[6])
+			return wildcardParts[6]
 		},
 		"REWRITE_COMPLEMENT": func(request *customNetHttp.Request, wildcardParts ...string) string {
-			// What follows the key in the decoded, clean path it matched (B2), and the query
+			// What follows the key in the decoded, clean path it matched, and the query
 			complement := ""
 			if length := len(wildcardParts[6]); length < len(wildcardParts[7]) {
 				complement = wildcardParts[7][length:]
@@ -1805,13 +1835,155 @@ var (
 			if queryStart := strings.IndexByte(request.RequestURI, '?'); queryStart != -1 {
 				complement += request.RequestURI[queryStart:]
 			}
-			return url.QueryEscape(complement)
+			return complement
 		},
 	}
 )
 
-// sitesDirSetting is the sites directory an "M" value names: with a final slash and {TURBO_CURRENT_DIR}
-// replaced by the working directory.
-func sitesDirSetting(value string) string {
-	return strings.Replace(putSlash(value), "{"+currentDirPlaceholder+"}", currentDir(), 1)
+// certificateStaleAfter is the age of a site's certificate files from which they don't count as a certificate in
+// use (Certbot's last 90 days): "Create SSL" issues a new one, and "Delete SSL" deletes them.
+const certificateStaleAfter = 75 * 24 * time.Hour
+
+// unknownPlaceholder returns the first "{NAME}" of a rewrite target that isn't a placeholder, or "".
+func unknownPlaceholder(target string) string {
+	for {
+		openBraceIdx := strings.IndexByte(target, '{')
+		if openBraceIdx == -1 {
+			return ""
+		}
+		closeBraceIdx := strings.IndexByte(target[openBraceIdx:], '}')
+		if closeBraceIdx == -1 {
+			return ""
+		}
+		placeholder := target[openBraceIdx : openBraceIdx+closeBraceIdx+1]
+		if _, known := shortcutWordReplacers[placeholder[1:len(placeholder)-1]]; !known {
+			return placeholder
+		}
+		target = target[openBraceIdx+closeBraceIdx+1:]
+	}
+}
+
+// headerSetCaseInsensitive reports whether headers has name, in any case.
+func headerSetCaseInsensitive(headers map[string]string, name string) bool {
+	for header := range headers {
+		if strings.EqualFold(header, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// invalidPreprocessorMark starts the value of a preprocessor of turbo.config whose extension or type is wrong: no
+// value written can have a NUL, so it only marks it (the rest is the value as written, kept for saving).
+const invalidPreprocessorMark = "\x00"
+
+// preprocessorCommand returns the executable a preprocessor value runs ("[<protocol>>]<path>", as written in
+// turbo.config or addPreprocessor, with {TURBO_CURRENT_DIR} replaced), or why it can't run. The limit of 128
+// characters is for the path as written, without the protocol.
+func preprocessorCommand(value string) (executable string, problem string) {
+	if strings.HasPrefix(value, invalidPreprocessorMark) {
+		return "", "invalid turbo.config entry"
+	}
+	protocol, path, hasProtocol := strings.Cut(value, ">")
+	if !hasProtocol {
+		protocol, path = "cgi", value
+	}
+	if pathLen := len(path); pathLen < 1 || pathLen > 128 {
+		return "", "Preprocessor path too long or too short"
+	}
+	if strings.ToLower(protocol) != "cgi" { // "dx>" isn't implemented
+		return "", "Invalid preprocessor protocol."
+	}
+	return strings.Replace(path, "{"+currentDirPlaceholder+"}", currentDir(), 1), ""
+}
+
+// replacementTokenProblem says why token can't stand for char among the character replacements in use, or "": a
+// token can't have a replaced character (its own included), contain another token or be inside one, and char
+// can't be inside another token. Otherwise undoing the replacements would depend on their order, or turn a text
+// typed on purpose into something else. Callers hold the global lock.
+func replacementTokenProblem(char string, token string) string {
+	if strings.Contains(token, char) {
+		return "Replacement with its own character"
+	}
+	others := make([]string, 0, len(charReplacements))
+	for other := range charReplacements {
+		others = append(others, other)
+	}
+	sort.Strings(others)
+	for _, other := range others {
+		if other == char {
+			continue
+		}
+		otherToken := charReplacements[other]
+		switch {
+		case strings.Contains(token, other):
+			return "Replacement with a replaced character (" + other + ")"
+		case strings.Contains(token, otherToken) || strings.Contains(otherToken, token):
+			return "Replacement that overlaps with that of " + other + " (" + otherToken + ")"
+		case strings.Contains(otherToken, char):
+			return "Character present in the replacement of " + other + " (" + otherToken + ")"
+		}
+	}
+	return ""
+}
+
+// certbotEmailProblem says why an e-mail can't be given to Certbot (cfgE, and z of cfgC), or "": 5 to 40 bytes,
+// one "@" with something before it and a domain with a dot after it, and no spaces, "#", "--", a leading "-" or
+// control characters.
+func certbotEmailProblem(email string) string {
+	local, domain, found := strings.Cut(email, "@")
+	if !found || local == "" || strings.IndexByte(domain, '@') != -1 || strings.IndexByte(domain, '.') == -1 || !textAllowed(email, false) ||
+		strings.ContainsAny(email, "# ") || strings.Contains(email, "--") || email[0] == '-' {
+		return "Invalid e-mail value"
+	}
+	if len(email) < 5 || len(email) > 40 {
+		return "Invalid e-mail length"
+	}
+	return ""
+}
+
+// loadingConfig is set while the global settings of turbo.config are applied: their keys come in any order, so
+// the conditions between settings are checked once all are in (enforceSettingInvariants), not one by one.
+// Guarded by globalMutex.
+var loadingConfig bool
+
+// rateLimitProblem says why CIS (in milliseconds) and CII can't go together, or "": at most CIS requests per
+// window (one per millisecond), and windows of at most 66 times CII milliseconds, which the panel needs to work
+// (2000 ms for 30 requests of the GUI). Compared by multiplying, so 66.5 is not taken for 66.
+func rateLimitProblem(cisMillis int64, cii int64) string {
+	if cii > cisMillis {
+		return "More than " + strconv.FormatInt(cisMillis, 10)
+	}
+	if cisMillis > 66*cii {
+		return "Value incompatible with the panel"
+	}
+	return ""
+}
+
+// readTimeProblem reports whether RHT is more than half of RT. RHT at 0 uses RT, and RT at 0 has no limit to be
+// half of.
+func readTimeProblem(rt time.Duration, rht time.Duration) bool {
+	return rt > 0 && rht > 0 && 2*rht > rt
+}
+
+// enforceSettingInvariants puts back the defaults of the settings that don't meet their conditions with the ones
+// they depend on, once turbo.config is applied: CII (and CIS, if the default CII still doesn't fit it) and RHT
+// (or 0, which uses RT, if the default doesn't fit RT either). Callers hold the global lock.
+func enforceSettingInvariants() {
+	cisMillis := func() int64 { return serverRequestLimits.CIS.Load() / int64(time.Millisecond) }
+	if problem := rateLimitProblem(cisMillis(), serverRequestLimits.CII.Load()); problem != "" {
+		slog.Warn("CII of turbo.config is not compatible with CIS: the default value is used", "CIS", cisMillis(), "CII", serverRequestLimits.CII.Load(), "reason", problem)
+		defaultSettingsResetFallbacks["."]["CII"]()
+		if rateLimitProblem(cisMillis(), serverRequestLimits.CII.Load()) != "" {
+			slog.Warn("CIS of turbo.config is not compatible with the default CII: the default value is used", "CIS", cisMillis())
+			defaultSettingsResetFallbacks["."]["CIS"]()
+		}
+	}
+	if limits := serverTimeLimits.Load(); readTimeProblem(limits.RT, limits.RHT) {
+		slog.Warn("RHT of turbo.config is more than half of RT: the default value is used", "RT", limits.RT.String(), "RHT", limits.RHT.String())
+		defaultSettingsResetFallbacks["."]["RHT"]()
+		if limits = serverTimeLimits.Load(); readTimeProblem(limits.RT, limits.RHT) {
+			setTimeLimits(func(limits *customNetHttp.Timeouts) { limits.RHT = 0 }) // Uses RT
+		}
+	}
 }

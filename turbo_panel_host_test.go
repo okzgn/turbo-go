@@ -1,8 +1,8 @@
 package main
 
-// A7 (H8, D3): el panel se separa de los sitios con un host dedicado en PA.
-// Hosts y redes de PA se combinan con AND; PA no admite un host que sirva un
-// sitio y un sitio, subdominio o alias nuevo no puede servir el host de PA.
+// A7 (H8, D3): the panel is kept apart from the sites with a dedicated host in
+// PA. PA's hosts and networks combine with AND; PA doesn't accept a host that
+// serves a site, and a new site, subdomain or alias can't serve PA's host.
 
 import (
 	"bytes"
@@ -15,7 +15,7 @@ import (
 	"testing"
 )
 
-// postHost envía un POST al panel con el Host y la sesión dados.
+// postHost sends a POST to the panel with the given Host and session.
 func postHost(t *testing.T, base, hostName, path, token string) (int, string) {
 	t.Helper()
 	req, _ := http.NewRequest("POST", base+path, nil)
@@ -30,7 +30,7 @@ func postHost(t *testing.T, base, hostName, path, token string) (int, string) {
 	return res.StatusCode, string(b)
 }
 
-// panelAnswers dice si /admin: sirve el panel (la página de login) en ese host.
+// panelAnswers reports whether /admin: serves the panel (the login page) on that host.
 func panelAnswers(t *testing.T, base, hostName string) bool {
 	t.Helper()
 	res, body, err := rawGet(base, hostName, "/admin:")
@@ -40,8 +40,9 @@ func panelAnswers(t *testing.T, base, hostName string) bool {
 	return res.StatusCode == 200 && strings.Contains(body, `name="u"`)
 }
 
-// captureLog devuelve lo que se escriba con slog hasta el final de la prueba.
+// captureLog returns what is written with slog until the end of the test.
 func captureLog(t *testing.T) *syncBuffer {
+	t.Helper()
 	logBuffer := &syncBuffer{}
 	previous := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(logBuffer, nil)))
@@ -49,8 +50,8 @@ func captureLog(t *testing.T) *syncBuffer {
 	return logBuffer
 }
 
-// H8: con hosts y redes en PA, se exigen las dos cosas: desde una red
-// permitida, el panel no responde en el host de un sitio.
+// H8: with hosts and networks in PA, both are required: from an allowed
+// network, the panel doesn't answer on a site's host.
 func TestA7_HostsAndNetworksBothRequired(t *testing.T) {
 	initForTest(t)
 	base := startServer(t)
@@ -61,44 +62,45 @@ func TestA7_HostsAndNetworksBothRequired(t *testing.T) {
 		t.Fatalf("PA: %q", msg)
 	}
 	if panelAnswers(t, base, "localhost") {
-		t.Error("PA=panel.test,127.0.0.0/8: el panel responde desde 127.0.0.1 en el host del sitio localhost")
+		t.Error("PA=panel.test,127.0.0.0/8: the panel answers from 127.0.0.1 on the host of the site localhost")
 	}
 	if !panelAnswers(t, base, "panel.test") {
-		t.Error("PA=panel.test,127.0.0.0/8: el panel no responde en panel.test desde 127.0.0.1")
+		t.Error("PA=panel.test,127.0.0.0/8: the panel doesn't answer on panel.test from 127.0.0.1")
 	}
 	globalMutex.Lock()
 	defaultSettingValidators["."]["PA"]("panel.test,10.0.0.0/8", internalAuth)
 	globalMutex.Unlock()
 	if panelAnswers(t, base, "panel.test") {
-		t.Error("PA=panel.test,10.0.0.0/8: el panel responde desde 127.0.0.1, fuera de la red")
+		t.Error("PA=panel.test,10.0.0.0/8: the panel answers from 127.0.0.1, outside the network")
 	}
 }
 
-// H8, D3: setPA rechaza un host que sirve un sitio; con un host dedicado, el
-// panel deja de responder en los hosts de los sitios.
+// H8, D3: setPA rejects a host that serves a site; with a dedicated host, the
+// panel stops answering on the sites' hosts.
 func TestA7_SetPARejectsSiteHost(t *testing.T) {
 	initForTest(t)
 	base := startServer(t)
 	tok := login(t, base)
 	for _, value := range []string{"localhost", "panel.test,LOCALHOST", "localhost,127.0.0.0/8"} {
 		code, body := postHost(t, base, "localhost", "/admin:inside:setPA?"+url.Values{"a": {value}, "b": {"Admin"}}.Encode(), tok)
-		if code != 400 || !strings.Contains(body, "sirve el sitio localhost") {
-			t.Errorf("setPA %q con el sitio localhost: %d %q; se esperaba 400 con el motivo", value, code, body)
+		if code != 400 || !strings.Contains(body, "serves the site localhost") {
+			t.Errorf("setPA %q with the site localhost: %d %q; expected 400 with the reason", value, code, body)
 		}
 	}
-	if code, body := postHost(t, base, "localhost", "/admin:inside:setPA?a=panel.test&b=Admin", tok); code != 200 {
+	// From panel.test: setPA refuses a value that would leave out the request that sets it.
+	if code, body := postHost(t, base, "panel.test", "/admin:inside:setPA?a=panel.test&b=Admin", tok); code != 200 {
 		t.Fatalf("setPA panel.test: %d %q", code, body)
 	}
 	if panelAnswers(t, base, "localhost") {
-		t.Error("con PA=panel.test, el panel responde en localhost")
+		t.Error("with PA=panel.test, the panel answers on localhost")
 	}
 	if !panelAnswers(t, base, "panel.test") {
-		t.Error("con PA=panel.test, el panel no responde en panel.test")
+		t.Error("with PA=panel.test, the panel doesn't answer on panel.test")
 	}
 }
 
-// D3: con PA=panel.test,www.localhost, ningún sitio, wildcard, subdominio ni
-// alias nuevo puede servir esos hosts; lo rechazado no deja carpetas.
+// D3: with PA=panel.test,www.localhost, no new site, wildcard, subdomain or
+// alias can serve those hosts; what is rejected leaves no folders.
 func TestA7_SitesCannotServePanelHost(t *testing.T) {
 	dir := initForTest(t)
 	base := startServer(t)
@@ -118,20 +120,20 @@ func TestA7_SitesCannotServePanelHost(t *testing.T) {
 	} {
 		code, body := req(c.path)
 		if code != 400 || !strings.Contains(body, "panel") {
-			t.Errorf("%s: %d %q; se esperaba 400 por el host del panel", c.path, code, body)
+			t.Errorf("%s: %d %q; expected 400 because of the panel host", c.path, code, body)
 		}
 		if c.folder != "" {
 			if _, err := os.Stat(dir + c.folder); err == nil {
-				t.Errorf("%s: la carpeta %s quedó creada", c.path, c.folder)
+				t.Errorf("%s: the folder %s was created", c.path, c.folder)
 			}
 		}
 	}
-	if code, body := req("/admin:inside:addSite?s=otro.test"); code != 200 {
-		t.Errorf("addSite otro.test: %d %q", code, body)
+	if code, body := req("/admin:inside:addSite?s=other.test"); code != 200 {
+		t.Errorf("addSite other.test: %d %q", code, body)
 	}
 }
 
-// panelToken inicia sesión en el panel con el Host dado.
+// panelToken signs in to the panel with the given Host.
 func panelToken(t *testing.T, base, hostName string) string {
 	t.Helper()
 	buf, contentType := multipartCredentials("Turbo", "Admin")
@@ -145,32 +147,32 @@ func panelToken(t *testing.T, base, hostName string) string {
 	defer res.Body.Close()
 	b, _ := io.ReadAll(res.Body)
 	if !bytes.HasPrefix(b, []byte("ok")) {
-		t.Fatalf("login en %s: %d %q", hostName, res.StatusCode, b)
+		t.Fatalf("login on %s: %d %q", hostName, res.StatusCode, b)
 	}
 	return string(b[2:])
 }
 
-// D3: un turbo.config con un PA que choca con un sitio se carga igual (no se
-// rompe la configuración), con un aviso; y con PA vacío se avisa de que el
-// panel comparte origen con los sitios.
+// D3: a turbo.config with a PA that clashes with a site loads all the same
+// (the configuration isn't broken), with a warning; and with an empty PA there
+// is a warning that the panel shares its origin with the sites.
 func TestA7_ConfigWarnings(t *testing.T) {
 	dir := initForTest(t)
 	logs := captureLog(t)
 	loadConfig(t, dir, `{"localhost":{"":{}},".":{"PA":"localhost"}}`)
 	if panelAccess.Load().setting != "localhost" {
-		t.Errorf("PA cargado: %q; se esperaba localhost", panelAccess.Load().setting)
+		t.Errorf("PA loaded: %q; expected localhost", panelAccess.Load().setting)
 	}
-	if !strings.Contains(logs.String(), "sirve el sitio localhost") {
-		t.Errorf("sin aviso por el PA que sirve un sitio:\n%s", logs.String())
+	if !strings.Contains(logs.String(), "serves the site localhost") {
+		t.Errorf("no warning for the PA that serves a site:\n%s", logs.String())
 	}
 	loadConfig(t, dir, `{"localhost":{"":{}},".":{"PA":""}}`)
-	if !strings.Contains(logs.String(), "El panel responde en los mismos hosts que los sitios") {
-		t.Errorf("sin aviso con PA vacío:\n%s", logs.String())
+	if !strings.Contains(logs.String(), "The panel answers on the same hosts as the sites") {
+		t.Errorf("no warning with an empty PA:\n%s", logs.String())
 	}
 }
 
-// H61: un sitio que aparece en disco y sirve el host del panel se activa,
-// como desde turbo.config, pero con el aviso de que comparte origen.
+// H61: a site that appears on disk and serves the panel host is activated, as
+// from turbo.config, but with the warning that it shares the origin.
 func TestH61_DiskSiteServingPanelHostWarns(t *testing.T) {
 	dir := initForTest(t)
 	globalMutex.Lock()
@@ -183,7 +185,46 @@ func TestH61_DiskSiteServingPanelHostWarns(t *testing.T) {
 	logs := captureLog(t)
 	os.MkdirAll(dir+"panel.test/@", 0755)
 	updateSettings(true)
-	if !strings.Contains(logs.String(), "sirve el sitio panel.test") {
-		t.Errorf("sitio panel.test creado en disco con PA=panel.test: sin aviso: %s", logs.String())
+	if !strings.Contains(logs.String(), "serves the site panel.test") {
+		t.Errorf("site panel.test created on disk with PA=panel.test: no warning: %s", logs.String())
+	}
+}
+
+// N89: an error template is HTML that the panel's session can set without the password. On the panel's origin
+// (its paths, and every path of its own host) it must not run scripts: there, everything but the panel's own
+// pages carries a Content-Security-Policy without scripts. The panel's pages keep theirs.
+func TestN89_ErrorTemplateWithoutScriptsOnPanelOrigin(t *testing.T) {
+	initForTest(t)
+	base := startServer(t)
+	globalMutex.Lock()
+	ok, msg := defaultSettingValidators["."]["PA"]("panel.test", internalAuth)
+	setHTTPResponses(func(responses map[int]string) { responses[404] = "<p>404</p><script>alert(1)</script>" })
+	globalMutex.Unlock()
+	if !ok {
+		t.Fatal(msg)
+	}
+	scriptsAllowed := func(policy string) bool {
+		for _, directive := range strings.Split(policy, ";") {
+			if fields := strings.Fields(directive); len(fields) > 1 && (fields[0] == "script-src" || fields[0] == "default-src") {
+				return fields[1] != "'none'"
+			}
+		}
+		return true
+	}
+	for _, path := range []string{"/admin:missing.html", "/admin:inside:missing", "/something-else", "/.well-known/acme-challenge/x"} {
+		res, body, err := rawGet(base, "panel.test", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.StatusCode == 404 && strings.Contains(body, "<script>") && scriptsAllowed(res.Header.Get("Content-Security-Policy")) {
+			t.Errorf("%s on the panel host: the template with a script goes out with Content-Security-Policy %q", path, res.Header.Get("Content-Security-Policy"))
+		}
+	}
+	res, body, err := rawGet(base, "panel.test", "/admin:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.StatusCode != 200 || !strings.Contains(body, `name="u"`) || !scriptsAllowed(res.Header.Get("Content-Security-Policy")) {
+		t.Errorf("the panel's page: %d, Content-Security-Policy %q", res.StatusCode, res.Header.Get("Content-Security-Policy"))
 	}
 }

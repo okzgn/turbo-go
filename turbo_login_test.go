@@ -1,7 +1,7 @@
 package main
 
-// A4 (H9, H46): el login solo por POST /admin:, con las credenciales en el
-// cuerpo y un cuerpo pequeño; el cierre de sesión solo por POST.
+// A4 (H9, H46): login only by POST /admin:, with the credentials in the
+// body and a small body; signing out only by POST.
 
 import (
 	"bufio"
@@ -16,8 +16,8 @@ import (
 	"time"
 )
 
-// loginRequest envía un login con el método, la ruta, el cuerpo y el tipo de
-// contenido dados y devuelve el código, el cuerpo y si fijó la cookie.
+// loginRequest sends a login with the given method, path, body and content
+// type, and returns the code, the body and whether it set the cookie.
 func loginRequest(t *testing.T, base, method, path string, body io.Reader, contentType string) (int, string, bool) {
 	t.Helper()
 	req, _ := http.NewRequest(method, base+path, body)
@@ -43,54 +43,54 @@ func multipartCredentials(user, password string) (*bytes.Buffer, string) {
 	return &buf, w.FormDataContentType()
 }
 
-// H9: con las credenciales en la URL, por GET o fuera de /admin: no se inicia
-// sesión; por POST /admin: con las credenciales en el cuerpo, sí.
+// H9: with the credentials in the URL, by GET or outside /admin: no session is
+// started; by POST /admin: with the credentials in the body, it is.
 func TestA4_LoginOnlyByPostBody(t *testing.T) {
 	initForTest(t)
 	base := startServer(t)
 
 	code, body, cookie := loginRequest(t, base, "GET", "/admin:?u=Turbo&p=Admin", nil, "")
 	if cookie || strings.HasPrefix(body, "ok") || code != 200 || !strings.Contains(body, `name="u"`) {
-		t.Errorf("GET con credenciales en la URL: %d cookie=%v %.40q; se esperaba la página de login", code, cookie, body)
+		t.Errorf("GET with credentials in the URL: %d cookie=%v %.40q; expected the login page", code, cookie, body)
 	}
 	code, body, cookie = loginRequest(t, base, "POST", "/admin:?u=Turbo&p=Admin", nil, "")
 	if cookie || strings.HasPrefix(body, "ok") {
-		t.Errorf("POST con credenciales en la URL: %d cookie=%v %.40q", code, cookie, body)
+		t.Errorf("POST with credentials in the URL: %d cookie=%v %.40q", code, cookie, body)
 	}
 	buf, contentType := multipartCredentials("Turbo", "Admin")
 	code, body, cookie = loginRequest(t, base, "POST", "/admin:x:", buf, contentType)
 	if cookie || strings.HasPrefix(body, "ok") {
-		t.Errorf("POST /admin:x: con credenciales: %d cookie=%v %.40q", code, cookie, body)
+		t.Errorf("POST /admin:x: with credentials: %d cookie=%v %.40q", code, cookie, body)
 	}
 	for _, path := range []string{"/admin::", "/admin::x"} { // H60: only /admin: itself
 		buf, contentType = multipartCredentials("Turbo", "Admin")
 		code, body, cookie = loginRequest(t, base, "POST", path, buf, contentType)
 		if cookie || strings.HasPrefix(body, "ok") {
-			t.Errorf("POST %s con credenciales: %d cookie=%v %.40q", path, code, cookie, body)
+			t.Errorf("POST %s with credentials: %d cookie=%v %.40q", path, code, cookie, body)
 		}
 	}
 	buf, contentType = multipartCredentials("Turbo", "Admin")
 	code, body, cookie = loginRequest(t, base, "PUT", "/admin:", buf, contentType)
 	if cookie || strings.HasPrefix(body, "ok") {
-		t.Errorf("PUT /admin: con credenciales: %d cookie=%v %.40q", code, cookie, body)
+		t.Errorf("PUT /admin: with credentials: %d cookie=%v %.40q", code, cookie, body)
 	}
 
 	buf, contentType = multipartCredentials("Turbo", "Admin")
 	if code, body, cookie = loginRequest(t, base, "POST", "/admin:", buf, contentType); !cookie || !strings.HasPrefix(body, "ok") {
-		t.Errorf("login multipart: %d cookie=%v %.40q", code, cookie, body)
+		t.Errorf("multipart login: %d cookie=%v %.40q", code, cookie, body)
 	}
 	form := url.Values{"u": {"Turbo"}, "p": {"Admin"}}.Encode()
 	if code, body, cookie = loginRequest(t, base, "POST", "/admin:", strings.NewReader(form), "application/x-www-form-urlencoded"); !cookie || !strings.HasPrefix(body, "ok") {
-		t.Errorf("login urlencoded: %d cookie=%v %.40q", code, cookie, body)
+		t.Errorf("urlencoded login: %d cookie=%v %.40q", code, cookie, body)
 	}
 	// Body and URL mixed: only the body counts.
 	if code, body, cookie = loginRequest(t, base, "POST", "/admin:?p=Admin", strings.NewReader("u=Turbo"), "application/x-www-form-urlencoded"); cookie || strings.HasPrefix(body, "ok") {
-		t.Errorf("contraseña en la URL y usuario en el cuerpo: %d cookie=%v %.40q", code, cookie, body)
+		t.Errorf("password in the URL and user in the body: %d cookie=%v %.40q", code, cookie, body)
 	}
 }
 
-// H46: el cuerpo del login se limita a 4 KiB antes de leerlo: con 1 MB se
-// responde 413 sin esperar al resto.
+// H46: the login body is limited to 4 KiB before it is read: with 1 MB the
+// answer is 413, without waiting for the rest.
 func TestA4_LoginBodyLimit(t *testing.T) {
 	initForTest(t)
 	base := startServer(t)
@@ -109,18 +109,18 @@ func TestA4_LoginBodyLimit(t *testing.T) {
 		res, err := http.ReadResponse(bufio.NewReader(conn), nil)
 		conn.Close()
 		if err != nil {
-			t.Errorf("%s: sin respuesta con el cuerpo a medias (el servidor espera el resto): %v", contentType, err)
+			t.Errorf("%s: no response with the body half sent (the server waits for the rest): %v", contentType, err)
 			continue
 		}
 		res.Body.Close()
 		if res.StatusCode != 413 {
-			t.Errorf("%s: login con 1 MB: %d; se esperaba 413", contentType, res.StatusCode)
+			t.Errorf("%s: login with 1 MB: %d; expected 413", contentType, res.StatusCode)
 		}
 	}
 }
 
-// H9: cerrar sesión solo por POST; un GET (un enlace o una imagen de otra
-// página) no la cierra.
+// H9: signing out only by POST; a GET (a link or an image on another
+// page) doesn't sign out.
 func TestA4_SignoutOnlyByPost(t *testing.T) {
 	initForTest(t)
 	base := startServer(t)
@@ -132,10 +132,10 @@ func TestA4_SignoutOnlyByPost(t *testing.T) {
 		res.Body.Close()
 	}
 	if code, body, _ := post(base, "/admin:inside:sites", tok); code != 200 || !strings.HasPrefix(body, "{") {
-		t.Errorf("tras GET /admin:signout: la sesión se cerró: %d %.40q", code, body)
+		t.Errorf("after GET /admin:signout: the session was closed: %d %.40q", code, body)
 	}
 	post(base, "/admin:signout:", tok)
 	if code, body, _ := post(base, "/admin:inside:sites", tok); strings.HasPrefix(body, "{") {
-		t.Errorf("tras POST /admin:signout: la sesión sigue abierta: %d", code)
+		t.Errorf("after POST /admin:signout: the session is still open: %d", code)
 	}
 }

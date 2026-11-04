@@ -1,0 +1,30 @@
+diff --git a/1.net.http.server.go b/1.net.http.server.go
+index 5b9f791..0b50dba 100644
+--- a/1.net.http.server.go
++++ b/1.net.http.server.go
+@@ -2341,6 +2341,7 @@ func (f HandlerFunc) ServeHTTP(w ResponseWriter, r *Request) {
+ // in case the caller had set it up expecting a successful output.
+ func Error(w ResponseWriter, error string, code int) {
+ 	h := w.Header()
++	contentType, body := turboErrorTemplate(code, error) // turbo:P9: Turbo's error template
+ 
+ 	// Delete the Content-Length header, which might be for some other content.
+ 	// Assuming the error string fits in the writer's buffer, we'll figure
+@@ -2353,14 +2354,14 @@ func Error(w ResponseWriter, error string, code int) {
+ 
+ 	// There might be content type already set, but we reset it to
+ 	// text/plain for the error message.
+-	h.Set("Content-Type", "text/plain; charset=utf-8")
++	h.Set("Content-Type", contentType) // turbo:P9
+ 	h.Set("X-Content-Type-Options", "nosniff")
+ 	w.WriteHeader(code)
+-	fmt.Fprintln(w, error)
++	io.WriteString(w, body) // turbo:P9
+ }
+ 
+ // NotFound replies to the request with an HTTP 404 not found error.
+-func NotFound(w ResponseWriter, r *Request) { Error(w, "404 page not found", StatusNotFound) }
++func NotFound(w ResponseWriter, r *Request) { Error(w, "", StatusNotFound) } // turbo:P9: the template gives the text
+ 
+ // NotFoundHandler returns a simple request handler
+ // that replies to each request with a “404 page not found” reply.

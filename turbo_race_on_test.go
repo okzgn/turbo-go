@@ -2,6 +2,6 @@
 
 package main
 
-// raceEnabled indica que las pruebas se ejecutan con el detector de carreras,
-// que distorsiona las medidas de tiempo.
+// raceEnabled says that the tests run with the race detector, which distorts
+// time measurements.
 const raceEnabled = true

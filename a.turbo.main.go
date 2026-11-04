@@ -23,19 +23,30 @@ For commercial licensing, please visit one of the following:
 package main
 
 import (
+	"bytes"
+	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"maps"
+	"math"
 	"net"
+	"net/netip"
+	"net/url"
 	"os"
+	"os/signal"
+	"runtime"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 	"turbo/customNetHttp"
 )
@@ -54,8 +65,9 @@ var (
 	panelPasswordHash     atomicString                       // Panel password hash, saved as "PH" (see setPanelPassword)
 	userFromEnv           bool                               // TURBO_USER set: it has priority over turbo.config
 	passwordFromEnv       bool                               // TURBO_PASSWORD set: it has priority over turbo.config
-	sitesDir              atomicString                       // Sites directory
-	startDir              string                             // Directory where turbo.config is read first (working directory or TURBO_DIR)
+	sitesDir              atomicString                       // Sites directory, resolved (see resolveSitesDir)
+	sitesDirValue         atomicString                       // Sites directory as written (TURBO_DIR or "M"), saved as such so the configuration isn't tied to this machine
+	startDir              string                             // Directory where turbo.config is read first (working directory or TURBO_DIR), resolved
 	charReplacements      = make(map[string]string)          // Characters to encode
 	fixedCharReplacements = make(map[string]bool)            // Fixed character replacements
 
@@ -67,13 +79,14 @@ var (
 	indexFiles    = make(map[string]map[string]int)               // Index files: name -> position (tried from the lowest)
 	domainAliases = make(map[string]string)                       // Domain aliases
 
-	serverTimeLimits    = &customNetHttp.TurboTimeLimits        // Server time limits (published copy, see setTimeLimits)
-	serverRequestLimits = []int64{10000000000, 1000000000, 100} // Server request limits
-	maxBodySize         = &customNetHttp.TurboMaxBodySize       // Server upload/body limit (MBB), read by the server on each request
-	maxHeaderBytes      = &customNetHttp.TurboMaxHeaderBytes    // Maximum header bytes to read (MHB)
-	maxURILength        = &customNetHttp.TurboMaxURILength      // Maximum URI length (MUB)
+	serverTimeLimits    = &customNetHttp.TurboTimeLimits     // Server time limits (published copy, see setTimeLimits)
+	serverRequestLimits requestLimits                        // Per-IP limits (CIL, CIS, CII)
+	maxBodySize         = &customNetHttp.TurboMaxBodySize    // Server upload/body limit (MBB), read by the server on each request
+	maxHeaderBytes      = &customNetHttp.TurboMaxHeaderBytes // Maximum header bytes to read (MHB)
+	maxURILength        = &customNetHttp.TurboMaxURILength   // Maximum URI length (MUB)
 
-	globalRequestLimit  atomic.Int64  // CGL: requests per second for the whole server; 0 = no limit (D4)
+	globalRequestLimit  atomic.Int64  // CGL: requests per second for the whole server; 0 = no limit
+	cgiProcesses        atomic.Int64  // CGP: CGI processes at a time; 0 = automatic (see cgiProcessLimit)
 	globalRequestWindow atomic.Uint64 // Unix second (high 32 bits) and the requests counted in it (low 32 bits)
 
 	configCheckTicker = time.NewTicker(30 * time.Second)
@@ -92,11 +105,15 @@ var (
 	visitsLogFile  *os.File // Visits log file pointer
 	denialsLogFile *os.File // Denials log file pointer
 
-	globalMutex          sync.RWMutex // Global mutex for shared state
-	logMutex             sync.Mutex   // Guards the log file pointers, apart from globalMutex so logging never waits for it
-	ipReferences         sync.Map     // References per IP
-	maxHeaderKeyLength   = 48         // Maximum header key length
-	maxHeaderValueLength = 512        // Maximum header value length
+	globalMutex  sync.RWMutex // Global mutex for shared state
+	logMutex     sync.Mutex   // Guards the log file pointers, apart from globalMutex so logging never waits for it
+	ipReferences sync.Map     // References per IP
+)
+
+// Limits of a site's custom headers (addHeader): the name and the value, in bytes.
+const (
+	maxHeaderKeyLength   = 48
+	maxHeaderValueLength = 512
 )
 
 // Fixed names and texts (they were the keys of stringStore).
@@ -106,6 +123,8 @@ const (
 	adminInsideName     = "inside"                      // Authenticated panel: /admin:inside:
 	sessionHeaderName   = "ok"                          // Session header and login token prefix
 	certificatesDirName = "turbo.certificates"          // Certbot's work directory
+	panelCertDirName    = "turbo.panel"                 // Certificate of the panel's own host
+	acmeWebrootDirName  = "webroot"                     // Inside turbo.panel: Certbot's webroot for the panel's certificate
 	publicDirName       = "@"                           // Public content of each site
 	certFileName        = "fullchain.pem"               // Certificate of each site
 	keyFileName         = "privkey.pem"                 // Private key of each site
@@ -114,49 +133,93 @@ const (
 	visitsLogName       = "turbo.visits"                // Visits log
 	panelPageName       = "#.html"                      // Panel page
 	contentTypeHeader   = "Content-Type"                // Header name
-	msgMissingData      = "Faltan datos"                // Generic API error
+	msgMissingData      = "Missing data"                // Generic API error
 	devGUIDirName       = "turbo.dev"                   // GUI override directory
 )
 
-func main() {
-	// Compile and compress with: go build -ldflags "-s -w"
+// turboVersion is the release, set by release.sh with -ldflags "-X main.turboVersion=<version>".
+var turboVersion string
 
+// buildDescription says what this binary is: the release ("development" when built from the source without
+// release.sh), the commit it was built from ("+modified" if the tree had changes; "unknown" without
+// version control information) and the Go it was built with.
+func buildDescription() (version string, commit string, goVersion string) {
+	version, commit = turboVersion, "unknown"
+	if version == "" {
+		version = "development"
+	}
+	if info, ok := debug.ReadBuildInfo(); ok {
+		modified := false
+		for _, setting := range info.Settings {
+			switch setting.Key {
+			case "vcs.revision":
+				commit = setting.Value
+			case "vcs.modified":
+				modified = setting.Value == "true"
+			}
+		}
+		if modified && commit != "unknown" {
+			commit += "+modified"
+		}
+	}
+	return version, commit, runtime.Version()
+}
+
+func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, nil))) // Levels and timestamps; systemd keeps stdout in the journal
-	slog.Info("Inicio", "servidor", serverName)
+	version, commit, goVersion := buildDescription()
+	slog.Info("Starting", "server", serverName, "version", version, "commit", commit, "go", goVersion) // Which advisories apply
 
 	// GUI access username & password
 	panelUser.Set("Turbo")
 	envValue, envExists := os.LookupEnv("TURBO_USER")
+	if envExists && envValue == "" { // Set by mistake: an empty username or password would let anyone in
+		slog.Error("TURBO_USER is set but empty: Turbo does not start")
+		os.Exit(1)
+	}
 	if envExists {
-		slog.Info("Usuario del panel tomado de TURBO_USER")
+		slog.Info("Panel user taken from TURBO_USER")
 		panelUser.Set(envValue)
 		userFromEnv = true
 	}
 
 	envValue, envExists = os.LookupEnv("TURBO_PASSWORD")
+	if envExists && envValue == "" {
+		slog.Error("TURBO_PASSWORD is set but empty: Turbo does not start")
+		os.Exit(1)
+	}
 	if envExists {
-		slog.Info("Contraseña del panel tomada de TURBO_PASSWORD")
-		setPanelPassword(envValue)
+		slog.Info("Panel password taken from TURBO_PASSWORD")
+		if err := setPanelPassword(envValue); err != nil {
+			slog.Error("Can't hash TURBO_PASSWORD: Turbo does not start", "error", err)
+			os.Exit(1)
+		}
 		passwordFromEnv = true
-	} else {
-		setPanelPassword("Admin")
+	} else if err := setPanelPassword("Admin"); err != nil {
+		slog.Error("Can't hash the default password: Turbo does not start", "error", err)
+		os.Exit(1)
 	}
 
-	sitesDir.Set(currentDir())
+	sitesDirValue.Set("{" + currentDirPlaceholder + "}")
 	envValue, envExists = os.LookupEnv("TURBO_DIR")
 	if envExists {
-		slog.Info("Directorio de sitios tomado de TURBO_DIR", "directorio", envValue)
-		sitesDir.Set(putSlash(envValue))
+		slog.Info("Sites directory taken from TURBO_DIR", "directory", envValue)
+		sitesDirValue.Set(envValue)
 	}
-	startDir = sitesDir.Get()
+	resolvedDir, err := resolveSitesDir(sitesDirValue.Get())
+	if err != nil {
+		slog.Error("Invalid sites directory: Turbo does not start", "directory", sitesDirValue.Get(), "error", err)
+		os.Exit(1)
+	}
+	sitesDir.Set(resolvedDir)
+	startDir = resolvedDir
 
-	var err error
 	if httpAddr, err = listenAddress("TURBO_HTTP_ADDR", httpAddr); err != nil {
-		slog.Error("TURBO_HTTP_ADDR no válida", "error", err)
+		slog.Error("Invalid TURBO_HTTP_ADDR", "error", err)
 		os.Exit(1)
 	}
 	if httpsAddr, err = listenAddress("TURBO_HTTPS_ADDR", httpsAddr); err != nil {
-		slog.Error("TURBO_HTTPS_ADDR no válida", "error", err)
+		slog.Error("Invalid TURBO_HTTPS_ADDR", "error", err)
 		os.Exit(1)
 	}
 
@@ -168,17 +231,23 @@ func main() {
 	charReplacements["&"] = "-_-"
 	fixedCharReplacements = map[string]bool{";": true, "#": true, "&": true}
 
-	if err := updateSettings(false); err != nil { // D11: applying defaults would lose the configuration
+	if err := updateSettings(false); err != nil { // applying defaults would lose the configuration
 		fmt.Fprintln(os.Stderr, configErrorMessage(err, true))
 		os.Exit(1)
 	}
 	warnDefaultCredentials()
+	clearInheritedCapabilities() // Before any CGI can run; opening the ports needs only Turbo's effective set
 	servers[0] = createSafeServer(tlsConfig)
-	servers[1] = createHttpServer()
+	servers[1] = createHTTPServer()
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, os.Interrupt, syscall.SIGTERM) // Ctrl+C, and what systemd sends to stop the service
 	runRecovering("renewCertificates", renewCertificates)
 	renewTicker := time.NewTicker(24 * time.Hour)
 	for {
 		select {
+		case received := <-stop:
+			shutdown(received)
+			return
 		case <-renewTicker.C:
 			runRecovering("renewCertificates", renewCertificates)
 		case <-configCheckTicker.C:
@@ -194,11 +263,39 @@ func main() {
 	}
 }
 
+// shutdownGrace is how long the requests in progress have to finish when Turbo is stopped.
+const shutdownGrace = 10 * time.Second
+
+// shutdown stops both servers: they stop accepting connections and wait up to shutdownGrace for the requests in
+// progress. Then the logs are closed, and main returns (exit code 0).
+func shutdown(received os.Signal) {
+	slog.Info("Stopping", "signal", received.String())
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+	defer cancel()
+	var wg sync.WaitGroup
+	for _, server := range servers {
+		if server == nil {
+			continue
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := server.Shutdown(ctx); err != nil {
+				slog.Warn("Requests unfinished at shutdown", "error", err)
+			}
+		}()
+	}
+	wg.Wait()
+	serverSetLogState(visitsLogName, nil) // Closed, so the last lines are written
+	serverSetLogState(denialsLogName, nil)
+	slog.Info("Stopped")
+}
+
 // runRecovering runs a periodic task of main() and logs a panic instead of ending the process.
 func runRecovering(taskName string, task func()) {
 	defer func() {
 		if p := recover(); p != nil {
-			slog.Error("Panic en "+taskName, "error", p)
+			slog.Error("Panic in "+taskName, "error", p)
 		}
 	}()
 	task()
@@ -263,6 +360,13 @@ func cleanDeniedIPs() {
 	})
 }
 
+// withReadLock runs fn holding the global read lock, releasing it even if fn panics.
+func withReadLock(fn func()) {
+	globalMutex.RLock()
+	defer globalMutex.RUnlock()
+	fn()
+}
+
 // withGlobalLock runs fn holding the global write lock, releasing it even if fn panics.
 func withGlobalLock(fn func()) {
 	globalMutex.Lock()
@@ -272,56 +376,74 @@ func withGlobalLock(fn func()) {
 
 func createSafeServer(tlsConfig *tls.Config) *customNetHttp.Server {
 	server := newHTTPSServer(tlsConfig)
-	if len(siteCertificates) > 0 {
+	if len(siteCertificates) > 0 || panelCertificate != nil {
 		return safeServerStart(server, tlsConfig)
 	}
 
 	return server
 }
 
-// newHTTPSServer builds the HTTPS server, without listening yet.
+// newHTTPSServer builds the HTTPS server, without listening yet. Its time limits aren't set here: the server reads
+// them from TurboTimeLimits on each connection (P6), so that a change from the panel applies at once.
 func newHTTPSServer(tlsConfig *tls.Config) *customNetHttp.Server {
 	return &customNetHttp.Server{
-		ReadHeaderTimeout: serverTimeLimits.Load().RHT,
-		ReadTimeout:       serverTimeLimits.Load().RT,
-		WriteTimeout:      serverTimeLimits.Load().WT,
-		IdleTimeout:       serverTimeLimits.Load().IT,
-		ConnState:         connHandler,
-		Handler:           customNetHttp.HandlerFunc(serverHandlerFn("s")),
-		ErrorLog:          slog.NewLogLogger(slog.Default().Handler(), slog.LevelWarn), // Connection errors (TLS, HTTP/2)
-		TLSConfig:         tlsConfig,
-		HTTP2:             &customNetHttp.HTTP2Config{MaxConcurrentStreams: http2MaxStreams},
+		ConnState: connHandler,
+		Handler:   customNetHttp.HandlerFunc(serverHandlerFn("s")),
+		ErrorLog:  slog.NewLogLogger(slog.Default().Handler(), slog.LevelWarn), // Connection errors (TLS, HTTP/2)
+		TLSConfig: tlsConfig,
+		HTTP2:     &customNetHttp.HTTP2Config{MaxConcurrentStreams: http2MaxStreams},
 	}
 }
 
+// safeServerStart serves HTTPS on httpsAddr (:443). While it isn't open (it couldn't be opened, or the server
+// stopped with an error), nothing is redirected to HTTPS (httpsListening) and Turbo tries to open it again every
+// httpsRetryDelay.
 func safeServerStart(server *customNetHttp.Server, tlsConfig *tls.Config) *customNetHttp.Server {
 	listener, err := tls.Listen("tcp", httpsAddr, tlsConfig) // #nosec G102 -- a web server listens on every interface by default; TURBO_HTTPS_ADDR narrows it
 	if err != nil {
-		slog.Error("No se puede abrir la dirección HTTPS", "dirección", httpsAddr, "error", err)
+		slog.Error("Can't open the HTTPS address: will retry", "address", httpsAddr, "error", err)
+		retryHTTPS(server, tlsConfig)
 		return server
 	}
-	httpsListening = true
+	httpsListening.Store(true)
 
 	go func() {
-		if err = server.Serve(listener); err != nil {
-			slog.Error("Servidor HTTPS detenido", "error", err)
-			_ = listener.Close() // After a failure: the error that matters is the one logged
+		err := server.Serve(listener)
+		httpsListening.Store(false)
+		if errors.Is(err, customNetHttp.ErrServerClosed) { // Stopped on purpose (shutdown)
 			return
 		}
+		slog.Error("HTTPS server stopped: will retry", "error", err)
+		_ = listener.Close() // After a failure: the error that matters is the one logged
+		retryHTTPS(server, tlsConfig)
 	}()
 
 	return server
 }
 
-func createHttpServer() *customNetHttp.Server {
+// httpsRetrying is set while a retry of safeServerStart is waiting: one at a time.
+var httpsRetrying atomic.Bool
+
+// retryHTTPS opens httpsAddr again after httpsRetryDelay, unless it is open by then.
+func retryHTTPS(server *customNetHttp.Server, tlsConfig *tls.Config) {
+	if !httpsRetrying.CompareAndSwap(false, true) {
+		return
+	}
+	time.AfterFunc(httpsRetryDelay, func() {
+		httpsRetrying.Store(false)
+		if !httpsListening.Load() {
+			safeServerStart(server, tlsConfig)
+		}
+	})
+}
+
+// createHTTPServer builds the HTTP server and starts it. Like the HTTPS one, it reads its time limits from
+// TurboTimeLimits (P6).
+func createHTTPServer() *customNetHttp.Server {
 	server := &customNetHttp.Server{
-		ReadHeaderTimeout: serverTimeLimits.Load().RHT,
-		ReadTimeout:       serverTimeLimits.Load().RT,
-		WriteTimeout:      serverTimeLimits.Load().WT,
-		IdleTimeout:       serverTimeLimits.Load().IT,
-		ConnState:         connHandler,
-		Handler:           customNetHttp.HandlerFunc(serverHandlerFn("")),
-		ErrorLog:          slog.NewLogLogger(slog.Default().Handler(), slog.LevelWarn), // Connection errors
+		ConnState: connHandler,
+		Handler:   customNetHttp.HandlerFunc(serverHandlerFn("")),
+		ErrorLog:  slog.NewLogLogger(slog.Default().Handler(), slog.LevelWarn), // Connection errors
 	}
 
 	return httpServerStart(server)
@@ -329,6 +451,9 @@ func createHttpServer() *customNetHttp.Server {
 
 // http2MaxStreams is the maximum of concurrent HTTP/2 streams per connection (Go's default is 250).
 const http2MaxStreams = 50
+
+// httpsRetryDelay is how long Turbo waits before trying again to open httpsAddr.
+var httpsRetryDelay = 30 * time.Second
 
 // Listening addresses: ":80" and ":443", or TURBO_HTTP_ADDR and TURBO_HTTPS_ADDR (for example
 // "127.0.0.1:8080" behind a proxy). Set once at start.
@@ -352,7 +477,7 @@ func listenAddress(name, def string) (string, error) {
 		return "", err
 	}
 	if portNumber, err := strconv.Atoi(port); err != nil || portNumber < 1 || portNumber > 65535 {
-		return "", errors.New("puerto no válido: " + port)
+		return "", errors.New("invalid port: " + port)
 	}
 	return net.JoinHostPort(host, port), nil
 }
@@ -362,16 +487,18 @@ func listenAddress(name, def string) (string, error) {
 func httpServerStart(server *customNetHttp.Server) *customNetHttp.Server {
 	listener, err := net.Listen("tcp", httpAddr) // #nosec G102 -- a web server listens on every interface by default; TURBO_HTTP_ADDR narrows it
 	if err != nil {
-		slog.Error("No se puede abrir la dirección HTTP", "dirección", httpAddr, "error", err)
+		slog.Error("Can't open the HTTP address", "address", httpAddr, "error", err)
 		os.Exit(1)
 	}
 
 	go func() {
-		if err = server.Serve(listener); err != nil {
-			slog.Error("Servidor HTTP detenido", "error", err)
-			_ = listener.Close() // After a failure: the error that matters is the one logged
+		err := server.Serve(listener)
+		if errors.Is(err, customNetHttp.ErrServerClosed) { // Stopped on purpose (shutdown)
 			return
 		}
+		slog.Error("HTTP server stopped: Turbo exits", "error", err) // Without :80 Turbo can't work (as above)
+		_ = listener.Close()
+		os.Exit(1)
 	}()
 
 	return server
@@ -404,7 +531,7 @@ func serverSetLogState(logType string, logFile *os.File) {
 // closeLog closes a log file, saying so if it fails (the last lines may be lost).
 func closeLog(logFile *os.File) {
 	if err := logFile.Close(); err != nil {
-		slog.Warn("No se puede cerrar el log", "archivo", logFile.Name(), "error", err)
+		slog.Warn("Can't close the log", "file", logFile.Name(), "error", err)
 	}
 }
 
@@ -421,20 +548,47 @@ func serverGetLogState(logType string) *os.File {
 	return nil
 }
 
-// refreshLogFiles opens or closes each log depending on whether its file exists in baseDir. It runs with the
-// periodic settings check, so requests never stat the files.
+// refreshLogFiles opens or closes each log depending on whether its file exists in baseDir, and opens it again
+// when the file at that path is no longer the one open (rotated by renaming it, as logrotate does). It runs with
+// the periodic settings check, so requests never stat the files.
 func refreshLogFiles(baseDir string) {
 	for _, logType := range []string{visitsLogName, denialsLogName} {
-		_, statErr := os.Stat(baseDir + logType)
-		isOpen := serverGetLogState(logType) != nil
-		if statErr == nil && !isOpen {
-			if logFile, openErr := os.OpenFile(baseDir+logType, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600); openErr == nil { // #nosec G304 -- fixed log name in the sites directory
-				serverSetLogState(logType, logFile)
+		pathInfo, statErr := os.Stat(baseDir + logType)
+		openFile := serverGetLogState(logType)
+		if openFile != nil && statErr == nil {
+			if openInfo, err := openFile.Stat(); err == nil && os.SameFile(openInfo, pathInfo) {
+				continue // Still the same file
 			}
-		} else if statErr != nil && isOpen {
+		}
+		if statErr == nil {
+			logFile, openErr := os.OpenFile(baseDir+logType, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600) // #nosec G304 -- fixed log name in the sites directory
+			if openErr == nil {
+				serverSetLogState(logType, logFile) // Closes the one that was open
+				logOpenProblems.Delete(baseDir + logType)
+			} else if previous, _ := logOpenProblems.Swap(baseDir+logType, openErr.Error()); previous != openErr.Error() {
+				// Once while the error is the same (this runs every 30 s); the file that was open, if any, keeps
+				// getting the lines
+				slog.Warn("Can't open the log", "file", baseDir+logType, "error", openErr)
+			}
+		} else if openFile != nil {
 			serverSetLogState(logType, nil)
 		}
 	}
+}
+
+// logOpenProblems is, per log path, the error with which it last couldn't be opened, so that it is warned about
+// once while it lasts (a rotation that leaves the file with another owner, for example).
+var logOpenProblems sync.Map
+
+// logField writes a field of a log line as it is, or quoted and escaped if it has spaces, quotes or control
+// characters, so that each line keeps its fields apart (an HTTP/2 path may have spaces).
+func logField(field string) string {
+	for i := 0; i < len(field); i++ {
+		if c := field[i]; c <= ' ' || c == '"' || c == 0x7f {
+			return strconv.Quote(field)
+		}
+	}
+	return field
 }
 
 func serverWriteLogs(logType string, request *customNetHttp.Request, timestamp int64, prefix string) {
@@ -442,7 +596,7 @@ func serverWriteLogs(logType string, request *customNetHttp.Request, timestamp i
 	if request == nil {
 		line = prefix + " " + "\n"
 	} else {
-		line = prefix + " " + request.RemoteAddr + " " + strconv.FormatInt(timestamp, 10) + " " + request.Method + " " + request.Host + " " + request.RequestURI + " " + "\n"
+		line = prefix + " " + request.RemoteAddr + " " + strconv.FormatInt(timestamp, 10) + " " + logField(request.Method) + " " + logField(request.Host) + " " + logField(request.RequestURI) + " " + "\n"
 	}
 
 	logMutex.Lock()
@@ -459,38 +613,115 @@ func serverWriteLogs(logType string, request *customNetHttp.Request, timestamp i
 func serverHandlerFn(serverType string) func(w customNetHttp.ResponseWriter, r *customNetHttp.Request) {
 	return func(w customNetHttp.ResponseWriter, r *customNetHttp.Request) {
 		currentTimestamp := time.Now().Unix()
+		// A request in absolute form (GET http://host/x) is served as the same one in origin form; Go already took
+		// its host as r.Host. ("OPTIONS *" never gets here: Go answers it.)
+		if r.RequestURI != "" && r.RequestURI[0] != '/' {
+			r.RequestURI = r.URL.RequestURI()
+		}
 
-		/* New deny method */
+		if panelAccess.Load().hosts[requestHostName(r.Host)] { // The panel's own host: only its pages run scripts
+			w.Header().Set("Content-Security-Policy", panelCSP)
+		}
+
 		clientIP := ipAddr(r.RemoteAddr)
 
 		if status, retryAfter := rateLimited(clientIP); status != 0 {
 			w.Header().Set("Retry-After", strconv.FormatInt(retryAfter, 10))
-			reqMsg(w, r, status)
+			reqMsg(w, status)
 			return
 		}
-		/* End new deny method */
 
 		serverWriteLogs(visitsLogName, r, currentTimestamp, "Visit")
 
-		if console(w, r) {
+		// HTTP/2 may carry a host field besides :authority, which is the host Go gives and the one that chooses
+		// the site: one that names another host is malformed (RFC 9113, 8.3.1), and the same one is dropped, so the
+		// CGI's HTTP_HOST is always the host that chose the site.
+		if hosts, present := r.Header["Host"]; present {
+			delete(r.Header, "Host")
+			for _, host := range hosts {
+				if requestHostName(host) != requestHostName(r.Host) {
+					reqMsg(w, 400)
+					return
+				}
+			}
+		}
+
+		if panelACMEChallenge(w, r) || console(w, r) {
 			return
 		}
 
-		// The read lock covers only resolving the request: the file or CGI is served after releasing it,
-		// so a slow response doesn't hold back the panel nor, through its pending Lock, other requests.
-		globalMutex.RLock()
-		plan := resolveRequest(serverType, w, r)
-		globalMutex.RUnlock()
+		// The read lock covers only resolving the request: the file or CGI is served after releasing it, and a
+		// redirect or an error written meanwhile is held and sent after it too, so a slow response, or a client
+		// that doesn't read, doesn't hold back the panel nor, through its pending Lock, other requests. An ACME
+		// challenge stops the first pass to have its file looked at without the lock.
+		var plan *servePlan
+		acme := &acmeLookup{}
+		held := newHeldResponse(w)
+		withReadLock(func() { plan = resolveRequest(serverType, held, r, acme) })
+		if acme.path != "" && !acme.checked {
+			info, err := siteDirStat(acme.path)
+			acme.checked, acme.exists = true, err == nil && info.Mode().IsRegular()
+			held = newHeldResponse(w)
+			withReadLock(func() { plan = resolveRequest(serverType, held, r, acme) })
+		}
+		held.sendTo(w)
 		if plan != nil {
 			plan.serve(w, r)
 		}
 	}
 }
 
+// heldResponse is the response while the global read lock is held: what resolveRequest writes (a redirect or an
+// error, both small) is kept here and written to the client after the lock is released.
+type heldResponse struct {
+	header customNetHttp.Header
+	status int
+	body   bytes.Buffer
+}
+
+func newHeldResponse(w customNetHttp.ResponseWriter) *heldResponse {
+	return &heldResponse{header: w.Header().Clone()}
+}
+
+func (held *heldResponse) Header() customNetHttp.Header { return held.header }
+
+func (held *heldResponse) WriteHeader(code int) {
+	if held.status == 0 {
+		held.status = code
+	}
+}
+
+func (held *heldResponse) Write(p []byte) (int, error) {
+	if held.status == 0 {
+		held.status = customNetHttp.StatusOK
+	}
+	return held.body.Write(p)
+}
+
+// sendTo writes to w what was held: the headers always, and the response if one was written.
+func (held *heldResponse) sendTo(w customNetHttp.ResponseWriter) {
+	header := w.Header()
+	clear(header)
+	for name, values := range held.header {
+		header[name] = values
+	}
+	if held.status != 0 {
+		w.WriteHeader(held.status)
+		_, _ = w.Write(held.body.Bytes()) // A client that went away: nothing else to do
+	}
+}
+
+// acmeLookup is how resolveRequest asks for the file of an ACME challenge to be looked at without the global
+// lock: it leaves the path and returns, and the second pass gets whether it exists.
+type acmeLookup struct {
+	path            string
+	checked, exists bool
+}
+
 // resolveRequest reads what the request needs from the shared settings. It writes redirects and errors
-// itself and returns nil; otherwise it returns a plan that serves the response without the lock. Callers
-// hold the global read lock.
-func resolveRequest(serverType string, w customNetHttp.ResponseWriter, r *customNetHttp.Request) *servePlan {
+// itself and returns nil; otherwise it returns a plan that serves the response without the lock. For an ACME
+// challenge it first only notes the path of its file in acme, and returns nil. Callers hold the global read lock.
+func resolveRequest(serverType string, w customNetHttp.ResponseWriter, r *customNetHttp.Request, acme *acmeLookup) *servePlan {
 	var siteFound bool
 	validHost, wildcardDomain, subdomain, domain := host(r.Host)
 
@@ -503,8 +734,8 @@ func resolveRequest(serverType string, w customNetHttp.ResponseWriter, r *custom
 		fullHost = domain
 	}
 
-	if _, siteFound = domainAliases[fullHost]; siteFound {
-		validHost, wildcardDomain, subdomain, domain = host(domainAliases[fullHost])
+	if _, siteFound = domainAliases[fullHost]; siteFound { // The target is a site key ("*.example.com"), not a Host
+		validHost, wildcardDomain, subdomain, domain = hostExist(domainAliases[fullHost])
 		fullHost = subdomain
 		if fullHost != "" {
 			fullHost += "." + domain
@@ -529,8 +760,20 @@ func resolveRequest(serverType string, w customNetHttp.ResponseWriter, r *custom
 	}
 
 	if !validHost {
-		reqMsg(w, r, 404)
+		reqMsg(w, 404)
 		return nil
+	}
+
+	// An ACME challenge whose file is in the site goes straight to it, so that Certbot can validate a site with a
+	// front controller or redirections; without the file, everything goes on as always.
+	if path := acmeChallengeFilePath(effectiveDomain, subdomain, r); path != "" {
+		if !acme.checked {
+			acme.path = path
+			return nil
+		}
+		if acme.exists && acme.path == path {
+			return serve(serverType, domain, effectiveDomain, subdomain, firstDomain, firstSubdomain, w, r, true)
+		}
 	}
 
 	if subdomain == "" && siteSSLConfig[effectiveDomain]["W"] == true {
@@ -547,7 +790,30 @@ func resolveRequest(serverType string, w customNetHttp.ResponseWriter, r *custom
 		return nil
 	}
 
-	return serve(serverType, domain, effectiveDomain, subdomain, firstDomain, firstSubdomain, w, r)
+	return serve(serverType, domain, effectiveDomain, subdomain, firstDomain, firstSubdomain, w, r, false)
+}
+
+// acmeChallengePath starts the requests of the ACME http-01 challenges.
+const acmeChallengePath = "/.well-known/acme-challenge/"
+
+// acmeChallengeFilePath returns, for an ACME challenge, where its file would be in the public folder of the site
+// (domain, subdomain), where serve would look for it; "" for any other request. Whether the file is there (a
+// regular one) is looked at without the lock. Callers hold the global read lock.
+func acmeChallengeFilePath(domain string, subdomain string, request *customNetHttp.Request) string {
+	requestPath := cutAt(request.RequestURI, '?')
+	token, isChallenge := strings.CutPrefix(requestPath, acmeChallengePath)
+	if !isChallenge || !acmeToken.MatchString(token) {
+		return ""
+	}
+	wildcardMatch, _, _, wildcardDomain := detectWildcards(subdomain, domain)
+	if !wildcardMatch {
+		return ""
+	}
+	siteDir := sitesDir.Get() + changeWildcards(domain) + "/"
+	if subdomain != "" {
+		siteDir += changeWildcards(wildcardDomain) + "/"
+	}
+	return siteDir + publicDirName + acmeChallengePath + token // The token has only [A-Za-z0-9_-]
 }
 
 func resetSettings() {
@@ -563,6 +829,8 @@ func resetSettings() {
 	domainAliases = make(map[string]string)                  // Domain aliases
 	siteCertificates = make(map[string]*tls.Certificate)
 	certificatesByName.Store(&map[string]*tls.Certificate{})
+	panelCertificate, panelCertificateStamp = nil, "" // Read again from the new sites directory
+	warnedDiskSites = make(map[string]bool)
 	logMutex.Lock()
 	for _, logFile := range []*os.File{visitsLogFile, denialsLogFile} {
 		if logFile != nil {
@@ -572,134 +840,246 @@ func resetSettings() {
 	visitsLogFile = nil
 	denialsLogFile = nil
 	logMutex.Unlock()
+	configFileLoaded = false
+}
+
+// configFileLoaded is set when the configuration in use came from a turbo.config of the sites directory (or setM
+// kept it for a directory without one), so that the file missing later keeps it instead of bringing back the
+// defaults. Guarded by globalMutex.
+var configFileLoaded bool
+
+// sitesDirError is a sites directory that can't be read. Turbo doesn't start with it (its sites and their settings
+// would be missing), and a reload keeps the configuration in use.
+type sitesDirError struct {
+	dir string
+	err error
+}
+
+func (e *sitesDirError) Error() string {
+	permissions := ""
+	if info, err := os.Stat(e.dir); err == nil {
+		permissions = " (permissions " + info.Mode().Perm().String() + ")"
+	}
+	return "Can't read the sites directory " + e.dir + permissions + ": " + e.err.Error() + "\n  Check that it exists and that the user running Turbo can read it."
 }
 
 // updateSettings reads turbo.config if it changed and activates the site folders found on disk. If turbo.config
 // can't be read or isn't valid JSON, the configuration in use is kept and the error (a *configFileError) is
 // returned; it isn't read again until the file changes.
 func updateSettings(checkSitesFlag bool) error {
-	return updateSettingsFollowing(checkSitesFlag, 0)
+	settingsUpdateMutex.Lock()
+	defer settingsUpdateMutex.Unlock()
+	return updateSettingsFollowing(checkSitesFlag, 0, reloadOptions{})
+}
+
+// settingsUpdateMutex keeps reloads of the configuration from overlapping: the periodic one and setM's, which
+// changes the sites directory in between. It is taken before globalMutex.
+var settingsUpdateMutex sync.Mutex
+
+// beforeSitesScan runs when a reload has read turbo.config and is about to activate the sites it finds on disk
+// (a hook for tests).
+var beforeSitesScan = func() {}
+
+// reloadOptions are how the reload of setM reads the turbo.config of the sites directory it just chose.
+type reloadOptions struct {
+	keepWithoutConfig bool   // Without a turbo.config there, the settings in use stay instead of the defaults
+	ignorePointer     bool   // A turbo.config there that only points to another directory counts as none
+	keepSession       string // If the credentials change, the session that stays (the one of setM); the others end
 }
 
 // updateSettingsFollowing is updateSettings counting how many times "M" moved it to another sites directory,
-// to stop if two configs point at each other.
-func updateSettingsFollowing(checkSitesFlag bool, redirects int) error {
+// to stop if two configs point at each other. Callers hold settingsUpdateMutex.
+func updateSettingsFollowing(checkSitesFlag bool, redirects int, options reloadOptions) error {
 	if checkSitesFlag {
 		checkSites()
 	}
 
-	globalMutex.RLock()
 	baseDir := sitesDir.Get()
-	configFileName := configFileName
-	contentDirName := publicDirName
-	lastConfigModTime := configFileModTime
-	globalMutex.RUnlock()
+	var lastConfigModTime int64
+	withReadLock(func() { lastConfigModTime = configFileModTime })
 
 	refreshLogFiles(baseDir)
 
 	dirEntries, err := os.ReadDir(baseDir)
-	if err != nil {
-		slog.Error("No se puede leer el directorio de sitios", "directorio", baseDir, "error", err)
-		return nil
+	if err != nil { // Without the sites, the defaults would leave every site and its settings out
+		return &sitesDirError{dir: baseDir, err: err}
 	}
 
-	configFileInfo, err := os.Stat(baseDir + configFileName)
-	var configModTime int64
-	if err != nil {
-		configModTime = 1
-	} else {
+	// Anything at the path counts as turbo.config, also a broken link or a folder: only a missing one means none.
+	var configModTime int64 = 1
+	if configFileInfo, err := os.Stat(baseDir + configFileName); err == nil {
 		configModTime = configFileInfo.ModTime().UnixNano()
+	} else if linkInfo, lerr := os.Lstat(baseDir + configFileName); lerr == nil {
+		configModTime = linkInfo.ModTime().UnixNano()
+	} else if !os.IsNotExist(lerr) {
+		configModTime = 2 // It can't even be looked at: readSiteConfigFrom says why
+	}
+	if configModTime == 1 && configFileLoaded && lastConfigModTime != 1 { // It was there: keep what it said
+		withGlobalLock(func() { configFileModTime = 1 })
+		slog.Warn("turbo.config has disappeared: the configuration in use stays until it exists again", "file", baseDir+configFileName)
+		lastConfigModTime = 1
+	}
+	withoutConfig := configModTime == 1
+	if options.ignorePointer && !withoutConfig && lastConfigModTime != configModTime {
+		if data, err := os.ReadFile(baseDir + configFileName); err == nil && isSitesDirPointer(data) { // #nosec G304 -- turbo.config of the sites directory chosen by the administrator
+			slog.Info("The turbo.config of the sites directory only points to another directory: it is not followed, and saving will write the whole configuration there", "file", baseDir+configFileName)
+			withoutConfig = true
+		}
 	}
 
 	var configErr error
 	configRead := false
 	sitesActivated := false // Sites found on disk, also checked against PA
-	if lastConfigModTime != configModTime {
+	if lastConfigModTime != configModTime && withoutConfig && options.keepWithoutConfig {
 		withGlobalLock(func() {
-			configFileModTime = configModTime // Not read again until it changes, also if it is invalid
-			configErr = readSiteConfigFrom(baseDir + configFileName)
+			configFileModTime = configModTime
+			configFileLoaded = true // Kept as if it came from a file there
 		})
-		configRead = configErr == nil
-		if configErr == nil && configModTime == 1 {
-			slog.Info("Sin turbo.config: configuración por defecto")
-		} else if configErr == nil {
-			slog.Info("turbo.config leído y aplicado")
+		slog.Info("Sites directory without turbo.config: the global settings, the credentials and the lists in use are kept", "directory", baseDir)
+	}
+	readConfig := lastConfigModTime != configModTime && !(withoutConfig && options.keepWithoutConfig)
+	var config parsedConfig
+	if readConfig { // Read and checked before taking the lock
+		config, configErr = parseSiteConfig(baseDir + configFileName)
+	}
+	// Outside setM, a turbo.config that only points to another directory must lead to one with its configuration:
+	// applied on its own, the pointer would leave the defaults, the default credentials and an open panel included.
+	// One without "M" ({}, or only "^") points nowhere: it is an empty configuration, loaded as such.
+	if readConfig && configErr == nil && !options.keepWithoutConfig && config.raw != nil && isSitesDirPointerMap(config.raw) {
+		if _, points := config.raw["."]["M"]; points {
+			if problem := pointerTargetProblem(config.raw, redirects); problem != nil {
+				data, _ := os.ReadFile(baseDir + configFileName) // #nosec G304 -- turbo.config of the sites directory in use, for the message
+				configErr = &configFileError{path: baseDir + configFileName, data: data, err: problem}
+			}
 		}
-		if newDir := sitesDir.Get(); configErr == nil && newDir != baseDir && redirects < 2 { // "M" points elsewhere: read the config there
-			slog.Info("Directorio de sitios", "directorio", newDir)
+	}
+	// A turbo.config that only points to another directory is followed without applying it: it has no settings,
+	// and applying it would put the defaults in use until the target is read (after setM, it would empty the
+	// settings in use before the target, maybe without turbo.config, keeps them).
+	var pointerTarget, pointerValue string
+	if readConfig && configErr == nil && config.raw != nil && isSitesDirPointerMap(config.raw) {
+		if value, _ := config.raw["."]["M"].(string); value != "" {
+			if resolved, err := resolveSitesDir(value); err == nil && dirExists(resolved) && !sameDir(resolved, baseDir) {
+				pointerTarget, pointerValue = resolved, value
+			}
+		}
+	}
+	diskSites := scanDiskSites(baseDir, dirEntries)
+	var look *diskLook
+	if readConfig && configErr == nil && pointerTarget == "" {
+		look = lookAheadSettings(config, baseDir, diskSites)
+	} else {
+		look = lookAheadSettings(parsedConfig{}, baseDir, diskSites)
+	}
+
+	// In a single section: what came from the file is replaced and the sites found on disk are activated, so no
+	// request sees a half-loaded configuration; the certificates are published once, at the end, so TLS keeps
+	// answering meanwhile. What the validators look at on the disk was looked at before taking the lock.
+	beforeSitesScan()
+	withDiskLook(look, func() {
+		if readConfig {
+			configFileModTime = configModTime // Not read again until it changes, also if it is invalid
+			if pointerTarget != "" {
+				sitesDir.Set(pointerTarget)
+				sitesDirValue.Set(pointerValue)
+			} else if configErr == nil {
+				certificatePublishPaused = true
+				credentials := panelUser.Get() + "\x00" + panelPasswordHash.Get()
+				applySiteConfig(config)
+				if panelUser.Get()+"\x00"+panelPasswordHash.Get() != credentials { // As with setU and setP
+					closeOtherSessions(options.keepSession)
+				}
+				configFileLoaded = configModTime != 1
+				configFileDigest = config.digest
+			}
+		}
+		sitesActivated = activateDiskSites(diskSites, checkSitesFlag)
+		dropAliasesOfSites() // Once all the sites are in: a site wins over an alias of its host
+		if certificatePublishPaused {
+			certificatePublishPaused = false
+			publishCertificates()
+		}
+	})
+	if readConfig && configErr == nil {
+		configRead = true
+		if configModTime == 1 {
+			slog.Info("No turbo.config: default configuration")
+		} else {
+			slog.Info("turbo.config read and applied")
+		}
+		if newDir := sitesDir.Get(); !sameDir(newDir, baseDir) && redirects < 2 { // "M" points elsewhere: read the config there
+			slog.Info("Sites directory", "directory", newDir)
+			// Without a turbo.config there, the settings just read stay, as setM keeps them, to be written there
+			// with the next save; the defaults would open the panel.
+			_, statErr := os.Lstat(newDir + configFileName)
+			keep := options.keepWithoutConfig || os.IsNotExist(statErr)
 			resetSettings()
 			withGlobalLock(func() { configFileModTime = 0 })
-			return updateSettingsFollowing(checkSitesFlag, redirects+1)
+			return updateSettingsFollowing(checkSitesFlag, redirects+1, reloadOptions{keepWithoutConfig: keep, keepSession: options.keepSession})
 		}
 	}
 
-	for _, entry := range dirEntries { // This is used when input is like: #.domain.com
-		entryName := entry.Name()
-		wildcardName := putWildcards(entryName)
-		if hostValid, _ := hostOk(wildcardName, false); !hostValid {
+	var knownStamp string
+	withReadLock(func() { knownStamp = panelCertificateStamp })
+	panelLook := lookAtPanelCertificate(baseDir, knownStamp) // Read without the lock
+	withGlobalLock(func() { applyPanelCertificate(baseDir, panelLook) })
+
+	if configRead || sitesActivated { // After the sites on disk are activated, which PA is checked against
+		withReadLock(warnPanelOrigin)
+	}
+	return configErr
+}
+
+// lookAheadSettings looks at the disk, before the reload takes the global lock, for what the validators will look
+// at under it: the sites directory of M, the certificate files of each site of config and of the disk (loaded
+// when the site has HTTPS on) and the executables of the preprocessors.
+func lookAheadSettings(config parsedConfig, baseDir string, disk []diskSite) *diskLook {
+	look := newDiskLook()
+	if value, isString := config.raw["."]["M"].(string); isString {
+		if resolved, err := resolveSitesDir(value); err == nil {
+			look.stat(resolved)
+		}
+		if inUse, err := resolveSitesDir(sitesDir.Get()); err == nil {
+			look.stat(inUse)
+		}
+	}
+	for domain, subdomains := range config.raw {
+		switch domain {
+		case "_", "@", "#", ".", "^": // Not sites
 			continue
 		}
-
-		_, err = os.ReadDir(baseDir + entryName + "/" + contentDirName)
-		if err != nil {
-			continue
-		}
-
-		subdirEntries, err := os.ReadDir(baseDir + entryName)
-		if err != nil {
-			continue
-		}
-
-		globalMutex.RLock()
-		siteExistsResult := siteExists(wildcardName, "")
-		globalMutex.RUnlock()
-
-		if !siteExistsResult {
-			constructSite(wildcardName, "")
-			withGlobalLock(func() {
-				subdomainContentCheckers["!"](false, siteSSLConfig[wildcardName], true, wildcardName, "") // Set first true to print errors
-			})
-			sitesActivated = true
-			if checkSitesFlag {
-				slog.Info("Sitio creado en disco y activado", "sitio", wildcardName)
+		for subdomain, content := range subdomains {
+			settings, _ := content.(map[string]interface{})
+			if ssl, isMap := settings["!"].(map[string]interface{}); isMap {
+				look.siteFiles(baseDir+siteFolder(domain, subdomain), httpsSetting(ssl["S"]))
 			}
-		}
-
-		for _, entry = range subdirEntries {
-			subEntryName := entry.Name()
-			subWildcardName := putWildcards(subEntryName)
-			if hostValid, _ := hostOk(subWildcardName+"."+changeWildcards(wildcardName, "x"), false); !hostValid {
-				continue
-			}
-
-			contentDirInfo, err := os.Stat(baseDir + entryName + "/" + subEntryName + "/" + contentDirName)
-
-			if err != nil {
-				continue
-			}
-
-			globalMutex.RLock()
-			siteExistsResult = siteExists(wildcardName, subWildcardName)
-			globalMutex.RUnlock()
-
-			if contentDirInfo.IsDir() && !siteExistsResult {
-				constructSite(wildcardName, subWildcardName)
-				withGlobalLock(func() {
-					subdomainContentCheckers["!"](false, siteSSLConfig[subWildcardName+"."+wildcardName], true, wildcardName, subWildcardName)
-				})
-				sitesActivated = true
-				if checkSitesFlag {
-					slog.Info("Sitio creado en disco y activado", "sitio", subWildcardName+"."+wildcardName)
+			preprocessorEntries, _ := settings["?"].(map[string]interface{})
+			for _, entry := range preprocessorEntries {
+				if value, isString := entry.(string); isString {
+					if executable, problem := preprocessorCommand(value); problem == "" {
+						look.stat(executable)
+					}
 				}
 			}
 		}
 	}
-	if configRead || sitesActivated { // After the sites on disk are activated, which PA is checked against
-		globalMutex.RLock()
-		warnPanelOrigin()
-		globalMutex.RUnlock()
+	for _, site := range disk {
+		look.siteFiles(baseDir+siteFolder(site.site, site.subdomain), false)
 	}
-	return configErr
+	return look
+}
+
+// httpsSetting says whether an "S" of turbo.config turns HTTPS on, as its validator reads it: anything but 0.
+func httpsSetting(value interface{}) bool {
+	switch typed := value.(type) {
+	case string:
+		return typed != "" && typed != "0"
+	case float64:
+		return typed != 0
+	case bool:
+		return typed
+	}
+	return false
 }
 
 // connHandler closes new connections from an IP that is already blocked. Requests are counted, and
@@ -717,19 +1097,19 @@ func connHandler(conn net.Conn, connState customNetHttp.ConnState) {
 // ipBlocked reports whether the IP is denied or blocked by the limiter, and the seconds left, without
 // counting a request.
 func ipBlocked(ip string) (bool, int64) {
-	now := time.Now().Unix()
-	if deniedUntil, isDenied := deniedIPList()[ip]; isDenied && deniedUntil > now {
-		return true, deniedUntil - now
+	nowUnix := time.Now().Unix() // Denials are dates, saved in turbo.config
+	if deniedUntil, isDenied := deniedIPList()[ip]; isDenied && deniedUntil > nowUnix {
+		return true, deniedUntil - nowUnix
 	}
-	ipRef, found := ipReferences.Load(ip)
+	ipRef, found := ipReferences.Load(limiterKey(ip))
 	if !found {
 		return false, 0
 	}
 	ipData := ipRef.(*IPReference)
 	ipData.mutex.Lock()
 	defer ipData.mutex.Unlock()
-	if ipData.blockedUntil > now {
-		return true, ipData.blockedUntil - now
+	if left := ipData.blockedUntil - monotonicNow(); left > 0 {
+		return true, (left + int64(time.Second) - 1) / int64(time.Second)
 	}
 	return false, 0
 }
@@ -738,7 +1118,7 @@ func ipBlocked(ip string) (bool, int64) {
 // rejected, it returns the status (429 for the IP, 503 for the whole server) and the seconds to send in
 // Retry-After; otherwise status is 0.
 func rateLimited(ip string) (status int, retryAfter int64) {
-	if perIpNotAvailable(ip, true) {
+	if perIPNotAvailable(ip, true) {
 		if blocked, retryAfter := ipBlocked(ip); blocked {
 			return 429, retryAfter
 		}
@@ -750,14 +1130,29 @@ func rateLimited(ip string) (status int, retryAfter int64) {
 	return 0, 0
 }
 
+// The limiters measure time with the monotonic clock, from the start of the process: moving the wall clock back
+// (NTP, a restored virtual machine) neither blocks the clients nor stretches the windows. Denied IPs, saved as
+// dates, keep the wall clock.
+var (
+	processStart = time.Now()
+	monotonicNow = func() int64 { return int64(time.Since(processStart)) } // Nanoseconds; a variable so that tests can move it
+)
+
+// monotonicSecond is the second of the monotonic clock, aligned with the seconds of the wall clock at start.
+func monotonicSecond() int64 {
+	return (monotonicNow() + int64(processStart.Nanosecond())) / int64(time.Second)
+}
+
 // globalRateExceeded counts a request for the whole server and reports whether it goes over CGL in the current
-// second. It doesn't blame any IP (H6) and takes no lock: a request that starts a new second resets the count.
+// second. It doesn't blame any IP and takes no lock: a request that starts a new second resets the count.
+// The windows are fixed seconds, so a burst across two of them can reach twice CGL; sharing the server among
+// clients is what CII and CIS do.
 func globalRateExceeded() bool {
-	return globalRateExceededAt(time.Now().Unix())
+	return globalRateExceededAt(monotonicSecond())
 }
 
 // globalRateExceededAt is globalRateExceeded for a request that read the time now. The second and its count
-// change together, and only forwards: a request that read the previous second counts in the current one (H59).
+// change together, and only forwards: a request that read the previous second counts in the current one.
 func globalRateExceededAt(now int64) bool {
 	limit := globalRequestLimit.Load()
 	if limit == 0 {
@@ -766,7 +1161,7 @@ func globalRateExceededAt(now int64) bool {
 	for {
 		window := globalRequestWindow.Load()
 		second, count := int64(window>>32), int64(window&0xffffffff)
-		next := uint64(now)<<32 | 1 // #nosec G115 -- a Unix time in seconds: positive, and below 2^32 until 2106
+		next := uint64(now)<<32 | 1 // #nosec G115 -- seconds since the process started: positive, and below 2^32 for 136 years
 		if now <= second {
 			if count > limit { // Already over: nothing to count, and the count can't overflow
 				return true
@@ -779,71 +1174,126 @@ func globalRateExceededAt(now int64) bool {
 	}
 }
 
+// requestLimits are the per-IP limits of the panel: CIL (how long an IP's count lasts) and CIS (the window of
+// CII requests) in nanoseconds, and CII in requests. The panel changes them while requests read them, so they are
+// atomic; they start with the defaults of turbo.config.
+type requestLimits struct{ CIL, CIS, CII atomic.Int64 }
+
+func init() {
+	serverRequestLimits.CIL.Store(10 * int64(time.Second))
+	serverRequestLimits.CIS.Store(int64(time.Second))
+	serverRequestLimits.CII.Store(100)
+}
+
+// The limiter keeps an entry per IP for about CIL after its last window, some 200 bytes each. ipReferenceLimit
+// bounds them: beyond it, new IPs share one entry (overflowIPKey), limited as a single client, while the IPs
+// already known keep theirs. A variable so that tests can lower it.
+var (
+	ipReferenceLimit int64 = 200000
+	ipReferenceCount atomic.Int64
+)
+
+const overflowIPKey = "" // No IP has this key
+
+// limiterKey is the key of an IP in the per-IP limiter and the failed-login limit: an IPv4 address on its own
+// (also written as ::ffff:a.b.c.d), and an IPv6 address by its /64, the block a client usually gets, so that a
+// client can't get a new quota from each address of it.
+func limiterKey(ip string) string {
+	address, err := netip.ParseAddr(ip)
+	if err != nil {
+		return ip
+	}
+	address = address.Unmap().WithZone("")
+	if address.Is4() {
+		return address.String()
+	}
+	prefix, _ := address.Prefix(64)
+	return prefix.String()
+}
+
+// limiterReference returns the limiter entry of key, creating it if there is room, or the shared one if not.
+func limiterReference(key string) *IPReference {
+	if ipRef, found := ipReferences.Load(key); found { // Most requests: no entry to allocate
+		return ipRef.(*IPReference)
+	}
+	if ipReferenceCount.Load() >= ipReferenceLimit {
+		key = overflowIPKey
+		if ipRef, found := ipReferences.Load(key); found {
+			return ipRef.(*IPReference)
+		}
+	}
+	ipRef, loaded := ipReferences.LoadOrStore(key, &IPReference{windowStart: monotonicNow()})
+	if !loaded {
+		ipReferenceCount.Add(1)
+	}
+	return ipRef.(*IPReference)
+}
+
 // cleanIPReferences forgets the IPs whose counting window ended more than CIL ago and that aren't blocked:
 // their next request would start from zero anyway.
 func cleanIPReferences() {
-	now := time.Now()
-	intervalLimit := atomic.LoadInt64(&serverRequestLimits[0])
+	now := monotonicNow()
+	intervalLimit := serverRequestLimits.CIL.Load()
 	ipReferences.Range(func(ip, ipRef any) bool {
 		ipData := ipRef.(*IPReference)
 		ipData.mutex.Lock()
-		idle := now.UnixNano()-ipData.lastRequestNano > intervalLimit && ipData.blockedUntil <= now.Unix()
+		idle := now-ipData.windowStart > intervalLimit && ipData.blockedUntil <= now
 		ipData.mutex.Unlock()
-		if idle {
-			ipReferences.CompareAndDelete(ip, ipRef)
+		if idle && ipReferences.CompareAndDelete(ip, ipRef) {
+			ipReferenceCount.Add(-1)
 		}
 		return true
 	})
 }
 
-func perIpNotAvailable(ip string, incrementCounter bool) bool {
+// perIPNotAvailable counts a request of the IP (if incrementCounter) and reports whether it must be rejected:
+// the IP is denied, it is blocked, or it goes over CII requests per CIS window, counted from the start of its
+// count (which restarts after CIL): with t elapsed, CII × (⌊t/CIS⌋ + 1) requests are allowed, the current one
+// included. Going over blocks the IP for 5 seconds.
+func perIPNotAvailable(ip string, incrementCounter bool) bool {
 	deniedUntil, isDenied := deniedIPList()[ip] // Without the global lock, like the rest of the limiter
 	if isDenied && deniedUntil > time.Now().Unix() {
 		return true
 	}
 
-	ipRef, _ := ipReferences.LoadOrStore(ip, &IPReference{lastRequestNano: time.Now().UnixNano()})
-	ipData := ipRef.(*IPReference)
-
+	ipData := limiterReference(limiterKey(ip))
 	ipData.mutex.Lock()
 	defer ipData.mutex.Unlock()
 
-	if ipData.blockedUntil > time.Now().Unix() {
+	now := monotonicNow()
+	if ipData.blockedUntil > now {
 		return true
 	}
-
-	nowNano := time.Now().UnixNano()
 	if incrementCounter {
 		ipData.requestCount++
 	}
 
-	timeDiff := nowNano - ipData.lastRequestNano
-	intervalLimit := atomic.LoadInt64(&serverRequestLimits[0])
-	windowLimit := atomic.LoadInt64(&serverRequestLimits[1])
-	maxRequests := atomic.LoadInt64(&serverRequestLimits[2])
+	intervalLimit := serverRequestLimits.CIL.Load()
+	windowLimit := serverRequestLimits.CIS.Load()
+	maxRequests := serverRequestLimits.CII.Load()
 
-	if timeDiff > intervalLimit {
-		ipData.lastRequestNano = nowNano
-		ipData.requestCount = 1
+	timeDiff := now - ipData.windowStart
+	if timeDiff > intervalLimit || timeDiff < 0 { // A new count (a test clock may go back)
+		ipData.windowStart, timeDiff = now, 0
+		ipData.requestCount = 0
+		if incrementCounter {
+			ipData.requestCount = 1
+		}
 	}
-
-	if (timeDiff > windowLimit && ipData.requestCount < maxRequests) || windowLimit == 0 || maxRequests == 0 {
+	if windowLimit == 0 || maxRequests == 0 {
 		return false
 	}
-
-	requestRatio := ipData.requestCount / maxRequests
-	timeRatio := timeDiff / windowLimit
-
-	if requestRatio > timeRatio {
-		ipData.blockedUntil = time.Now().Unix() + 5
+	if ipData.requestCount > maxRequests*(timeDiff/windowLimit+1) {
+		ipData.blockedUntil = now + 5*int64(time.Second)
 		serverWriteLogs(denialsLogName, nil, 0, ip+" conn denial")
 		return true
 	}
-
 	return false
 }
 
-func _constructSite(domain string, subdomain string) {
+// constructSiteWithoutIndex creates the entries of a site (rewrites, preprocessors, indexes, MIME types, headers and
+// settings, all empty): from turbo.config, which gives it the indexes it saved. Callers hold the global lock.
+func constructSiteWithoutIndex(domain string, subdomain string) {
 	if _, exists := sitesMap[domain]; !exists {
 		sitesMap[domain] = make(map[string]map[string]string)
 	}
@@ -864,17 +1314,11 @@ func _constructSite(domain string, subdomain string) {
 	siteSSLConfig[domain]["A"] = ""
 }
 
-// constructSite adds a new site (from the panel or found in the sites directory), with index.html as its
-// index. Sites read from turbo.config use _constructSite and keep the indexes saved there.
-func constructSite(domain string, subdomain string) {
-	globalMutex.Lock()
-	defer globalMutex.Unlock()
-	constructSiteLocked(domain, subdomain)
-}
-
-// constructSiteLocked is constructSite for callers that hold the global lock.
+// constructSiteLocked adds a new site (from the panel or found in the sites directory), with index.html as its
+// index. Sites read from turbo.config use constructSiteWithoutIndex and keep the indexes saved there. Callers hold the
+// global lock.
 func constructSiteLocked(domain string, subdomain string) {
-	_constructSite(domain, subdomain)
+	constructSiteWithoutIndex(domain, subdomain)
 	siteKey := domain
 	if subdomain != "" {
 		siteKey = subdomain + "." + domain
@@ -882,7 +1326,7 @@ func constructSiteLocked(domain string, subdomain string) {
 	addIndex(siteKey, "index.html")
 }
 
-// addIndex appends an index to a site, after the existing ones (DP10). An index already there keeps its place.
+// addIndex appends an index to a site, after the existing ones. An index already there keeps its place.
 // Callers hold the global lock.
 func addIndex(siteKey string, name string) {
 	if _, exists := indexFiles[siteKey][name]; exists {
@@ -911,57 +1355,164 @@ func deleteSite(domain string, subdomain string) {
 	deleteSiteLocked(domain, subdomain)
 }
 
-// deleteSiteLocked is deleteSite for callers that hold the global lock.
+// deleteSiteLocked is deleteSite for callers that hold the global lock. Deleting a root domain deletes its
+// subdomains too, as their folders go with it.
 func deleteSiteLocked(domain string, subdomain string) {
-	var key string
 	if subdomain != "" {
 		delete(sitesMap[domain], subdomain)
-		domain = subdomain + "." + domain
-	} else {
-		for key = range sitesMap[domain] {
-			if key != "" {
-				setSiteCertificate(key+"."+domain, nil)
-			}
+		if siteKeyOwner(subdomain+"."+domain, domain, subdomain) == "" { // Never what another site keeps there
+			forgetSiteKey(subdomain + "." + domain)
 		}
-		delete(sitesMap, domain)
+		return
 	}
-	setSiteCertificate(domain, nil)
-	delete(preprocessors, domain)
-	delete(indexFiles, domain)
-	delete(siteSSLConfig, domain)
-	delete(mimeTypes, domain)
-	delete(customHeaders, domain)
-	for key, subdomain = range domainAliases {
-		if subdomain == domain {
-			delete(domainAliases, key)
+	subdomains := sitesMap[domain]
+	delete(sitesMap, domain)
+	for key := range subdomains {
+		if key != "" && siteKeyOwner(key+"."+domain, domain, key) == "" {
+			forgetSiteKey(key + "." + domain)
+		}
+	}
+	if siteKeyOwner(domain, domain, "") == "" {
+		forgetSiteKey(domain)
+	}
+}
+
+// reservedSiteNames are the files and folders that Turbo keeps in the sites directory: a site with one of these
+// names would have its folder there.
+var reservedSiteNames = map[string]bool{devGUIDirName: true, certificatesDirName: true, panelCertDirName: true, configFileName: true, visitsLogName: true, denialsLogName: true}
+
+// siteNameProblem says why the site (domain, subdomain) can't be activated, or "": a folder that Turbo keeps for
+// itself (also for its subdomains), or a key that another site already has (the site "c.a.b" and the subdomain
+// "c" of "a.b" would share their settings). Callers hold the global lock.
+func siteNameProblem(domain string, subdomain string) string {
+	if reservedSiteNames[changeWildcards(domain)] {
+		return "Name reserved by Turbo: " + domain
+	}
+	siteKey := domain
+	if subdomain != "" {
+		siteKey = subdomain + "." + domain
+	}
+	if owner := siteKeyOwner(siteKey, domain, subdomain); owner != "" {
+		return "The key " + siteKey + " already belongs to another site (" + owner + ")"
+	}
+	return ""
+}
+
+// newSiteProblem is siteNameProblem for a site created from the panel, which also can't take the host of an
+// alias (aliases are looked up first: the site would never be served). Callers hold the global lock.
+func newSiteProblem(domain string, subdomain string) string {
+	siteKey := domain
+	if subdomain != "" {
+		siteKey = subdomain + "." + domain
+	}
+	if target, isAlias := domainAliases[siteKey]; isAlias {
+		return siteKey + " is an alias of " + target + ": delete it first"
+	}
+	return siteNameProblem(domain, subdomain)
+}
+
+// siteKeyOwner returns the site (as "subdomain.domain", or the domain) other than (domain, subdomain) whose
+// settings are kept under siteKey, or "". Callers hold the global lock.
+func siteKeyOwner(siteKey string, domain string, subdomain string) string {
+	if _, taken := sitesMap[siteKey][""]; taken && (siteKey != domain || subdomain != "") {
+		return siteKey
+	}
+	for i := 0; i < len(siteKey); i++ {
+		if siteKey[i] != '.' {
+			continue
+		}
+		otherSubdomain, otherDomain := siteKey[:i], siteKey[i+1:]
+		if otherDomain == domain && otherSubdomain == subdomain {
+			continue
+		}
+		if _, taken := sitesMap[otherDomain][otherSubdomain]; taken {
+			return otherSubdomain + "." + otherDomain
+		}
+	}
+	return ""
+}
+
+// warnedDiskSites are the site folders found on disk that can't be activated, already logged once. Guarded by
+// globalMutex.
+var warnedDiskSites = make(map[string]bool)
+
+// dropAliasesOfSites removes, with a warning, the aliases whose host a site serves: the site wins. Callers hold
+// the global lock.
+func dropAliasesOfSites() {
+	for _, alias := range sortedKeys(domainAliases) {
+		if served, _, _, _ := hostExist(alias); served {
+			slog.Warn("Alias discarded: its host is a site's", "alias", alias, "site", domainAliases[alias])
+			delete(domainAliases, alias)
+		}
+	}
+}
+
+// forgetSiteKey removes the settings and the certificate of a site key, and the aliases that point to it.
+// Callers hold the global lock.
+func forgetSiteKey(siteKey string) {
+	setSiteCertificate(siteKey, nil)
+	delete(preprocessors, siteKey)
+	delete(indexFiles, siteKey)
+	delete(siteSSLConfig, siteKey)
+	delete(mimeTypes, siteKey)
+	delete(customHeaders, siteKey)
+	for alias, target := range domainAliases {
+		if target == siteKey {
+			delete(domainAliases, alias)
 		}
 	}
 }
 
 func checkSites() {
-	type missingSite struct{ subdomain, domain string }
-	var missing []missingSite
-
-	globalMutex.RLock()
-	for domain := range sitesMap {
-		for subdomain := range sitesMap[domain] {
-			if exists, _ := siteExistenceCheckers["/"](false, domain, subdomain); !exists { // siteExistenceCheckers["/"] is used when input is like: *.domain.com
-				missing = append(missing, missingSite{subdomain, domain})
+	type activeSite struct{ subdomain, domain string }
+	var active []activeSite
+	withReadLock(func() { // Only the names: the disk is looked at without the lock
+		for domain := range sitesMap {
+			for subdomain := range sitesMap[domain] {
+				active = append(active, activeSite{subdomain, domain})
 			}
 		}
-	}
-	globalMutex.RUnlock()
+	})
 
+	var missing []activeSite
+	for _, site := range active {
+		if exists, _ := siteExistenceCheckers["/"](false, site.domain, site.subdomain); !exists { // siteExistenceCheckers["/"] is used when input is like: *.domain.com
+			missing = append(missing, site)
+		}
+	}
+
+	beforeMissingSitesDeleted()
 	for _, site := range missing {
-		deleteSite(site.domain, site.subdomain)
+		deleted := false
+		withGlobalLock(func() {
+			if !siteExists(site.domain, site.subdomain) { // Deleted meanwhile
+				return
+			}
+			// Looked at again holding the lock, which hardUpload holds while it swaps @ for the uploaded files,
+			// between two renames during which @ isn't there: deleted then, the site came back from the disk with
+			// the default settings, its preprocessors left out (its PHP served as text). Only for a site that is
+			// missing, rarely: the disk of every site is looked at above, without the lock.
+			if exists, _ := siteExistenceCheckers["/"](false, site.domain, site.subdomain); exists {
+				return
+			}
+			deleteSiteLocked(site.domain, site.subdomain)
+			deleted = true
+		})
+		if !deleted {
+			continue
+		}
 
 		name := site.domain
 		if site.subdomain != "" {
 			name = site.subdomain + "." + site.domain
 		}
-		slog.Info("Sitio borrado del disco y desactivado", "sitio", name)
+		slog.Info("Site deleted from disk and deactivated", "site", name)
 	}
 }
+
+// beforeMissingSitesDeleted runs when checkSites has found sites missing on disk and is about to deactivate them
+// (a hook for tests).
+var beforeMissingSitesDeleted = func() {}
 
 // httpsEnabled reports whether the site has HTTPS redirection on. A host that isn't a configured site has none.
 func httpsEnabled(siteKey string) bool {
@@ -1008,55 +1559,49 @@ func cloneOrNil(values map[string]string) map[string]string {
 	return maps.Clone(values)
 }
 
-func serve(serverType string, host string, domain string, subdomain string, firstDomain string, firstSubdomain string, responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request) *servePlan { //i, n, o
+func serve(serverType string, host string, domain string, subdomain string, firstDomain string, firstSubdomain string, responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request, acmeChallenge bool) *servePlan {
 	wildcardMatch, _, _, wildcardDomain := detectWildcards(subdomain, domain)
 
 	if !wildcardMatch {
-		// Without 404 response: b = s
-		reqMsg(responseWriter, request, 404)
+		reqMsg(responseWriter, 404)
 		return nil
 	}
 
-	if serverType == "" && subdomain != "" && httpsRedirect(wildcardDomain+"."+domain, responseWriter, request) {
+	if serverType == "" && subdomain != "" && !acmeChallenge && httpsRedirect(wildcardDomain+"."+domain, responseWriter, request) {
 		return nil
 	}
 
 	var continueServe bool
-	rewrittenPath, queryString, continueServe := choose(responseWriter, request, host, domain, wildcardDomain, subdomain, firstDomain, firstSubdomain)
+	var rewrittenPath, queryString string
+	if acmeChallenge { // Neither redirections nor rewrites: the file of the challenge, as it is
+		rewrittenPath, continueServe = cleanRequestPath(cutAt(request.RequestURI, '?'))
+	} else {
+		rewrittenPath, queryString, continueServe = choose(responseWriter, request, host, domain, wildcardDomain, subdomain, firstDomain, firstSubdomain)
+	}
 	if !continueServe {
 		return nil
 	}
-	if rewrittenPath == "" { // A rewrite whose placeholders expand to nothing
-		rewrittenPath = "/"
-	}
-	request.RequestURI = rewrittenPath
 
-	serverType = sitesDir.Get() + changeWildcards(domain) + "/"
+	// The content directory, and the key of the site's settings ("sub.example.com", or "example.com" for the domain)
+	root := sitesDir.Get() + changeWildcards(domain) + "/"
+	siteKey := domain
 	if subdomain != "" {
-		if wildcardMatch {
-			subdomain = changeWildcards(wildcardDomain)
-		}
-		serverType += subdomain + "/" + publicDirName
+		root += changeWildcards(wildcardDomain) + "/" + publicDirName
+		siteKey = wildcardDomain + "." + domain
 	} else {
-		serverType += publicDirName
-	}
-
-	if subdomain != "" {
-		subdomain = wildcardDomain + "." + domain
-	} else {
-		subdomain = domain
+		root += publicDirName
 	}
 
 	plan := &servePlan{
-		root:          serverType,
+		root:          root,
 		path:          rewrittenPath,
 		queryString:   queryString,
-		mimeTypes:     cloneOrNil(mimeTypes[subdomain]),
-		preprocessors: cloneOrNil(preprocessors[subdomain]),
-		headers:       cloneOrNil(customHeaders[subdomain]),
+		mimeTypes:     cloneOrNil(mimeTypes[siteKey]),
+		preprocessors: cloneOrNil(preprocessors[siteKey]),
+		headers:       cloneOrNil(customHeaders[siteKey]),
 	}
-	if len(indexFiles[subdomain]) > 0 {
-		plan.indexes = orderedIndexes(subdomain)
+	if len(indexFiles[siteKey]) > 0 {
+		plan.indexes = orderedIndexes(siteKey)
 	}
 
 	return plan
@@ -1064,12 +1609,12 @@ func serve(serverType string, host string, domain string, subdomain string, firs
 
 // serve answers with the file of the plan, or runs its preprocessor, without the global lock. Files are looked
 // up and opened through an os.Root of the site's content directory, so that nothing outside it is reached, not
-// even through a symbolic link (H1). The file is opened once and served from that handle (O1).
+// even through a symbolic link. The file is opened once and served from that handle.
 func (plan *servePlan) serve(responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request) {
 	rewrittenPath := plan.path
 	contentRoot, err := os.OpenRoot(plan.root)
 	if err != nil {
-		reqMsg(responseWriter, request, 404)
+		reqMsg(responseWriter, 404)
 		return
 	}
 	defer contentRoot.Close()
@@ -1077,7 +1622,7 @@ func (plan *servePlan) serve(responseWriter customNetHttp.ResponseWriter, reques
 	defer opened.close()
 	fileInfo, err := opened.open(rootName(rewrittenPath))
 	if err != nil || (!fileInfo.IsDir() && strings.HasSuffix(rewrittenPath, "/")) { // "x.php/" names no folder: its extension would be lost
-		reqMsg(responseWriter, request, 404)
+		reqMsg(responseWriter, 404)
 		return
 	}
 
@@ -1099,7 +1644,7 @@ func (plan *servePlan) serve(responseWriter customNetHttp.ResponseWriter, reques
 		}
 
 		if indexFile != "" {
-			reqMsg(responseWriter, request, 404)
+			reqMsg(responseWriter, 404)
 			return
 		}
 	}
@@ -1108,17 +1653,24 @@ func (plan *servePlan) serve(responseWriter customNetHttp.ResponseWriter, reques
 	responseHeaders := responseWriter.Header()
 	for name, value := range plan.headers {
 		responseHeaders.Set(name, value)
-	} // Headers inclution, only for what is served
+	} // The site's headers, only for what is served
 
 	if preprocessor := plan.preprocessors[extension]; preprocessor != "" { // Verify preprocessors
-		preprocFileInfo, err := os.Stat(preprocessor)
-		if err != nil || preprocFileInfo.IsDir() { // Fail closed: never serve the source of a preprocessed file
-			slog.Error("Preprocesador no disponible", "extensión", extension, "preprocesador", preprocessor)
-			reqMsg(responseWriter, request, 500)
+		executable, problem := preprocessorCommand(preprocessor)
+		if problem == "" {
+			if info, err := os.Stat(executable); err != nil || info.IsDir() {
+				problem = "the executable does not exist or is a folder"
+			}
+		}
+		if problem != "" { // Fail closed: never serve the source of a preprocessed file
+			if missingPreprocessorLogDue(plan.root + "|" + extension) {
+				slog.Error("Preprocessor unavailable (reported once a minute)", "site", plan.root, "extension", extension, "reason", problem, "preprocessor", strings.TrimPrefix(preprocessor, invalidPreprocessorMark))
+			}
+			reqMsg(responseWriter, 500)
 			return
 		}
 		opened.close() // The CGI opens the script itself
-		dynamic(plan.root, rewrittenPath, plan.queryString, preprocessor, responseWriter, request, &responseHeaders)
+		dynamic(plan.root, rewrittenPath, plan.queryString, executable, responseWriter, request)
 		return
 	}
 
@@ -1126,6 +1678,28 @@ func (plan *servePlan) serve(responseWriter customNetHttp.ResponseWriter, reques
 		responseHeaders.Set(contentTypeHeader, mimeType)
 	}
 	customNetHttp.ServeFileFS(responseWriter, request, opened, rootName(rewrittenPath))
+}
+
+// Missing preprocessors are logged at most once a minute per site and extension: each request to that extension
+// would add a line otherwise.
+var (
+	missingPreprocessorMutex  sync.Mutex
+	missingPreprocessorLogged = make(map[string]int64) // Site root and extension -> monotonic time of the last line
+)
+
+// missingPreprocessorLogDue reports whether the missing preprocessor of key should be logged now.
+func missingPreprocessorLogDue(key string) bool {
+	now := monotonicNow()
+	missingPreprocessorMutex.Lock()
+	defer missingPreprocessorMutex.Unlock()
+	if last, found := missingPreprocessorLogged[key]; found && now-last < int64(time.Minute) {
+		return false
+	}
+	if len(missingPreprocessorLogged) > 10000 { // Bounded: forgotten all at once, at worst one more line each
+		clear(missingPreprocessorLogged)
+	}
+	missingPreprocessorLogged[key] = now
+	return true
 }
 
 // openedFileFS is the fs.FS that serve hands to ServeFileFS: it gives back the file already opened through the
@@ -1178,27 +1752,223 @@ func rootName(requestPath string) string {
 	return "."
 }
 
-func dynamic(basePath string, requestPath string, queryString string, scriptPath string, responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request, headers *customNetHttp.Header) {
-	handler := new(customNetHttp.CgiHandler) // Before: new(cgi.Handler)
+func dynamic(basePath string, requestPath string, queryString string, scriptPath string, responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request) {
+	handler := new(customNetHttp.CgiHandler)
 	handler.Path = scriptPath
-	handler.Root = basePath
 	handler.Timeout = serverTimeLimits.Load().WT             // Zero (no write timeout) leaves the CGI without limit
-	handler.Env = append(handler.Env, "REDIRECT_STATUS=CGI") // This is need for execution of scripts (it will not executed if isn't set). Also depends of 'cgi.force-redirect' on php.ini.
+	handler.Env = append(handler.Env, "REDIRECT_STATUS=CGI") // PHP refuses to run as a CGI without it while cgi.force_redirect is on (the default)
+	handler.InheritEnv = cgiTempVariables
 	if request.ContentLength > maxBodySize.Load() {
-		reqMsg(responseWriter, request, 413)
+		reqMsg(responseWriter, 413)
 		return
 	}
-	request.Body = customNetHttp.MaxBytesReader(responseWriter, request.Body, maxBodySize.Load()) // Bodies of unknown length
+	// The body is read whole, up to MBB, before the CGI takes a slot and starts: a client that sends it slowly, or
+	// not at all, holds no slot (with the network body, the CGI waited for it until RT), and a CGI always gets
+	// CONTENT_LENGTH (chunked, or HTTP/2 without Content-Length). It reaches the CGI through a pipe.
+	request.Body = customNetHttp.MaxBytesReader(responseWriter, request.Body, maxBodySize.Load())
+	body, size, cleanup, err := bufferedRequestBody(request.Body)
+	if err != nil {
+		var tooLarge *customNetHttp.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			reqMsg(responseWriter, 413)
+		} else {
+			reqMsg(responseWriter, 400)
+		}
+		return
+	}
+	defer cleanup()
+	request.Body, request.ContentLength, request.TransferEncoding = body, size, nil
+	if !acquireCGISlot(cgiSlotWait) { // Too many CGIs running: the server stays responsive
+		responseWriter.Header().Set("Retry-After", "2")
+		reqMsg(responseWriter, 503)
+		return
+	}
+	defer releaseCGISlot()
 	withoutSessionCookie(request)
 	if request.URL.RawQuery != "" && queryString != "" {
 		queryString = request.URL.RawQuery + "&" + queryString
 	} else if request.URL.RawQuery != "" {
 		queryString = request.URL.RawQuery
 	}
+	// The client's query goes first and the rewrite's after it: an application that reads the last value of a
+	// repeated parameter (PHP does) gets the rewrite's.
 	handler.Env = append(handler.Env, "QUERY_STRING="+queryString) // If not set, not includes rewrite query string
 	handler.Env = append(handler.Env, "DOCUMENT_ROOT="+basePath)
 	handler.Env = append(handler.Env, "SCRIPT_FILENAME="+basePath+requestPath)
-	handler.ServeHTTP(responseWriter, request)
+	// The script's URL path, after the rewrite, and no extra path: what the handler derives from Root is a path on
+	// disk, which an application would show (PHP_SELF) or put in its links. REQUEST_URI stays the original one.
+	handler.Env = append(handler.Env, "SCRIPT_NAME="+requestPath, "PATH_INFO=")
+	if handler.Timeout > 0 {
+		// The connection's write deadline (WT from the end of the request) would pass right when the CGI is cut:
+		// moved 2 s after the CGI's own, which starts now (not before the body was read nor a slot was free), the 504
+		// of a CGI that runs out of time reaches the client.
+		_ = customNetHttp.NewResponseController(responseWriter).SetWriteDeadline(time.Now().Add(handler.Timeout + 2*time.Second)) // Not supported only by test writers
+	}
+	handler.ServeHTTP(cgiResponseWriter{responseWriter}, request)
+}
+
+// cgiTempVariables are the variables of the temporary folder that a CGI inherits from Turbo, when they are set:
+// PHP keeps uploads and sessions there (without them, on Windows, it fell back to the Windows folder).
+var cgiTempVariables = []string{"TMPDIR", "TEMP", "TMP"}
+
+// cgiResponseWriter is what a CGI's answer is written to. How the response is framed is the server's: the
+// hop-by-hop headers a CGI may write (Transfer-Encoding, Connection and the like) are dropped, and so is a
+// Content-Length given more than once, which would leave the client, or a proxy, unable to tell where the
+// response ends, and a header value with control characters, which would make it unreadable.
+type cgiResponseWriter struct {
+	customNetHttp.ResponseWriter
+}
+
+// cgiHopByHopHeaders are the headers about the connection, not the content, that a CGI can't set.
+var cgiHopByHopHeaders = []string{"Connection", "Keep-Alive", "Proxy-Connection", "Te", "Transfer-Encoding", "Upgrade"}
+
+func (w cgiResponseWriter) WriteHeader(code int) {
+	header := w.Header()
+	for _, name := range cgiHopByHopHeaders {
+		header.Del(name)
+	}
+	if lengths := header.Values("Content-Length"); len(lengths) > 1 || len(lengths) == 1 && !onlyDigits(lengths[0]) {
+		header.Del("Content-Length") // Go takes "+4" or "-0" as a number, but would send it as written
+	}
+	for name, values := range header {
+		kept := values[:0]
+		for _, value := range values {
+			if headerValueAllowed(value) {
+				kept = append(kept, value)
+			}
+		}
+		if len(kept) == 0 {
+			delete(header, name)
+		} else {
+			header[name] = kept
+		}
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+// onlyDigits says whether a text is one or more ASCII digits.
+func onlyDigits(text string) bool {
+	for i := 0; i < len(text); i++ {
+		if text[i] < '0' || text[i] > '9' {
+			return false
+		}
+	}
+	return text != ""
+}
+
+// headerValueAllowed says whether a header value can go in a response: no control characters but the tab (bytes
+// above 0x7f, the obs-text of HTTP, are allowed).
+func headerValueAllowed(value string) bool {
+	for i := 0; i < len(value); i++ {
+		if c := value[i]; (c < 0x20 && c != '\t') || c == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+// Unwrap lets NewResponseController reach the server's ResponseWriter.
+func (w cgiResponseWriter) Unwrap() customNetHttp.ResponseWriter {
+	return w.ResponseWriter
+}
+
+// cgiBodyMemory is how much of a body of unknown length is kept in memory for a CGI; the rest goes to a temporary
+// file.
+const cgiBodyMemory = 1 << 20
+
+// cgiFileBody is a body kept in a temporary file, as the CGI gets it: not an *os.File, so that exec hands it over
+// through a pipe. The CGI, and what it starts, never inherit the file, which on Windows couldn't be removed while
+// one of them kept it open. Closing it is cleanup's.
+type cgiFileBody struct{ io.Reader }
+
+func (cgiFileBody) Close() error { return nil }
+
+// bufferedRequestBody reads a request body, already bounded by MBB, before the CGI starts, so that the CGI gets
+// CONTENT_LENGTH and doesn't wait for the client: in memory up to cgiBodyMemory, and in a temporary file beyond.
+// cleanup closes and removes that file.
+func bufferedRequestBody(body io.Reader) (io.ReadCloser, int64, func(), error) {
+	var memory bytes.Buffer
+	size, err := io.CopyN(&memory, body, cgiBodyMemory+1)
+	if err == io.EOF {
+		return io.NopCloser(&memory), size, func() {}, nil
+	}
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	file, err := os.CreateTemp("", "turbo-cgi-*")
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	cleanup := func() {
+		_ = file.Close()
+		_ = os.Remove(file.Name())
+	}
+	if size, err = io.Copy(file, io.MultiReader(&memory, body)); err == nil {
+		_, err = file.Seek(0, io.SeekStart)
+	}
+	if err != nil {
+		cleanup()
+		return nil, 0, nil, err
+	}
+	return cgiFileBody{file}, size, cleanup, nil
+}
+
+// cgiSlotWait is how long a CGI request waits for a free slot before getting 503.
+const cgiSlotWait = 2 * time.Second
+
+// cgiSlots counts the CGI processes running; freed is closed (and replaced) each time one ends.
+var cgiSlots struct {
+	mutex   sync.Mutex
+	running int64
+	freed   chan struct{}
+}
+
+// cgiProcessLimit is how many CGI processes may run at a time: CGP, or max(16, 4 × CPUs) with CGP at 0.
+func cgiProcessLimit() int64 {
+	if limit := cgiProcesses.Load(); limit > 0 {
+		return limit
+	}
+	return max(16, 4*int64(runtime.NumCPU()))
+}
+
+// acquireCGISlot takes a CGI slot, waiting up to wait for one; it reports whether it got it.
+func acquireCGISlot(wait time.Duration) bool {
+	deadline := time.Now().Add(wait)
+	for {
+		cgiSlots.mutex.Lock()
+		if cgiSlots.running < cgiProcessLimit() {
+			cgiSlots.running++
+			cgiSlots.mutex.Unlock()
+			return true
+		}
+		if cgiSlots.freed == nil {
+			cgiSlots.freed = make(chan struct{})
+		}
+		freed := cgiSlots.freed
+		cgiSlots.mutex.Unlock()
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return false
+		}
+		timer := time.NewTimer(remaining)
+		select {
+		case <-freed:
+			timer.Stop()
+		case <-timer.C:
+			return false
+		}
+	}
+}
+
+// releaseCGISlot gives back the slot of a CGI that ended.
+func releaseCGISlot() {
+	cgiSlots.mutex.Lock()
+	defer cgiSlots.mutex.Unlock()
+	cgiSlots.running--
+	if cgiSlots.freed != nil {
+		close(cgiSlots.freed)
+		cgiSlots.freed = nil
+	}
 }
 
 // withoutSessionCookie removes the panel session cookie from the request, so a CGI never receives it. Only that
@@ -1209,7 +1979,7 @@ func withoutSessionCookie(request *customNetHttp.Request) {
 	for _, value := range request.Header["Cookie"] {
 		var pairs []string
 		for _, pair := range strings.Split(value, ";") {
-			if name, _, _ := strings.Cut(pair, "="); strings.TrimSpace(name) == sessionCookieName {
+			if name, _, _ := strings.Cut(pair, "="); strings.TrimSpace(name) == sessionCookieName || strings.TrimSpace(name) == sessionCookieNameTLS {
 				removed = true
 				continue
 			}
@@ -1229,14 +1999,41 @@ func withoutSessionCookie(request *customNetHttp.Request) {
 	}
 }
 
-func rewrite(requestURI string, domain string, subdomain string) (string, string) {
-	var found bool
-	if _, found = sitesMap[domain][subdomain][requestURI]; found {
-		return sitesMap[domain][subdomain][requestURI], requestURI
+// foldRewrites is set where the file system ignores case (Windows, macOS): there "/PRIVATE/x" opens the file of
+// "/private/x", so the rewrites of "/private/" must take it too.
+var foldRewrites = runtime.GOOS == "windows" || runtime.GOOS == "darwin"
+
+// rewriteKey looks key up among the rewrites of a site: as written and, with foldRewrites, else the first (in
+// order) that differs only in case.
+func rewriteKey(rewrites map[string]string, key string) (string, bool) {
+	if _, found := rewrites[key]; found || !foldRewrites {
+		return key, found
 	}
-	if requestURI == "/" {
+	match := ""
+	for candidate := range rewrites {
+		if strings.EqualFold(candidate, key) && (match == "" || candidate < match) {
+			match = candidate
+		}
+	}
+	return match, match != ""
+}
+
+// rewrite finds the rewrite of a decoded, clean request path: the path itself, then the folder named without its
+// final "/" (a rewrite of "/private/" takes "/private", which would serve that folder's index), then each folder
+// that contains it, longest first, then "/". It returns the target and the key that matched.
+func rewrite(requestURI string, domain string, subdomain string) (string, string) {
+	rewrites := sitesMap[domain][subdomain]
+	if key, found := rewriteKey(rewrites, requestURI); found {
+		return rewrites[key], key
+	}
+	if requestURI == "/" { // Nothing else to try for the root
 		return "", ""
-	} // To prevent passing through 'choose' unecessary functions. Before: return y, ""
+	}
+	if !strings.HasSuffix(requestURI, "/") {
+		if key, found := rewriteKey(rewrites, requestURI+"/"); found {
+			return rewrites[key], key
+		}
+	}
 	requestURI = requestURI[1:]
 	for {
 		slash := strings.LastIndexByte(requestURI, '/')
@@ -1244,24 +2041,28 @@ func rewrite(requestURI string, domain string, subdomain string) (string, string
 			break
 		}
 		slash++
-		if _, found := sitesMap[domain][subdomain]["/"+requestURI[:slash]]; found {
-			return sitesMap[domain][subdomain]["/"+requestURI[:slash]], "/" + requestURI[:slash]
-		} else {
-			requestURI = requestURI[:slash-1]
+		if key, found := rewriteKey(rewrites, "/"+requestURI[:slash]); found {
+			return rewrites[key], key
 		}
+		requestURI = requestURI[:slash-1]
 	}
-	if _, found = sitesMap[domain][subdomain]["/"]; found {
-		return sitesMap[domain][subdomain]["/"], "/"
+	if key, found := rewriteKey(rewrites, "/"); found {
+		return rewrites[key], key
 	} // At the end of large unmatched string is obligatory to check if match with a top level rewrite
 	return "", ""
 }
 
-// rewriteRedirect answers a rewrite to "http(s)://" with a 302 (DP8): to the exact target when it has a path or
+// rewriteRedirect answers a rewrite to "http(s)://" with a 302: to the exact target when it has a path or
 // a query, or to the target domain followed by the original URI when it is only a domain.
 func rewriteRedirect(secure bool, target string, query string, responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request) {
 	scheme := "http://"
 	if secure {
 		scheme = "https://"
+	}
+	if target == "" || target[0] == '/' { // A placeholder for the host gave nothing (no alias, for example)
+		slog.Warn("Rewrite without a host when responding: 500", "host", request.Host, "path", request.RequestURI)
+		reqMsg(responseWriter, 500)
+		return
 	}
 	if strings.IndexByte(target, '/') == -1 && query == "" {
 		customNetHttp.Redirect(responseWriter, request, scheme+target+request.RequestURI, 302)
@@ -1274,9 +2075,9 @@ func rewriteRedirect(secure bool, target string, query string, responseWriter cu
 }
 
 func choose(responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request, host string, domain string, subdomain string, currentSubdomain string, firstDomain string, firstSubdomain string) (string, string, bool) {
-	pathWithoutQuery, ok := cleanRequestPath(cutAt(request.RequestURI, '?')) // Decoded and inside the site (D5, H1)
+	pathWithoutQuery, ok := cleanRequestPath(cutAt(request.RequestURI, '?')) // Decoded and inside the site
 	if !ok {
-		reqMsg(responseWriter, request, 404) // The same answer whether the file exists or not (H2)
+		reqMsg(responseWriter, 404) // The same answer whether the file exists or not
 		return "", "", false
 	}
 	rewriteResult, matchedRewrite := rewrite(pathWithoutQuery, domain, subdomain) // domain is the site map key and subdomain is the site subdomain map key, both in sitesMap
@@ -1284,150 +2085,380 @@ func choose(responseWriter customNetHttp.ResponseWriter, request *customNetHttp.
 		return pathWithoutQuery, "", true
 	} // This is for unmatched URIs for rewrite
 	rewriteResult = shortcutWords(request, rewriteResult, domain, subdomain, host, currentSubdomain, firstDomain, firstSubdomain, matchedRewrite, pathWithoutQuery)
-	queryIndex := strings.IndexByte(rewriteResult, '?')
-	if queryIndex != -1 {
-		pathWithoutQuery = rewriteResult[queryIndex+1:]
-		rewriteResult = rewriteResult[:queryIndex]
-	} else {
-		pathWithoutQuery = ""
-	}
+	rewriteResult, query, _ := strings.Cut(rewriteResult, "?")
 	switch rewriteResult[0] {
 	case 'H', 'S':
-		rewriteRedirect(rewriteResult[0] == 'S', rewriteResult[1:], pathWithoutQuery, responseWriter, request)
+		rewriteRedirect(rewriteResult[0] == 'S', rewriteResult[1:], query, responseWriter, request)
 		return "", "", false
 	case 'N':
 		rewriteResult = rewriteResult[1:]
 	}
-	if rewriteResult != "" { // Placeholders may have produced ".." or "\\": the target is cleaned as a request path
-		cleanPath, ok := cleanRequestPath(rewriteResult)
-		if !ok {
-			reqMsg(responseWriter, request, 404)
-			return "", "", false
-		}
-		rewriteResult = cleanPath
+	if rewriteResult == "" { // A rewrite whose placeholders expand to nothing
+		rewriteResult = "/"
 	}
-	return rewriteResult, pathWithoutQuery, true
+	// Placeholders may have produced ".." or "\\": the target is cleaned as a request path
+	cleanPath, ok := cleanRequestPath(rewriteResult)
+	if !ok {
+		reqMsg(responseWriter, 404)
+		return "", "", false
+	}
+	return cleanPath, query, true
 }
 
-// shortcutWords replaces the placeholders of a rewrite target. requestPath is the decoded, clean path that
-// rewriteMatch, the matched rewrite key, was compared with.
+// shortcutWords replaces the placeholders of a rewrite target, as stored ("N<path>", or "H"/"S" with the host for
+// http:// and https://). requestPath is the decoded, clean path that rewriteMatch, the matched rewrite key, was
+// compared with. Each value is encoded for where it goes: in the path, segment by segment, keeping "/"; in the
+// query, as one value; in the host, so that it can't change the shape of the URL. {REWRITE_COMPLEMENT} in the path
+// takes the path alone, and in a redirection the request's query is added to the target's (an internal target
+// already gets it). Unknown placeholders give nothing.
 func shortcutWords(request *customNetHttp.Request, input string, domain string, subdomain string, host string, currentSubdomain string, firstDomain string, firstSubdomain string, rewriteMatch string, requestPath string) string {
+	const (
+		inHost = iota
+		inPath
+		inQuery
+	)
+	position := inPath
+	redirection := input != "" && (input[0] == 'H' || input[0] == 'S')
+	if redirection {
+		position = inHost
+	}
+	var result strings.Builder
+	addQuery := false
+	write := func(literal string) {
+		for _, char := range literal {
+			switch {
+			case char == '/' && position == inHost:
+				position = inPath
+			case char == '?' && position != inQuery:
+				position = inQuery
+			}
+			result.WriteRune(char)
+		}
+	}
 	remaining := input
-	placeholder := ""
-	result := ""
-	var placeholderExists bool
 	for {
 		openBraceIdx := strings.IndexByte(remaining, '{')
 		closeBraceIdx := strings.IndexByte(remaining, '}')
 		if remaining == "" || openBraceIdx == -1 || closeBraceIdx == -1 || closeBraceIdx < openBraceIdx {
 			break
 		}
-		placeholder = remaining[openBraceIdx+1 : closeBraceIdx]
-		if _, placeholderExists = shortcutWordReplacers[placeholder]; placeholderExists {
-			result += remaining[:openBraceIdx] + shortcutWordReplacers[placeholder](request, domain, subdomain, host, currentSubdomain, firstDomain, firstSubdomain, rewriteMatch, requestPath)
-		} else {
-			result += remaining[:openBraceIdx]
+		write(remaining[:openBraceIdx])
+		placeholder := remaining[openBraceIdx+1 : closeBraceIdx]
+		remaining = remaining[closeBraceIdx+1:]
+		replacer, placeholderExists := shortcutWordReplacers[placeholder]
+		if !placeholderExists {
+			continue
 		}
-		if closeBraceIdx < len(remaining) {
-			remaining = remaining[closeBraceIdx+1:]
-		} else {
-			remaining = ""
+		value := replacer(request, domain, subdomain, host, currentSubdomain, firstDomain, firstSubdomain, rewriteMatch, requestPath)
+		switch position {
+		case inHost:
+			result.WriteString(url.QueryEscape(value)) // A host name is left as it is; "/", "?" or "@" can't change the URL
+		case inPath:
+			if placeholder == "REWRITE_COMPLEMENT" { // The path here; a redirection adds the query to the target's
+				value = cutAt(value, '?')
+				addQuery = redirection // An internal target already gets the request's query (CGI, QUERY_STRING)
+			}
+			segments := strings.Split(value, "/")
+			for i, segment := range segments {
+				segments[i] = url.PathEscape(segment)
+			}
+			result.WriteString(strings.Join(segments, "/"))
+		default:
+			result.WriteString(url.QueryEscape(value))
 		}
 	}
-	result += remaining
-	return result
+	write(remaining)
+	if _, query, hasQuery := strings.Cut(request.RequestURI, "?"); addQuery && hasQuery && query != "" {
+		if strings.IndexByte(result.String(), '?') == -1 {
+			result.WriteByte('?')
+		} else {
+			result.WriteByte('&')
+		}
+		for i := 0; i < len(query); i++ { // Control characters stay encoded, as in the rest of the target
+			if c := query[i]; c < 0x20 || c == 0x7f {
+				fmt.Fprintf(&result, "%%%02X", c)
+			} else {
+				result.WriteByte(c)
+			}
+		}
+	}
+	return result.String()
 }
 
-// readSiteConfigFrom applies the turbo.config at configPath, or the defaults if there is none. A file that
-// can't be read or isn't valid JSON isn't applied (D11): it returns a *configFileError and the configuration in
-// use stays. Callers hold the global lock.
-func readSiteConfigFrom(configPath string) error {
-	if fileExists(configPath) {
-		configBytes, err := os.ReadFile(configPath) // #nosec G304 -- path under the sites directory chosen by the administrator (TURBO_DIR or M)
-		if err != nil {
-			return &configFileError{path: configPath, err: err}
-		}
-		if err = parseConfig(configBytes, &rawConfigMap); err != nil {
-			rawConfigMap = make(map[string]map[string]interface{})
-			return &configFileError{path: configPath, data: configBytes, err: err}
-		}
-		dropControlChars(rawConfigMap)
-		configSchemaRead = migrateConfig(rawConfigMap, configBytes)
-		if configSchemaRead < configSchema {
-			slog.Warn("Configuración en esquema " + strconv.Itoa(configSchemaRead) + ": se aplicará la migración al guardar")
-		} else if configSchemaRead > configSchema {
-			slog.Warn("Configuración en esquema " + strconv.Itoa(configSchemaRead) + ", posterior al de esta versión (" + strconv.Itoa(configSchema) + "): se carga lo que se entiende y no se guardará sin confirmación")
-		}
-		loadCredentials(rawConfigMap["."])
-		var keyExists bool
-		var stringValue string
-		//var subKey string
-		var configKey string
-		for configKey = range adminAddHandlers {
-			if _, keyExists = rawConfigMap[configKey]; keyExists { // This is for another kind of lists in config file
-				for subKey, subValue := range rawConfigMap[configKey] {
-					stringValue, keyExists = subValue.(string)
-					if keyExists {
-						adminAddHandlers[configKey](subKey, stringValue)
-					}
-				}
-				continue
-			}
-		}
-		if _, keyExists = rawConfigMap["@"]; keyExists {
-			slog.Info("IPs denegadas activas", "total", len(deniedIPList()))
-		}
-		for configKey = range defaultSettingValidators { // Default settings check
-			if _, keyExists = rawConfigMap[configKey]; keyExists {
-				for _, subValue := range defaultSettingKeysGroup[configKey] {
-					if _, keyExists = rawConfigMap[configKey][subValue]; keyExists {
-						stringValue, keyExists = rawConfigMap[configKey][subValue].(string)
-						var subKeyIter string
-						if keyExists {
-							if keyExists, subKeyIter = defaultSettingValidators[configKey][subValue](stringValue, internalAuth); keyExists {
-								continue
-							}
-							if _, keyExists = defaultSettingErrorExceptions[configKey][subValue][subKeyIter]; keyExists { // ME (E, for exceptions) There are some exceptions on errors, some cause unnecessary resets
-								continue
-							}
-						}
-					}
-					defaultSettingsResetFallbacks[configKey][subValue]()
-				}
-			} else {
-				for subMap := range defaultSettingsResetFallbacks[configKey] {
-					defaultSettingsResetFallbacks[configKey][subMap]()
-				} // Reset specific defaults if doesn't exists
-			}
-		}
-		for domain := range rawConfigMap { // Site & subdomains existence check
-			if _, keyExists = defaultSettingValidators[domain]; keyExists {
-				continue
-			}
-			if !siteExistenceCheck(domain, "") {
-				continue
-			}
-			for subKey := range rawConfigMap[domain] {
-				if _, keyExists = subdomainContentCheckers[subKey]; keyExists || (subKey != "" && !siteExistenceCheck(domain, subKey)) {
-					continue
-				}
-				subdomainData, keyExists := rawConfigMap[domain][subKey].(map[string]interface{})
+// parsedConfig is a turbo.config read and checked but not applied: its content (nil without a file) and schema.
+type parsedConfig struct {
+	raw    map[string]map[string]interface{}
+	schema int
+	digest [sha256.Size]byte // Of the file read, for configFileDigest
+}
+
+// parseSiteConfig reads and checks the turbo.config at configPath without changing anything in use, so it runs
+// without the global lock. A file that can't be read or isn't valid gives a *configFileError; a missing
+// one, a parsedConfig without content (the defaults).
+func parseSiteConfig(configPath string) (parsedConfig, error) {
+	if _, statErr := os.Lstat(configPath); statErr != nil && os.IsNotExist(statErr) {
+		return parsedConfig{}, nil
+	}
+	configBytes, err := os.ReadFile(configPath) // #nosec G304 -- path under the sites directory chosen by the administrator (TURBO_DIR or M)
+	if err != nil {
+		return parsedConfig{}, &configFileError{path: configPath, err: err}
+	}
+	var raw map[string]map[string]interface{}
+	if err = parseConfig(configBytes, &raw); err != nil {
+		return parsedConfig{}, &configFileError{path: configPath, data: configBytes, err: err}
+	}
+	if err = panelSettingsProblem(raw["."]); err != nil {
+		return parsedConfig{}, &configFileError{path: configPath, data: configBytes, err: err}
+	}
+	dropControlChars(raw)
+	schemaRead, err := migrateConfig(raw, configBytes)
+	if err != nil {
+		return parsedConfig{}, &configFileError{path: configPath, data: configBytes, err: err}
+	}
+	if pointsToItself(raw, configPath) {
+		return parsedConfig{}, &configFileError{path: configPath, data: configBytes, err: configSelfPointerError{}}
+	}
+	return parsedConfig{raw: raw, schema: schemaRead, digest: sha256.Sum256(configBytes)}, nil
+}
+
+// applySiteConfig puts in use a turbo.config from parseSiteConfig, or the defaults without one. The file is the
+// source of truth: all that came from it before is emptied first, and what isn't in it stops applying;
+// sites, keys and entries are applied in a fixed order, so the result never depends on the order of a map.
+// Callers hold the global lock.
+func applySiteConfig(config parsedConfig) {
+	if config.raw == nil {
+		configSchemaRead = configSchema
+		setDefaultSettings()
+		return
+	}
+	clearFileSettings()
+	rawConfigMap = config.raw
+	configSchemaRead = config.schema
+	if configSchemaRead < configSchema {
+		slog.Warn("Configuration in schema " + strconv.Itoa(configSchemaRead) + ": the migration will apply when saving")
+	} else if configSchemaRead > configSchema {
+		slog.Warn("Configuration in schema " + strconv.Itoa(configSchemaRead) + ", later than this version's (" + strconv.Itoa(configSchema) + "): what is understood is loaded, and it will not be saved without confirmation")
+	}
+	loadCredentials(rawConfigMap["."])
+	loadPanelCertSettings(rawConfigMap["."])
+	var keyExists bool
+	var stringValue string
+	var configKey string
+	for _, configKey = range []string{"_", "@", "#"} { // Replacements first: they don't depend on the rest
+		if _, keyExists = rawConfigMap[configKey]; keyExists { // This is for another kind of lists in config file
+			for _, subKey := range sortedKeys(rawConfigMap[configKey]) {
+				subValue := rawConfigMap[configKey][subKey]
+				stringValue, keyExists = subValue.(string)
 				if !keyExists {
 					continue
 				}
-				for settingKey := range subdomainContentCheckers { // Subdomains content check
-					if _, keyExists = subdomainData[settingKey]; keyExists {
-						subdomainContentCheckers[settingKey](false, subdomainData[settingKey], true, domain, subKey) // Returns something like: a, _
+				if applied, problem := adminAddHandlers[configKey](subKey, stringValue); !applied && configKey == "_" && !strings.HasSuffix(problem, "unchanged") && problem != "Fixed replacement" {
+					slog.Warn("turbo.config character replacement discarded", "character", subKey, "replacement", stringValue, "reason", problem)
+				}
+			}
+			continue
+		}
+	}
+	if _, keyExists = rawConfigMap["@"]; keyExists {
+		slog.Info("Denied IPs active", "total", len(deniedIPList()))
+	}
+	// The conditions between settings are checked once all of them are in
+	loadingConfig = true
+	for configKey = range defaultSettingValidators { // Default settings check
+		if _, keyExists = rawConfigMap[configKey]; keyExists {
+			if _, keyExists = rawConfigMap[configKey]["C"]; keyExists { // "Save" is an action, not a setting: never run while loading
+				slog.Warn("turbo.config key ignored: saving is a panel action (setC), not a setting", "key", "C")
+			}
+			for _, subValue := range defaultSettingKeysGroup[configKey] {
+				if rawValue, present := rawConfigMap[configKey][subValue]; present {
+					var reason string
+					if stringValue, keyExists = configNumberOrString(rawValue); keyExists {
+						var applied bool
+						if applied, reason = defaultSettingValidators[configKey][subValue](stringValue, internalAuth); applied {
+							continue
+						}
+						if _, keyExists = defaultSettingErrorExceptions[configKey][subValue][reason]; keyExists { // A refusal that keeps the setting as it is ("Value unchanged")
+							continue
+						}
+					} else {
+						reason = "wrong type (a string or an integer is expected)"
 					}
+					slog.Warn("turbo.config setting discarded: the default value is used", "key", subValue, "value", configValueForLog(subValue, rawValue), "reason", reason)
+				}
+				defaultSettingsResetFallbacks[configKey][subValue]()
+			}
+		} else {
+			for subMap := range defaultSettingsResetFallbacks[configKey] {
+				defaultSettingsResetFallbacks[configKey][subMap]()
+			} // Reset specific defaults if doesn't exists
+		}
+	}
+	loadingConfig = false
+	enforceSettingInvariants()
+	for _, domain := range sortedKeys(rawConfigMap) { // Site & subdomains existence check, in a fixed order
+		if _, keyExists = defaultSettingValidators[domain]; keyExists {
+			continue
+		}
+		if !siteExistenceCheck(domain, "") {
+			continue
+		}
+		for _, subKey := range sortedKeys(rawConfigMap[domain]) {
+			if _, keyExists = subdomainContentCheckers[subKey]; keyExists || (subKey != "" && !siteExistenceCheck(domain, subKey)) {
+				continue
+			}
+			subdomainData, keyExists := rawConfigMap[domain][subKey].(map[string]interface{})
+			if !keyExists {
+				continue
+			}
+			for _, settingKey := range subdomainContentOrder { // Subdomains content check
+				if _, keyExists = subdomainData[settingKey]; keyExists {
+					subdomainContentCheckers[settingKey](false, subdomainData[settingKey], true, domain, subKey)
 				}
 			}
 		}
-		rawConfigMap = make(map[string]map[string]interface{})
-		return nil
 	}
-	configSchemaRead = configSchema
-	setDefaultSettings()
-	return nil
+	rawConfigMap = make(map[string]map[string]interface{})
+}
+
+// subdomainContentOrder is the order in which the content of a site of turbo.config is applied.
+var subdomainContentOrder = []string{"!", "=", "$", ".", "?", "-", "&"}
+
+// sortedKeys returns the keys of values in byte order.
+func sortedKeys[V any](values map[string]V) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// clearFileSettings empties, before a turbo.config is applied, everything that comes from it: the sites with
+// their settings and certificates, the denied IPs, and the character replacements and responses that aren't
+// fixed. Callers hold the global lock, and pause the publication of certificates (certificatePublishPaused) until
+// the new ones are loaded.
+func clearFileSettings() {
+	sitesMap = make(map[string]map[string]map[string]string)
+	siteSSLConfig = make(map[string]map[string]interface{})
+	mimeTypes = make(map[string]map[string]string)
+	customHeaders = make(map[string]map[string]string)
+	preprocessors = make(map[string]map[string]string)
+	indexFiles = make(map[string]map[string]int)
+	domainAliases = make(map[string]string)
+	siteCertificates = make(map[string]*tls.Certificate)
+	deniedIPs.Store(&map[string]int64{})
+	for char := range charReplacements {
+		if !fixedCharReplacements[char] {
+			delete(charReplacements, char)
+		}
+	}
+	responses := make(map[int]string)
+	for code, response := range *httpResponses.Load() {
+		if fixedHTTPResponses[code] {
+			responses[code] = response
+		}
+	}
+	httpResponses.Store(&responses)
+}
+
+// certificatePublishPaused, while a turbo.config is applied, keeps setSiteCertificate from publishing each
+// certificate: the ones in use stay published until all are loaded. Guarded by globalMutex.
+var certificatePublishPaused bool
+
+// diskSite is a site folder found on disk with its public folder: a site, or a subdomain of one.
+type diskSite struct {
+	site      string
+	subdomain string
+}
+
+// scanDiskSites lists the site folders of baseDir that have a public folder (@), the ones a reload activates.
+// It reads the disk, so it runs without the global lock.
+func scanDiskSites(baseDir string, dirEntries []os.DirEntry) []diskSite {
+	var found []diskSite
+	for _, entry := range dirEntries { // This is used when input is like: #.domain.com
+		entryName := entry.Name()
+		if entryName == panelCertDirName { // Never a site: nothing of it is served
+			continue
+		}
+		wildcardName := putWildcards(entryName)
+		if hostValid, _ := hostOk(wildcardName, false); !hostValid {
+			continue
+		}
+		if _, err := os.ReadDir(baseDir + entryName + "/" + publicDirName); err != nil {
+			continue
+		}
+		subdirEntries, err := os.ReadDir(baseDir + entryName)
+		if err != nil {
+			continue
+		}
+		found = append(found, diskSite{wildcardName, ""})
+		for _, subEntry := range subdirEntries {
+			subWildcardName := putWildcards(subEntry.Name())
+			if hostValid, _ := hostOk(subWildcardName+"."+changeWildcards(wildcardName, "x"), false); !hostValid {
+				continue
+			}
+			if info, err := os.Stat(baseDir + entryName + "/" + subEntry.Name() + "/" + publicDirName); err != nil || !info.IsDir() {
+				continue
+			}
+			found = append(found, diskSite{wildcardName, subWildcardName})
+		}
+	}
+	return found
+}
+
+// activateDiskSites activates, with their defaults, the sites found on disk that aren't active yet, and reports
+// whether there was any. Callers hold the global lock.
+func activateDiskSites(found []diskSite, logThem bool) bool {
+	activated := false
+	for _, disk := range found {
+		if siteExists(disk.site, disk.subdomain) {
+			continue
+		}
+		if problem := siteNameProblem(disk.site, disk.subdomain); problem != "" {
+			if name := disk.subdomain + "/" + disk.site; !warnedDiskSites[name] {
+				warnedDiskSites[name] = true
+				slog.Warn("Site folder on disk that is not activated", "site", disk.site, "subdomain", disk.subdomain, "reason", problem)
+			}
+			continue
+		}
+		constructSiteLocked(disk.site, disk.subdomain) // With index.html, as a new site
+		siteKey := disk.site
+		if disk.subdomain != "" {
+			siteKey = disk.subdomain + "." + disk.site
+		}
+		subdomainContentCheckers["!"](false, siteSSLConfig[siteKey], true, disk.site, disk.subdomain)
+		activated = true
+		if logThem {
+			slog.Info("Site created on disk and activated", "site", siteKey)
+		}
+	}
+	return activated
+}
+
+// configNumberOrString returns a value of turbo.config as the text its validator takes: a string as it is, and a
+// JSON number only if it is an integer ("MBB": 5242880 is "5242880"). ok is false for anything else.
+func configNumberOrString(value interface{}) (text string, ok bool) {
+	switch typed := value.(type) {
+	case string:
+		return typed, true
+	case float64:
+		if typed == math.Trunc(typed) && math.Abs(typed) < 1<<53 {
+			return strconv.FormatInt(int64(typed), 10), true
+		}
+	}
+	return "", false
+}
+
+// configValueForLog is a value of turbo.config to show in the log: the password and its hash never are.
+func configValueForLog(key string, value interface{}) string {
+	if key == "P" || key == "PH" {
+		return "(oculto)"
+	}
+	text := fmt.Sprint(value)
+	if len(text) > 120 {
+		text = text[:120] + "..."
+	}
+	return text
 }
 
 func setDefaultSettings() {
@@ -1443,16 +2474,16 @@ func siteExistenceCheck(domain string, subdomain string) bool {
 	var checker string
 	for checker = range siteExistenceCheckers {
 		if passed, _ = siteExistenceCheckers[checker](true, domain, subdomain); !passed {
-			siteExistenceResetFallbacks[checker](domain, subdomain)
 			return false
 		}
 	}
 	return true
 }
 
+// IPReference is the limiter entry of an IP. Times are of the monotonic clock (monotonicNow).
 type IPReference struct {
-	mutex           sync.Mutex
-	blockedUntil    int64
-	lastRequestNano int64
-	requestCount    int64
+	mutex        sync.Mutex
+	blockedUntil int64 // Blocked until then
+	windowStart  int64 // Start of the current count
+	requestCount int64 // Requests counted since windowStart
 }

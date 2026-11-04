@@ -1,10 +1,10 @@
 # Auto detect text files and perform LF normalization
 * text=auto
 
-# Los scripts de shell siempre con LF, también en una copia de Windows
+# Shell scripts always with LF, also in a Windows copy
 *.sh text eol=lf
 
-# La GUI se embebe tal cual en el binario (//go:embed): con LF, el binario es el
-# mismo se compile donde se compile.
+# The GUI is embedded as it is in the binary (//go:embed): with LF, the binary is
+# the same wherever it is built.
 turbo.dev/**/*.html text eol=lf
 turbo.dev/**/*.css text eol=lf

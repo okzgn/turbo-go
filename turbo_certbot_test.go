@@ -1,7 +1,7 @@
 package main
 
-// C2 (H25): con otra emisión en curso, varios "Crear SSL" del mismo sitio
-// dejan una sola emisión pendiente, y Certbot se lanza una vez.
+// C2 (H25): with another issuance in progress, several "Create SSL" of the same
+// site leave a single pending issuance, and Certbot runs once.
 
 import (
 	"os"
@@ -14,7 +14,7 @@ func TestC2_OnePendingIssuancePerSite(t *testing.T) {
 	logf := useFakeCertbot(t, "ok")
 	initForTest(t)
 	globalMutex.Lock()
-	currentCertDomain = "otro.test" // Another issuance in progress
+	currentCertDomain = "other.test" // Another issuance in progress
 	for i := 0; i < 3; i++ {
 		siteSSLSettingCheckers["C"](false, "1", "localhost", "", "admin@localhost.test", "")
 	}
@@ -30,9 +30,9 @@ func TestC2_OnePendingIssuancePerSite(t *testing.T) {
 	waitIdle()
 	data, _ := os.ReadFile(logf)
 	if n := strings.Count(string(data), `"certonly" "-d" "localhost"`); n != 1 {
-		t.Errorf("Certbot se lanzó %d veces para localhost; se esperaba 1:\n%s", n, data)
+		t.Errorf("Certbot ran %d times for localhost; expected 1:\n%s", n, data)
 	}
 	if certRetryDelay != 100*time.Millisecond {
-		t.Errorf("el retardo entre intentos cambió a %v", certRetryDelay)
+		t.Errorf("the delay between attempts changed to %v", certRetryDelay)
 	}
 }

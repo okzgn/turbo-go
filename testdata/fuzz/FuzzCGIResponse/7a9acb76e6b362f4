@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("Content-TYpe:0\nTrAnsfer-EnCoding:0\n\n")

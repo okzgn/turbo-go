@@ -1,0 +1,59 @@
+diff --git a/1.net.http.h2_bundle.go b/1.net.http.h2_bundle.go
+index 1681a0e..cdcced3 100644
+--- a/1.net.http.h2_bundle.go
++++ b/1.net.http.h2_bundle.go
+@@ -11139,7 +11139,12 @@ func (w *http2writeResHeaders) writeFrame(ctx http2writeContext) error {
+ 		http2encKV(enc, ":status", http2httpCodeString(w.httpResCode))
+ 	}
+ 
+-	http2encodeHeaders(enc, w.h, w.trailers)
++	h := w.h
++	if _, set := h["Server"]; set && w.httpResCode != 0 { // turbo:P8: a single Server header, Turbo's
++		h = h.Clone()
++		delete(h, "Server")
++	}
++	http2encodeHeaders(enc, h, w.trailers)
+ 
+ 	if w.contentType != "" {
+ 		http2encKV(enc, "content-type", w.contentType)
+@@ -11150,6 +11155,9 @@ func (w *http2writeResHeaders) writeFrame(ctx http2writeContext) error {
+ 	if w.date != "" {
+ 		http2encKV(enc, "date", w.date)
+ 	}
++	if w.httpResCode != 0 { // turbo:P8: in every response (not in the trailers), even if the handler sets Date
++		http2encKV(enc, "server", TurboServerName)
++	}
+ 
+ 	headerBlock := buf.Bytes()
+ 	if len(headerBlock) == 0 && w.trailers == nil {
+diff --git a/1.net.http.server.go b/1.net.http.server.go
+index e68c409..5b9f791 100644
+--- a/1.net.http.server.go
++++ b/1.net.http.server.go
+@@ -560,6 +560,9 @@ func (w *response) declareTrailer(k string) {
+ 		// Forbidden by RFC 7230, section 4.1.2
+ 		return
+ 	}
++	if k == "Server" { // turbo:P8: the only Server is Turbo's, also at the end of the response
++		return
++	}
+ 	w.trailers = append(w.trailers, k)
+ }
+ 
+@@ -1234,6 +1237,8 @@ func (h extraHeader) Write(w *bufio.Writer) {
+ 		w.Write(h.date)
+ 		w.Write(crlf)
+ 	}
++	w.WriteString("Server: " + TurboServerName) // turbo:P8: always, even if the handler sets Date
++	w.Write(crlf)
+ 	if h.contentLength != nil {
+ 		w.Write(headerContentLength)
+ 		w.Write(h.contentLength)
+@@ -1475,6 +1480,7 @@ func (cw *chunkWriter) writeHeader(p []byte) {
+ 	if !header.has("Date") {
+ 		setHeader.date = time.Now().UTC().AppendFormat(cw.res.dateBuf[:0], TimeFormat)
+ 	}
++	delHeader("Server") // turbo:P8: a single Server header, Turbo's (extraHeader)
+ 
+ 	if hasCL && hasTE && te != "identity" {
+ 		// TODO: return an error if WriteHeader gets a return parameter

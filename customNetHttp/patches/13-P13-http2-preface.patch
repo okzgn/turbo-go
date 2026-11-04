@@ -1,0 +1,15 @@
+diff --git a/1.net.http.h2_bundle.go b/1.net.http.h2_bundle.go
+index ab496db..d9991f8 100644
+--- a/1.net.http.h2_bundle.go
++++ b/1.net.http.h2_bundle.go
+@@ -4118,8 +4118,8 @@ func (p *http2pipe) Done() <-chan struct{} {
+ }
+ 
+ const (
+-	http2prefaceTimeout        = 10 * time.Second
+-	http2firstSettingsTimeout  = 2 * time.Second // should be in-flight with preface anyway
++	http2prefaceTimeout        = 1 * time.Second // turbo:P13 (Go: 10 s)
++	http2firstSettingsTimeout  = 1 * time.Second // turbo:P13 (Go: 2 s); should be in-flight with preface anyway
+ 	http2handlerChunkWriteSize = 4 << 10
+ 	http2defaultMaxStreams     = 250 // TODO: make this 100 as the GFE seems to?
+ 

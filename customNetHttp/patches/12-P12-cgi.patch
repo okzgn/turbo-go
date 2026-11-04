@@ -1,5 +1,5 @@
 diff --git a/a.server.cgi.host.go b/a.server.cgi.host.go
-index 64b6cfd..27c9a18 100644
+index 8396168..c2cf674 100644
 --- a/a.server.cgi.host.go
 +++ b/a.server.cgi.host.go
 @@ -18,6 +18,7 @@ package customNetHttp
@@ -10,15 +10,17 @@ index 64b6cfd..27c9a18 100644
  	"fmt"
  	"io"
  	"log"
-@@ -30,6 +31,7 @@ import (
+@@ -28,8 +29,8 @@ import (
+ 	"path/filepath"
+ 	"regexp"
  	"runtime"
- 	"strconv"
+-	"strconv"
  	"strings"
 +	"time"
  )
  
  var trailingPort = regexp.MustCompile(`:([0-9]+)$`)
-@@ -69,6 +71,10 @@ type CgiHandler struct {
+@@ -69,6 +70,10 @@ type CgiHandler struct {
  	Args       []string    // optional arguments to pass to child process
  	Stderr     io.Writer   // optional stderr for the child process; nil means os.Stderr
  
@@ -29,12 +31,23 @@ index 64b6cfd..27c9a18 100644
  	// PathLocationHandler specifies the root http Handler that
  	// should handle internal redirects when the CGI process
  	// returns a Location header value starting with a "/", as
-@@ -218,17 +224,24 @@ func (h *CgiHandler) ServeHTTP(rw ResponseWriter, req *Request) {
+@@ -115,8 +120,8 @@ func removeLeadingDuplicates(env []string) (ret []string) {
+ 
+ func (h *CgiHandler) ServeHTTP(rw ResponseWriter, req *Request) {
+ 	if len(req.TransferEncoding) > 0 && req.TransferEncoding[0] == "chunked" {
+-		rw.WriteHeader(StatusBadRequest)
+-		rw.Write([]byte("Chunked request bodies are not supported by CGI."))
++		Error(rw, "", StatusBadRequest) // turbo:P12: Turbo's template
++		h.printf("cgi: chunked request bodies are not supported by CGI")
+ 		return
+ 	}
+ 
+@@ -218,61 +223,90 @@ func (h *CgiHandler) ServeHTTP(rw ResponseWriter, req *Request) {
  	}
  
  	internalError := func(err error) {
 -		rw.WriteHeader(StatusInternalServerError)
-+		Error(rw, "", StatusInternalServerError) // turbo:P12: plantilla de Turbo; el detalle, solo en el log
++		Error(rw, "", StatusInternalServerError) // turbo:P12: Turbo's template; the detail, only in the log
  		h.printf("CGI error: %v", err)
  	}
  
@@ -45,24 +58,119 @@ index 64b6cfd..27c9a18 100644
 -		Env:    env,
 -		Stderr: h.stderr(),
 -	}
-+	// turbo:P12: el proceso termina con la petición o al pasar Timeout.
++	// turbo:P12: the process ends with the request or when Timeout passes.
 +	ctx := req.Context()
 +	if h.Timeout > 0 {
 +		var cancel context.CancelFunc
 +		ctx, cancel = context.WithTimeout(ctx, h.Timeout)
 +		defer cancel()
 +	}
-+	cmd := exec.CommandContext(ctx, path)
-+	cmd.Path, cmd.Err = path, nil // como exec.Cmd{Path: path}: sin buscar en PATH
++	cmd := exec.CommandContext(ctx, h.Path) // turbo:P12: with the full path, CommandContext doesn't search PATH
++	cmd.Path, cmd.Err = path, nil           // as exec.Cmd{Path: path}, relative to Dir
 +	cmd.Args = append([]string{h.Path}, h.Args...)
 +	cmd.Dir = cwd
 +	cmd.Env = env
 +	cmd.Stderr = h.stderr()
-+	cmd.WaitDelay = time.Second // no esperar a hijos que mantengan abiertas las tuberías
++	cmd.WaitDelay = time.Second // don't wait for children that keep the input open
  	if req.ContentLength != 0 {
  		cmd.Stdin = req.Body
  	}
-@@ -301,6 +314,11 @@ func (h *CgiHandler) ServeHTTP(rw ResponseWriter, req *Request) {
+-	stdoutRead, err := cmd.StdoutPipe()
++	// turbo:P12: the output is read separately and the process goes in a group of its own (a Job Object on
++	// Windows): when the context expires the whole group is killed, and if the CGI ends, the processes it left
++	// with the output open are not waited for (see 0.turbo.cgi.go).
++	stdoutRead, stdoutWrite, err := turboCGIOutputPipe()
+ 	if err != nil {
+ 		internalError(err)
+ 		return
+ 	}
+-
++	cmd.Stdout = stdoutWrite
++	group := turboCGIPrepare(cmd)
+ 	err = cmd.Start()
++	stdoutWrite.Close()
+ 	if err != nil {
++		stdoutRead.stop()
+ 		internalError(err)
+ 		return
+ 	}
++	group.started(cmd)
+ 	if hook := testHookStartProcess; hook != nil {
+ 		hook(cmd.Process)
+ 	}
+-	defer cmd.Wait()
+-	defer stdoutRead.Close()
++	finished := stdoutRead.watch(ctx, cmd, group)
++	served := false // Until the response comes out of the CGI: if it doesn't (an error), its end is not waited for
++	defer func() {
++		if !served {
++			group.kill()
++		}
++		stdoutRead.stop()
++		<-finished
++	}()
+ 
+-	linebody := bufio.NewReaderSize(stdoutRead, 1024)
++	// turbo:P12: header lines of up to 16 KiB (a long Set-Cookie or CSP) and 64 KiB in total; the
++	// errors respond with the template.
++	linebody := bufio.NewReaderSize(stdoutRead, turboCGIMaxHeaderLine)
+ 	headers := make(Header)
+ 	statusCode := 0
+ 	headerLines := 0
++	headerBytes := 0
+ 	sawBlankLine := false
+ 	for {
+ 		line, isPrefix, err := linebody.ReadLine()
+ 		if isPrefix {
+-			rw.WriteHeader(StatusInternalServerError)
+-			h.printf("cgi: long header line from subprocess.")
++			internalError(fmt.Errorf("cgi: header line longer than %d bytes from subprocess", turboCGIMaxHeaderLine))
+ 			return
+ 		}
+ 		if err == io.EOF {
+ 			break
+ 		}
+ 		if err != nil {
+-			rw.WriteHeader(StatusInternalServerError)
+-			h.printf("cgi: error reading headers: %v", err)
++			if ctx.Err() == context.DeadlineExceeded {
++				break // The 504 below
++			}
++			internalError(fmt.Errorf("cgi: error reading headers: %v", err))
+ 			return
+ 		}
+ 		if len(line) == 0 {
+ 			sawBlankLine = true
+ 			break
+ 		}
++		if headerBytes += len(line); headerBytes > turboCGIMaxHeaderBytes {
++			internalError(fmt.Errorf("cgi: headers longer than %d bytes from subprocess", turboCGIMaxHeaderBytes))
++			return
++		}
+ 		headerLines++
+ 		header, val, ok := strings.Cut(string(line), ":")
+ 		if !ok {
+@@ -286,14 +320,11 @@ func (h *CgiHandler) ServeHTTP(rw ResponseWriter, req *Request) {
+ 		val = textproto.TrimString(val)
+ 		switch {
+ 		case header == "Status":
+-			if len(val) < 3 {
+-				h.printf("cgi: bogus status (short): %q", val)
+-				return
+-			}
+-			code, err := strconv.Atoi(val[0:3])
+-			if err != nil {
+-				h.printf("cgi: bogus status: %q", val)
+-				h.printf("cgi: line was %q", line)
++			// turbo:P12: three digits from 200 to 599 (a 1xx is not a final response); otherwise, 500 with the
++			// template instead of an empty 200 or a WriteHeader panic.
++			code, ok := turboCGIStatus(val)
++			if !ok {
++				internalError(fmt.Errorf("cgi: bogus status: %q", val))
+ 				return
+ 			}
+ 			statusCode = code
+@@ -301,14 +332,19 @@ func (h *CgiHandler) ServeHTTP(rw ResponseWriter, req *Request) {
  			headers.Add(header, val)
  		}
  	}
@@ -72,5 +180,62 @@ index 64b6cfd..27c9a18 100644
 +		return
 +	}
  	if headerLines == 0 || !sawBlankLine {
- 		rw.WriteHeader(StatusInternalServerError)
- 		h.printf("cgi: no headers")
+-		rw.WriteHeader(StatusInternalServerError)
+-		h.printf("cgi: no headers")
++		internalError(fmt.Errorf("cgi: no headers"))
+ 		return
+ 	}
+ 
+ 	if loc := headers.Get("Location"); loc != "" {
+ 		if strings.HasPrefix(loc, "/") && h.PathLocationHandler != nil {
++			served = true
+ 			h.handleInternalRedirect(rw, req, loc)
+ 			return
+ 		}
+@@ -318,8 +354,7 @@ func (h *CgiHandler) ServeHTTP(rw ResponseWriter, req *Request) {
+ 	}
+ 
+ 	if statusCode == 0 && headers.Get("Content-Type") == "" {
+-		rw.WriteHeader(StatusInternalServerError)
+-		h.printf("cgi: missing required Content-Type in headers")
++		internalError(fmt.Errorf("cgi: missing required Content-Type in headers"))
+ 		return
+ 	}
+ 
+@@ -331,6 +366,9 @@ func (h *CgiHandler) ServeHTTP(rw ResponseWriter, req *Request) {
+ 	// go into handleInternalRedirect, which won't want its rw
+ 	// headers to have been touched.
+ 	for k, vv := range headers {
++		if _, set := rw.Header()[k]; set { // turbo:P12: the headers the server already set (the site's) win
++			continue
++		}
+ 		for _, v := range vv {
+ 			rw.Header().Add(k, v)
+ 		}
+@@ -339,6 +377,7 @@ func (h *CgiHandler) ServeHTTP(rw ResponseWriter, req *Request) {
+ 	rw.WriteHeader(statusCode)
+ 
+ 	_, err = io.Copy(rw, linebody)
++	served = true
+ 	if err != nil {
+ 		h.printf("cgi: copy error: %v", err)
+ 		// And kill the child CGI process so we don't hang on
+@@ -349,6 +388,9 @@ func (h *CgiHandler) ServeHTTP(rw ResponseWriter, req *Request) {
+ 		// won't be reused until the Wait above).
+ 		cmd.Process.Kill()
+ 	}
++	if ctx.Err() != nil { // turbo:P12: cut off when the time ran out or because the client went away: it mustn't look complete
++		panic(ErrAbortHandler)
++	}
+ }
+ 
+ func (h *CgiHandler) printf(format string, v ...any) {
+@@ -362,7 +404,7 @@ func (h *CgiHandler) printf(format string, v ...any) {
+ func (h *CgiHandler) handleInternalRedirect(rw ResponseWriter, req *Request, path string) {
+ 	url, err := req.URL.Parse(path)
+ 	if err != nil {
+-		rw.WriteHeader(StatusInternalServerError)
++		Error(rw, "", StatusInternalServerError) // turbo:P12: Turbo's template
+ 		h.printf("cgi: error resolving local URI path %q: %v", path, err)
+ 		return
+ 	}

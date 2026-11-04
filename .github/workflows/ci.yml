@@ -1,0 +1,173 @@
+# Turbo's continuous integration: the checks of "Checks Before Publishing" in the README, on every push and
+# pull request. Fuzzing runs 15 s per target in three parallel shards (about four minutes); the full fuzzing
+# (1 min per target), the systemd test and the upgrade test are run by hand before a release, as the README says.
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analysis:
+    name: Format, analysis and fork
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: go
+        name: Go version (customNetHttp/UPSTREAM)
+        run: echo "version=$(sed -n '1s/^go//p' customNetHttp/UPSTREAM)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ steps.go.outputs.version }}
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "Not formatted with gofmt:"; echo "$unformatted"; exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      - name: customNetHttp = Go of UPSTREAM + the patches
+        run: go run ./customNetHttp/regenerate -check
+      - name: staticcheck
+        # The generated files of customNetHttp are Go's own code plus the patches (checked by the step above):
+        # they are not analyzed.
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@v0.8.2
+          # Exit code 0: no warnings; 1: warnings (as JSON). Anything else, or a 1 with no output, means the
+          # analysis did not finish.
+          set +e
+          staticcheck -f json ./... > staticcheck.json
+          status=$?
+          set -e
+          if [ "$status" -gt 1 ] || { [ "$status" -eq 1 ] && [ ! -s staticcheck.json ]; }; then
+            echo "staticcheck did not finish the analysis (exit code $status)"; exit 1
+          fi
+          jq -r 'select(.location.file | test("/customNetHttp/[1-9a-z][^/]*\\.go$") | not)
+                 | "\(.location.file):\(.location.line):\(.location.column): \(.message) (\(.code))"' staticcheck.json > warnings.txt
+          if [ -s warnings.txt ]; then cat warnings.txt; exit 1; fi
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          govulncheck ./...
+      - name: gosec (the main package)
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          gosec .
+
+  tests:
+    name: Tests (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: go
+        run: echo "version=$(sed -n '1s/^go//p' customNetHttp/UPSTREAM)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ steps.go.outputs.version }}
+      - name: go test
+        run: go test -count=1 -timeout 30m ./...
+
+  race:
+    name: Tests with the race detector (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: go
+        run: echo "version=$(sed -n '1s/^go//p' customNetHttp/UPSTREAM)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ steps.go.outputs.version }}
+      - name: go test -race
+        # About ten minutes on twelve CPUs; more on a hosted runner.
+        run: go test -race -count=1 -timeout 60m ./...
+
+  tests-windows:
+    name: Tests (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: go
+        shell: bash
+        run: echo "version=$(sed -n '1s/^go//p' customNetHttp/UPSTREAM)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ steps.go.outputs.version }}
+      - name: go test
+        shell: bash
+        run: go test -count=1 -timeout 30m ./...
+
+  real-ports:
+    name: Real ports 80 and 443 (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: go
+        run: echo "version=$(sed -n '1s/^go//p' customNetHttp/UPSTREAM)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ steps.go.outputs.version }}
+      - name: deploy/real-ports-test.sh
+        # Hosted runners have sudo without a password (for setcap) and the ports 80 and 443 free.
+        run: bash deploy/real-ports-test.sh
+
+  fuzzing:
+    name: Fuzzing (15 s per target, shard ${{ matrix.shard }} of 3)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
+    steps:
+      - uses: actions/checkout@v4
+      - id: go
+        run: echo "version=$(sed -n '1s/^go//p' customNetHttp/UPSTREAM)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ steps.go.outputs.version }}
+      - name: The Fuzz targets of this shard
+        # Every Fuzz function of the package, split by name across the three shards.
+        run: |
+          for target in $(grep -ho '^func Fuzz[A-Za-z0-9_]*' *_test.go | cut -c6- | sort | awk -v n=3 -v i=${{ matrix.shard }} 'NR % n == i'); do
+            echo "== $target"
+            go test -run '^$' -fuzz "^$target\$" -fuzztime 15s -timeout 10m .
+          done
+      - name: Failing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-testdata-${{ matrix.shard }}
+          path: testdata/fuzz
+
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+      - id: go
+        run: echo "version=$(sed -n '1s/^go//p' customNetHttp/UPSTREAM)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ steps.go.outputs.version }}
+      - name: go build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: go build -trimpath -o /dev/null .
