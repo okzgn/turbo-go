@@ -154,12 +154,12 @@ func TestRA1_PanelDeletesSiteWithoutFolder(t *testing.T) {
 	base := startServer(t)
 	tok := login(t, base)
 	configureLocalhost(t, dir)
-	if err := os.Rename(dir+"localhost/@", dir+"localhost/@.away"); err != nil {
+	if err := os.Rename(dir+"localhost", t.TempDir()+"/localhost"); err != nil { // Its whole folder goes
 		t.Fatal(err)
 	}
 	updateSettings(true)
 	if code, body, err := post(base, "/admin:inside:delSite?s=localhost&d=&b=Admin", tok); err != nil || code != 200 {
-		t.Fatalf("delSite of localhost without its @: %d %q %v", code, body, err)
+		t.Fatalf("delSite of localhost without its folder: %d %q %v", code, body, err)
 	}
 	if !saveDefaultConfig() {
 		t.Fatal("saving failed")
@@ -240,6 +240,9 @@ func TestRP_M05_SitesListsThoseWithoutFolder(t *testing.T) {
 	}
 	if kept, active := withoutFolder(); len(kept) != 1 || kept[0] != "" || active {
 		t.Errorf("localhost without its @ in sites: kept %v, active %v; expected it in \"~\" only", kept, active)
+	}
+	if err := os.Rename(dir+"localhost", t.TempDir()+"/localhost"); err != nil { // Forgotten only once its folder is gone
+		t.Fatal(err)
 	}
 	if code, body, err := post(base, "/admin:inside:delSite?s=localhost&d=&b=Admin", tok); err != nil || code != 200 {
 		t.Fatalf("delSite: %d %q %v", code, body, err)

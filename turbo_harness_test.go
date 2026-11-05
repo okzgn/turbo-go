@@ -121,7 +121,7 @@ func initForTest(t testing.TB) string {
 	os.WriteFile(dir+"localhost/@/index.html", []byte("hello"), 0644)
 	updateSettings(false)
 	globalMutex.Lock()
-	addIndex("localhost", "index.html") // constructSite already adds it; it is kept explicit
+	addIndex("localhost", "index.html") // Activating the site found on disk already adds it; it is kept explicit
 	globalMutex.Unlock()
 	return dir
 }
@@ -155,6 +155,15 @@ func startServer(t testing.TB) string {
 // base URL and the server's ErrorLog.
 func startServerLog(t testing.TB) (string, *syncBuffer) {
 	t.Helper()
+	return startServerAs(t, nil)
+}
+
+// startServerAs is startServerLog for a server that sees each connection as
+// coming from the address that remote gives it (with the connection's own
+// port), or from where it comes if remote is nil. It shares everything else
+// with the other servers of the test: the CGI slots, the limits per client…
+func startServerAs(t testing.TB, remote func() net.IP) (string, *syncBuffer) {
+	t.Helper()
 	errLog := &syncBuffer{}
 	srv := &customNetHttp.Server{
 		ReadHeaderTimeout: serverTimeLimits.Load().RHT,
@@ -169,10 +178,44 @@ func startServerLog(t testing.TB) (string, *syncBuffer) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	address := l.Addr().String()
+	if remote != nil {
+		l = remoteAsListener{l, remote}
+	}
 	go srv.Serve(l)
 	t.Cleanup(func() { srv.Close() })
-	return "http://" + l.Addr().String(), errLog
+	return "http://" + address, errLog
 }
+
+// remoteAsListener presents each connection it accepts as coming from the
+// address that remote gives. The server takes a client's address from its
+// connection, before reading anything (the RemoteAddr of the request, and
+// connHandler), so a test can be another client, or many, without the
+// loopback addresses of the system: macOS has only 127.0.0.1.
+type remoteAsListener struct {
+	net.Listener
+	remote func() net.IP
+}
+
+func (l remoteAsListener) Accept() (net.Conn, error) {
+	conn, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	port := 0
+	if address, isTCP := conn.RemoteAddr().(*net.TCPAddr); isTCP {
+		port = address.Port
+	}
+	return remoteAsConn{conn, &net.TCPAddr{IP: l.remote(), Port: port}}, nil
+}
+
+// remoteAsConn is a connection seen as coming from remote.
+type remoteAsConn struct {
+	net.Conn
+	remote net.Addr
+}
+
+func (c remoteAsConn) RemoteAddr() net.Addr { return c.remote }
 
 // clientTimeout is how long a test request waits for its response. With the race
 // detector, password checks (PBKDF2, 600 000 iterations) are about ten times

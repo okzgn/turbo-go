@@ -1075,6 +1075,58 @@ func addSite(domain string) (bool, string) {
 	return true, "Site added"
 }
 
+// deleteSiteFromPanel deletes, for delSite, the site (or subdomain) domain: an active one with its folder, which it
+// moves aside, to a name no look at the disk takes for a site, for the caller to remove once settingsUpdateMutex is
+// free (deleting a large site held every reload, and Turbo's stop, for as long as it took); one only kept without its
+// folder by forgetting the settings kept for it, once its folder is gone (for a site, also those of its subdomains,
+// whose folders went with it). While that folder is there (only its @, or that of its site, missing) or can't be
+// looked at, the settings stay: forgotten, the folder came back as a new site with the defaults, its scripts served
+// as text. It holds settingsUpdateMutex, as the reloads do (before the global lock): one that had looked at the disk
+// before the folder went brought the site back afterwards, with the defaults.
+func deleteSiteFromPanel(domain string, subdomain string) (deleted bool, message string, moved string) {
+	what, name := "Site", domain
+	if subdomain != "" {
+		what, name = "Subdomain", subdomain+"."+domain
+	}
+	settingsUpdateMutex.Lock()
+	defer settingsUpdateMutex.Unlock()
+	var exists, kept bool
+	withReadLock(func() {
+		exists = siteExists(domain, subdomain)
+		_, kept = dormantSites[domain][subdomain]
+	})
+	if !exists && !kept {
+		return false, what + " not found", ""
+	}
+	siteDir := sitesDir.Get() + changeWildcards(domain)
+	if subdomain != "" {
+		siteDir += "/" + changeWildcards(subdomain)
+	}
+	if !exists {
+		if _, err := siteDirStat(siteDir); err == nil {
+			return false, name + " still has its folder, without its @ (or without that of its site): its settings stay until the folder is gone. Delete that folder, or put its @ back and delete the site with its files", ""
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return false, "The folder of " + name + " can't be looked at (" + err.Error() + "): its settings stay until it can", ""
+		}
+		withGlobalLock(func() {
+			if subdomain == "" {
+				forgetDormantLocked(domain, "") // Its subdomains' folders went with its own
+			} else {
+				forgetDormantEntryLocked(domain, subdomain)
+			}
+		})
+		return true, what + " deleted: Turbo forgets the settings it kept for it (no folder is deleted)", ""
+	}
+	aside := siteDir[:strings.LastIndex(siteDir, "/")+1] + ".turbo-deleted-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	if err := os.Rename(siteDir, aside); err == nil {
+		moved = aside
+	} else if !errors.Is(err, fs.ErrNotExist) { // Without a folder, there is nothing to delete
+		return false, "Error deleting", ""
+	}
+	deleteSite(domain, subdomain)
+	return true, what + " deleted", moved
+}
+
 // addSubdomain creates a subdomain of an existing site from the panel. Callers hold the global lock.
 func addSubdomain(domain string, subdomain string) (bool, string) {
 	if _, exists := sitesMap[domain]; !exists {
@@ -1653,40 +1705,17 @@ func consoleActionsAPI(apiPath string, currentSession string, responseWriter cus
 				if !dangerousActionPasswordOK(responseWriter, request, request.Form, "b") {
 					return true
 				}
-				// Serialized with the reloads (taken before the global lock, as they do): one that looked at the disk
-				// before the folder was deleted brought the site back afterwards, with the defaults.
-				settingsUpdateMutex.Lock()
-				defer settingsUpdateMutex.Unlock()
-				what := "Site"
-				isSubdomain := request.Form["d"][0] != ""
-				if isSubdomain {
-					what = "Subdomain"
+				deleted, message, moved := deleteSiteFromPanel(request.Form["s"][0], request.Form["d"][0])
+				if moved != "" { // Its folder, put aside: deleted without holding the reloads
+					if err := os.RemoveAll(moved); err != nil {
+						slog.Warn("The folder of a deleted site couldn't be removed: delete it by hand", "folder", moved, "error", err)
+					}
 				}
-				var exists, kept bool
-				withReadLock(func() {
-					exists = siteExists(request.Form["s"][0], request.Form["d"][0])
-					_, kept = dormantSites[request.Form["s"][0]][request.Form["d"][0]] // Its folder isn't there: what is kept of it
-				})
-				if !exists && !kept {
-					badReq(responseWriter, request, what+" not found")
+				if !deleted {
+					badReq(responseWriter, request, message)
 					return true
 				}
-				if !exists { // Only what is kept of it: no folder is deleted (its own may be there, with only its @, or its site's, missing)
-					withGlobalLock(func() { forgetDormantEntryLocked(request.Form["s"][0], request.Form["d"][0]) })
-					respond(responseWriter, what+" deleted: Turbo forgets the settings it kept for it, and no folder is deleted")
-					return true
-				}
-				siteDir := sitesDir.Get() + changeWildcards(request.Form["s"][0])
-				if isSubdomain {
-					siteDir += "/" + changeWildcards(request.Form["d"][0])
-				}
-				siteDir += "/"
-				if os.RemoveAll(siteDir) != nil {
-					badReq(responseWriter, request, "Error deleting")
-					return true
-				}
-				deleteSite(request.Form["s"][0], request.Form["d"][0])
-				respond(responseWriter, what+" deleted")
+				respond(responseWriter, message)
 			} else {
 				badReq(responseWriter, request, msgMissingData)
 			}

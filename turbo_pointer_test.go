@@ -142,3 +142,33 @@ func TestRP2_V10_NumericM(t *testing.T) {
 		t.Errorf("the whole configuration doesn't apply in 7: sites directory %s, user %q", sitesDir.Get(), panelUser.Get())
 	}
 }
+
+// V3, after the independent review: an "M" with control characters makes turbo.config invalid. It was dropped
+// before "M" was checked: a pointer was applied as an empty configuration, and a whole one in the start directory.
+// In JSON a backslash starts an escape: the Windows path "D:\turbo", written so, holds a tab.
+func TestRP2_V3_MWithControlCharacters(t *testing.T) {
+	hash, err := hashPassword("Another-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.ToSlash(t.TempDir()) + "/"
+	for _, config := range []string{
+		`{"^":{"v":"2"},".":{"M":"D:\turbo"}}`,
+		`{"^":{"v":"2"},".":{"M":"` + other + `\n"}}`,
+		`{"^":{"v":"2"},".":{"U":"admin3","M":"` + other + `\n"},"localhost":{"":{"-":{"index.html":"1"}}}}`,
+	} {
+		dir, base := unusableSitesDirSetup(t, hash)
+		if err := os.WriteFile(dir+"turbo.config", []byte(config), 0600); err != nil {
+			t.Fatal(err)
+		}
+		withGlobalLock(func() { configFileStamp = configStamp{kind: stampFile, modTime: 3} })
+		if err := updateSettings(true); err == nil || !strings.Contains(err.Error(), "control characters") {
+			t.Errorf("%s: a reload applies it: %v", config, err)
+		}
+		checkWholeConfigInUse(t, base, config)
+		resetTestState(dir)
+		if err := updateSettings(false); err == nil || !strings.Contains(err.Error(), "control characters") {
+			t.Errorf("%s: Turbo starts with it: %v", config, err)
+		}
+	}
+}

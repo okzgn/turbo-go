@@ -492,17 +492,21 @@ document.addEventListener('DOMContentLoaded', function(){
 	}
 	function createDormantSiteEntry(container, domain, subdomain, linkEl, deleteBtn, name){
 		name = (subdomain ? subdomain + '.' + domain : domain),
-		linkEl = document.createElement('a'), linkEl.innerText = name, linkEl.href = ('#' + name), container.appendChild(linkEl),
+		linkEl = document.createElement('a'), linkEl.innerText = name, linkEl.href = ('#' + name), linkEl.dataset.domain = domain, container.appendChild(linkEl),
 		deleteBtn = createDeleteButton(linkEl, '/admin:inside:delSite', 'span'),
 		linkEl.onclick = function(event){
 			event.preventDefault();
 			if(event.target == deleteBtn){ return; }
-			statusMessageEl.dataset.ok = 'The folder of "' + name + '" (or its @, or that of its site) isn\'t there: its settings come back with it. To forget them, use X (no folder is deleted)';
+			statusMessageEl.dataset.ok = 'Turbo keeps the settings of "' + name + '" while its folder or its @ (or that of its site) isn\'t there or can\'t be read: they come back with it. Once its folder is gone, X forgets them (no folder is deleted)';
 		},
 		deleteBtn.onclick = function(event){
 			event.preventDefault(), event.stopPropagation();
-			showDialogSequence({ type: 'confirm', text: 'Forget the settings kept for "' + name + '"? No folder is deleted.', abortOnCancel: true }, { text: 'Current password:', secret: true, required: true, abortOnCancel: true, okFn: function(z, password){
-				apiRequest('/admin:inside:delSite?s=' + encodeURIComponent(domain) + '&d=' + encodeURIComponent(subdomain) + '&b=' + encodeURIComponent(password), function(r){ statusMessageEl.dataset.ok = r, container.removeChild(linkEl), updateDormantSection(container); }, function(e){ statusMessageEl.dataset.error = e; });
+			showDialogSequence({ type: 'confirm', text: 'Forget the settings kept for "' + name + '"' + (subdomain ? '' : ' and its subdomains') + '? No folder is deleted.', abortOnCancel: true }, { text: 'Current password:', secret: true, required: true, abortOnCancel: true, okFn: function(z, password){
+				apiRequest('/admin:inside:delSite?s=' + encodeURIComponent(domain) + '&d=' + encodeURIComponent(subdomain) + '&b=' + encodeURIComponent(password), function(r){
+					statusMessageEl.dataset.ok = r;
+					$q('a', 0, container).forEach(function(entryEl){ if(entryEl == linkEl || (!subdomain && entryEl.dataset.domain == domain)){ container.removeChild(entryEl); } }); // A site's subdomains are forgotten with it
+					updateDormantSection(container);
+				}, function(e){ statusMessageEl.dataset.error = e; });
 			} });
 		};
 	}

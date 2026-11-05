@@ -1,6 +1,6 @@
 # Turbo's continuous integration: the checks of "Checks Before Publishing" in the README, on every push and
 # pull request. Fuzzing runs 15 s per target in three parallel shards (about four minutes); the full fuzzing
-# (1 min per target), the systemd test and the upgrade test are run by hand before a release, as the README says.
+# (1 min per target) and the upgrade test are run by hand before a release, as the README says.
 name: CI
 
 on:

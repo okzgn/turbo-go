@@ -203,6 +203,7 @@ func FuzzConfigReload(f *testing.F) {
 		`null`,
 		`{"a.test":{"":{"&":{"localhost":true}}},"localhost":{"":{"=":{"/a":"/b"},".":{"X-A":"1"}}},"_":{"!":"zz"}}`,
 		`{"^":{"v":2},"localhost":{"":{"!":{"S":1,"R":"1","W":"1"},"-":{"a.html":"2","b.html":"2"}}},"@":{"203.0.113.9":"4102444800"}}`,
+		`{"localhost":{"www":{}}}`,
 	} {
 		f.Add([]byte(seed))
 	}

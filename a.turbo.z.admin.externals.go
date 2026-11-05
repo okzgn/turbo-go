@@ -204,6 +204,9 @@ func configSitesDir(raw map[string]map[string]interface{}) (value string, presen
 	return value, present
 }
 
+// unusableSitesDirReason is why such an "M" can't be followed.
+const unusableSitesDirReason = `which is not the name of a directory: "M" must be a non-empty string (or an integer, read as its digits)`
+
 // unusableSitesDirProblem says why the "M" of a turbo.config that only points to another directory
 // (isSitesDirPointerMap) can't be followed when it is there but isn't a directory name ("", null, true, 1.5, an
 // object): applied as it is, such a pointer would leave the default configuration. Without "M" ({} or only "^"),
@@ -253,7 +256,7 @@ func sitesDirChainProblem(raw map[string]map[string]interface{}, baseDir string,
 	first, _ := configSitesDir(raw)
 	whole := !isSitesDirPointerMap(raw)
 	if shown, unusable := unusableSitesDirProblem(raw); unusable {
-		return configPointerError{target: shown, reason: `which is not a directory: "M" must be a non-empty string`}
+		return configPointerError{target: shown, reason: unusableSitesDirReason}
 	}
 	current, currentDir, value, via := raw, baseDir, first, ""
 	visited := []string{baseDir}
@@ -298,7 +301,7 @@ func sitesDirChainProblem(raw map[string]map[string]interface{}, baseDir string,
 		current, currentDir = target.raw, resolved
 		if shown, unusable := unusableSitesDirProblem(current); unusable {
 			via = shown
-			return reason(`which is not a directory: "M" must be a non-empty string`)
+			return reason(unusableSitesDirReason)
 		}
 		value, _ = configSitesDir(current)
 		via = value
@@ -906,17 +909,25 @@ type configSettingError struct {
 
 func (e configSettingError) Error() string { return `"` + e.key + `" can't be used: ` + e.reason }
 
-// configSiteError is a site of turbo.config whose section, or one of its lists, isn't a JSON object. Skipped, the
-// site would come from the disk without its settings (its preprocessors, its rewrites…), its scripts served as text,
-// so the whole file counts as invalid, as with the settings that guard the panel.
-type configSiteError struct{ domain, where string }
+// configSiteError is a site of turbo.config whose section, or one of its lists, isn't a JSON object, or that has a
+// list written in it, outside its sections. Skipped, the site would come from the disk without its settings (its
+// preprocessors, its rewrites…), its scripts served as text, so the whole file counts as invalid, as with the
+// settings that guard the panel.
+type configSiteError struct {
+	domain, where string
+	list          string // The list written in the site, outside its sections ("?"…), if that is the problem
+}
 
 func (e configSiteError) Error() string {
+	if e.list != "" {
+		return e.where + ` can't be used: the lists of a site go inside its "" section, as in ` + jsonString(e.domain) + `: {"": {` + jsonString(e.list) + `: {…}}}, and those of a subdomain inside the subdomain's section`
+	}
 	return e.where + ` can't be used: a JSON object is expected (a site, and its lists "!", "=", "$", ".", "?", "-" and "&", are objects)`
 }
 
 // siteSectionsProblem checks that every site of turbo.config, each of its subdomains and each of their lists is a
-// JSON object (configSiteError).
+// JSON object, and that a site has no list outside its sections (configSiteError). No list name is a host, and
+// Turbo never writes one there: skipped, a site's preprocessors written in it by hand were lost without a word.
 func siteSectionsProblem(raw map[string]map[string]interface{}) error {
 	for _, domain := range sortedKeys(raw) {
 		switch domain {
@@ -925,14 +936,17 @@ func siteSectionsProblem(raw map[string]map[string]interface{}) error {
 		}
 		for _, subdomain := range sortedKeys(raw[domain]) {
 			where := strconv.Quote(domain) + " > " + strconv.Quote(subdomain)
+			if _, isList := subdomainContentCheckers[subdomain]; isList {
+				return configSiteError{domain: domain, where: where, list: subdomain}
+			}
 			section, isMap := raw[domain][subdomain].(map[string]interface{})
 			if !isMap {
-				return configSiteError{domain, where}
+				return configSiteError{domain: domain, where: where}
 			}
 			for _, key := range subdomainContentOrder {
 				if value, present := section[key]; present {
 					if _, isMap := value.(map[string]interface{}); !isMap {
-						return configSiteError{domain, where + " > " + strconv.Quote(key)}
+						return configSiteError{domain: domain, where: where + " > " + strconv.Quote(key)}
 					}
 				}
 			}
@@ -944,6 +958,13 @@ func siteSectionsProblem(raw map[string]map[string]interface{}) error {
 // panelSettingsProblem checks the settings of "." that guard the panel (see configSettingError). The username
 // and the password are not checked when TURBO_USER or TURBO_PASSWORD replace them.
 func panelSettingsProblem(settings map[string]interface{}) error {
+	// An "M" with a control character is no directory: dropped later (dropControlChars), a turbo.config that only
+	// pointed to another directory was applied as an empty configuration (the default credentials, the panel on any
+	// host, the sites without their settings), and a whole one in the start directory. In JSON a backslash starts an
+	// escape: a Windows path written with single backslashes ("D:\turbo") holds a tab.
+	if text, isString := settings["M"].(string); isString && !textAllowed(text, false) {
+		return configSettingError{"M", `has control characters: in JSON a backslash starts an escape ("D:\turbo" holds a tab), so write the path with "\\" or "/"`}
+	}
 	if value, present := settings["PA"]; present {
 		text, isString := value.(string)
 		if !isString {

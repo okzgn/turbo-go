@@ -8,12 +8,16 @@ package main
 //   of the CGI slots may wait for one client's responses (a half for a /48): beyond, the response is cut and its CGI
 //   ended. Before, the clients of one address that didn't read filled the budgets and then held every slot.
 // - V18: a cut response frees its slot at once, not after the sender gives up on its client.
+// And, in v2.4.2, the output waits in temporary files of an eighth of the limit of a response each, removed as soon
+// as they are sent (TestRP3_*).
 
 import (
 	"bytes"
 	"errors"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -34,6 +38,14 @@ func withCGIOutputLimits(t *testing.T, limits cgiOutputLimitSet) {
 		cgiOutputLimits = previous
 		cgiOutputSharesMutex.Unlock()
 	})
+}
+
+// withWT sets the write time limit (WT) for the test.
+func withWT(t *testing.T, wt time.Duration) {
+	t.Helper()
+	previous := *serverTimeLimits.Load()
+	t.Cleanup(func() { withGlobalLock(func() { setTimeLimits(func(l *customNetHttp.Timeouts) { *l = previous }) }) })
+	withGlobalLock(func() { setTimeLimits(func(l *customNetHttp.Timeouts) { l.WT = wt }) })
 }
 
 // checkCGIOutputsEnded fails if, once the responses ended, anything is still counted.
@@ -104,33 +116,70 @@ func waitsForClient(output *cgiOutput) bool {
 	return output.waiting
 }
 
+// withCGIOutputTemp has the temporary files of the outputs go to a folder of the test, which it returns.
+func withCGIOutputTemp(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, name := range []string{"TMPDIR", "TEMP", "TMP"} {
+		t.Setenv(name, dir)
+	}
+	return dir
+}
+
+// cgiOutputTempFiles are the sizes of the temporary files of the outputs in dir.
+func cgiOutputTempFiles(t *testing.T, dir string) []int64 {
+	t.Helper()
+	names, err := filepath.Glob(filepath.Join(dir, "turbo-cgi-output-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sizes []int64
+	for _, name := range names {
+		if info, err := os.Stat(name); err == nil {
+			sizes = append(sizes, info.Size())
+		}
+	}
+	return sizes
+}
+
+// fillChunk fills chunk with a pattern of its position in the output, so that a part sent twice, lost or out of
+// order shows.
+func fillChunk(chunk []byte, position int) {
+	for j := range chunk {
+		chunk[j] = byte('a' + (position+j)%26)
+	}
+}
+
 func TestRP2_V1_FileNeverExceedsItsLimit(t *testing.T) {
+	temp := withCGIOutputTemp(t)
 	withCGIOutputLimits(t, cgiOutputLimitSet{memory: 64 << 10, budget: 64 << 20, fileMax: 1 << 20, fileBudget: 1 << 30})
 	client := newTestClientWriter(nil, 200*time.Microsecond) // Slower than the CGI
 	output := newCGIOutput(client, "192.0.2.10", nil)
+	t.Cleanup(output.finish) // Also when the test fails: finish can run twice
 	var written bytes.Buffer
 	chunk := make([]byte, 16<<10) // What the CGI host writes at a time
 	for i := 0; written.Len() < 16<<20; i++ {
-		for j := range chunk {
-			chunk[j] = byte('a' + (i+j)%26)
-		}
+		fillChunk(chunk, i)
 		if _, err := output.Write(chunk); err != nil {
 			t.Fatal(err)
 		}
 		written.Write(chunk)
 		output.mutex.Lock()
-		size, onDisk := output.fileWritten, int64(0)
-		if output.file != nil {
-			if info, err := output.file.Stat(); err == nil {
-				onDisk = info.Size()
+		size, onDisk, files := output.onDiskLocked(), int64(0), len(output.segments)
+		for _, segment := range output.segments {
+			if info, err := segment.file.Stat(); err == nil {
+				onDisk += info.Size()
 			}
 		}
 		output.mutex.Unlock()
 		if size > 1<<20 || onDisk > 1<<20 {
-			t.Fatalf("after %d KiB: the temporary file holds %d bytes (%d on disk); its limit is 1 MiB", written.Len()>>10, size, onDisk)
+			t.Fatalf("after %d KiB: the temporary files hold %d bytes (%d on disk); the limit of the response is 1 MiB", written.Len()>>10, size, onDisk)
 		}
-		if files := cgiOutputFilesInUse.Load(); files > 1<<20 {
-			t.Fatalf("after %d KiB: %d bytes counted in files; the limit of the response is 1 MiB", written.Len()>>10, files)
+		if files > 9 { // Files of 128 KiB, each with more than 112 KiB but the last, and the one being sent
+			t.Fatalf("after %d KiB: %d temporary files; expected 9 at most", written.Len()>>10, files)
+		}
+		if counted := cgiOutputFilesInUse.Load(); counted > 1<<20 {
+			t.Fatalf("after %d KiB: %d bytes counted in files; the limit of the response is 1 MiB", written.Len()>>10, counted)
 		}
 	}
 	output.finish()
@@ -138,6 +187,139 @@ func TestRP2_V1_FileNeverExceedsItsLimit(t *testing.T) {
 		t.Errorf("the client got %d bytes, changed or out of order; expected the %d the CGI wrote", len(client.received()), written.Len())
 	}
 	checkCGIOutputsEnded(t)
+	if left := cgiOutputTempFiles(t, temp); len(left) != 0 {
+		t.Errorf("temporary files left after the response: %v", left)
+	}
+}
+
+// v2.4.2: the output waits in temporary files of an eighth of the limit of a response each, and one that its client
+// has taken whole is removed, and given back, at once: what was sent never takes more than one of them. The single
+// file was emptied only once its client had taken all of it, so with a client almost as fast as its CGI it held, on
+// disk and in the budgets, everything already sent, up to the limit of the response, where the CGI then waited.
+func TestRP3_SentOutputReleased(t *testing.T) {
+	temp := withCGIOutputTemp(t)
+	withCGIOutputLimits(t, cgiOutputLimitSet{memory: 16 << 10, budget: 64 << 20, fileMax: 1 << 20, fileBudget: 1 << 30}) // Files of 128 KiB
+	client := &tokenClientWriter{header: customNetHttp.Header{}, gate: make(chan struct{})}
+	output := newCGIOutput(client, "192.0.2.41", nil)
+	var opened sync.Once
+	end := func() { // All of it through to the client, and the response ended (also when the test fails)
+		opened.Do(func() { close(client.gate) })
+		output.finish()
+	}
+	t.Cleanup(end)
+	received := func() int64 {
+		client.mutex.Lock()
+		defer client.mutex.Unlock()
+		return int64(client.got.Len())
+	}
+	var written bytes.Buffer
+	chunk := make([]byte, 16<<10)
+	for i := 0; i < 160; i++ {
+		fillChunk(chunk, i)
+		if _, err := output.Write(chunk); err != nil {
+			t.Fatal(err)
+		}
+		written.Write(chunk)
+		if i%5 == 4 { // The client takes two writes of the sender (64 KiB at most) every five of the CGI (80 KiB)
+			for range 2 {
+				select {
+				case client.gate <- struct{}{}:
+				case <-time.After(5 * time.Second):
+					t.Fatal("the sender doesn't write to its client")
+				}
+			}
+		}
+		got := received() // First what the client got, and then what the files take: both only grow
+		files := shareOf("192.0.2.41").files
+		if limit := int64(written.Len()) - got + 128<<10 + 16<<10; files > limit {
+			t.Errorf("after %d KiB written and %d KiB sent: the temporary files take %d KiB; expected %d KiB at most (what wasn't sent, and one file)", written.Len()>>10, got>>10, files>>10, limit>>10)
+			break
+		}
+	}
+	for deadline := time.Now().Add(5 * time.Second); received() < int64(written.Len()); { // The client takes the rest
+		if time.Now().After(deadline) {
+			t.Fatalf("the client got %d of %d bytes: the sender doesn't write the rest", received(), written.Len())
+		}
+		select {
+		case client.gate <- struct{}{}: // One more write of the sender
+		case <-time.After(10 * time.Millisecond): // Or the client is still taking the last one
+		}
+	}
+	if !eventually(3*time.Second, func() bool { return shareOf("192.0.2.41").files == 0 }) {
+		t.Errorf("with all of it sent, the temporary files take %d bytes; expected none", shareOf("192.0.2.41").files)
+	}
+	if left := cgiOutputTempFiles(t, temp); len(left) != 1 || left[0] != 0 {
+		t.Errorf("with all of it sent, temporary files of %v bytes; expected one, empty, to go on with", left)
+	}
+	end()
+	if !bytes.Equal(client.received(), written.Bytes()) {
+		t.Errorf("the client got %d bytes, changed or out of order; expected the %d the CGI wrote", len(client.received()), written.Len())
+	}
+	checkCGIOutputsEnded(t)
+	if left := cgiOutputTempFiles(t, temp); len(left) != 0 {
+		t.Errorf("temporary files left after the response: %v", left)
+	}
+}
+
+// v2.4.2: when a new temporary file can't be created, the output goes on in the one it has, as a single file, and the
+// CGI doesn't wait for its client for that.
+func TestRP3_OutputGoesOnWhenNoNewFile(t *testing.T) {
+	temp := withCGIOutputTemp(t)
+	withCGIOutputLimits(t, cgiOutputLimitSet{memory: 16 << 10, budget: 64 << 20, fileMax: 1 << 20, fileBudget: 1 << 30}) // Files of 128 KiB
+	gate := make(chan struct{})
+	client := newTestClientWriter(gate, 0) // It takes nothing until the gate opens
+	output := newCGIOutput(client, "192.0.2.42", nil)
+	var opened sync.Once
+	open := func() { opened.Do(func() { close(gate) }) }
+	t.Cleanup(func() { open(); output.finish() }) // Also when the test fails
+	var written bytes.Buffer
+	chunk := make([]byte, 16<<10)
+	write := func(i int) error {
+		fillChunk(chunk, i)
+		done := make(chan error, 1)
+		go func() { _, err := output.Write(chunk); done <- err }()
+		select {
+		case err := <-done:
+			if err == nil {
+				written.Write(chunk)
+			}
+			return err
+		case <-time.After(3 * time.Second):
+			open()
+			<-done
+			return errors.New("the CGI waits for its client")
+		}
+	}
+	for i := 0; i < 9; i++ { // One in memory and 128 KiB in the first file, full
+		if err := write(i); err != nil {
+			t.Fatal(err)
+		}
+	}
+	missing := filepath.Join(temp, "missing")
+	for _, name := range []string{"TMPDIR", "TEMP", "TMP"} {
+		t.Setenv(name, missing)
+	}
+	if err := write(9); err != nil {
+		t.Fatalf("a write that needs a new temporary file, which can't be created: %v; expected it in the file there is", err)
+	}
+	output.mutex.Lock()
+	var sizes []int64
+	for _, segment := range output.segments {
+		sizes = append(sizes, segment.written)
+	}
+	output.mutex.Unlock()
+	if len(sizes) != 1 || sizes[0] != 144<<10 {
+		t.Errorf("temporary files of %v bytes; expected one of 144 KiB", sizes)
+	}
+	open()
+	output.finish()
+	if !bytes.Equal(client.received(), written.Bytes()) {
+		t.Errorf("the client got %d bytes, changed or out of order; expected the %d the CGI wrote", len(client.received()), written.Len())
+	}
+	checkCGIOutputsEnded(t)
+	if left := cgiOutputTempFiles(t, temp); len(left) != 0 {
+		t.Errorf("temporary files left after the response: %v", left)
+	}
 }
 
 func TestRP2_V17_MemoryOfEachResponse(t *testing.T) {
@@ -178,6 +360,9 @@ func TestRP2_V17_MemoryOfEachResponse(t *testing.T) {
 }
 
 func TestRP2_V6_ClientShares(t *testing.T) {
+	previousCGP := cgiProcesses.Load()
+	cgiProcesses.Store(16) // Four CGIs may wait per client: the three below
+	t.Cleanup(func() { cgiProcesses.Store(previousCGP) })
 	// A client may take a quarter of each budget: 64 KiB of memory and 512 KiB of files here.
 	withCGIOutputLimits(t, cgiOutputLimitSet{memory: 64 << 10, budget: 256 << 10, fileMax: 1 << 20, fileBudget: 2 << 20})
 	gate := make(chan struct{})
@@ -298,26 +483,26 @@ func TestRP2_V6_WaitingLimit(t *testing.T) {
 }
 
 // End to end: the CGIs of one client that reads nothing can't hold every slot; another client, and other requests,
-// get theirs.
+// get theirs. The other client is a server of the same Turbo that sees its connections as coming from 127.0.0.2:
+// macOS has no 127.0.0.2 to connect from.
 func TestRP2_V6_ClientCannotHoldAllSlots(t *testing.T) {
 	slowClientsSetup(t)
 	base := startServer(t)
+	other, _ := startServerAs(t, func() net.IP { return net.ParseIP("127.0.0.2") })
 	previousCGP := cgiProcesses.Load()
 	cgiProcesses.Store(4) // One CGI may wait per client
 	t.Cleanup(func() { cgiProcesses.Store(previousCGP) })
 	withCGIOutputLimits(t, cgiOutputLimitSet{memory: 64 << 10, budget: 64 << 20}) // No temporary file
-	withGlobalLock(func() { setTimeLimits(func(l *customNetHttp.Timeouts) { l.WT = 10 * time.Second }) })
-	address := strings.TrimPrefix(base, "http://")
+	withWT(t, 10*time.Second)
 	var connections []net.Conn
 	t.Cleanup(func() {
 		for _, conn := range connections {
 			conn.Close()
 		}
 	})
-	open := func(local string) {
+	open := func(server string) {
 		t.Helper()
-		dialer := net.Dialer{LocalAddr: &net.TCPAddr{IP: net.ParseIP(local)}}
-		conn, err := dialer.Dial("tcp", address)
+		conn, err := net.Dial("tcp", strings.TrimPrefix(server, "http://"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -326,15 +511,15 @@ func TestRP2_V6_ClientCannotHoldAllSlots(t *testing.T) {
 		fmt.Fprintf(conn, "GET /x.cgi?big=%d HTTP/1.1\r\nHost: localhost\r\n\r\n", 16<<20) // And never read
 	}
 	for i := 0; i < 3; i++ {
-		open("127.0.0.1")
+		open(base)
 	}
 	time.Sleep(time.Second)
 	if !eventually(5*time.Second, func() bool { return cgiSlotsRunning() == 1 && shareOf("127.0.0.1").waiting == 1 }) {
 		t.Fatalf("three CGIs of a client that reads nothing: %d slots taken; expected 1 (the others cut)", cgiSlotsRunning())
 	}
-	open("127.0.0.2")
-	if !eventually(5*time.Second, func() bool { return cgiSlotsRunning() == 2 }) {
-		t.Errorf("another client's CGI: %d slots taken; expected 2", cgiSlotsRunning())
+	open(other)
+	if !eventually(5*time.Second, func() bool { return cgiSlotsRunning() == 2 && shareOf("127.0.0.2").waiting == 1 }) {
+		t.Errorf("another client's CGI: %d slots taken, %d of them waiting for that client; expected 2 and 1", cgiSlotsRunning(), shareOf("127.0.0.2").waiting)
 	}
 	if code, body, err := get(base, "/x.cgi", nil); err != nil || code != 200 || !strings.Contains(body, "SCRIPT_FILENAME=") {
 		t.Errorf("another request meanwhile: %d %.80q %v; expected its CGI to run", code, body, err)
@@ -346,7 +531,7 @@ func TestRP2_V6_ClientCannotHoldAllSlots(t *testing.T) {
 func TestRP2_V18_CutResponseFreesItsSlot(t *testing.T) {
 	slowClientsSetup(t)
 	base := startServer(t)
-	withGlobalLock(func() { setTimeLimits(func(l *customNetHttp.Timeouts) { l.WT = time.Second }) })
+	withWT(t, time.Second)
 	conn, err := net.Dial("tcp", strings.TrimPrefix(base, "http://"))
 	if err != nil {
 		t.Fatal(err)
@@ -361,5 +546,149 @@ func TestRP2_V18_CutResponseFreesItsSlot(t *testing.T) {
 	// Its CGI ends at WT, 1 s after it started; the sender gives up on the client at WT + 2 s.
 	if !eventually(1600*time.Millisecond, func() bool { return cgiSlotsRunning() == 0 }) {
 		t.Errorf("%v after the CGI started: the slot of a response cut at WT (1 s) is still taken; expected it free when its CGI ended", time.Since(start).Round(100*time.Millisecond))
+	}
+}
+
+// tokenClientWriter is a client's ResponseWriter that lets one write through for each token sent on gate.
+type tokenClientWriter struct {
+	header customNetHttp.Header
+	gate   chan struct{}
+	mutex  sync.Mutex
+	got    bytes.Buffer
+}
+
+func (w *tokenClientWriter) Header() customNetHttp.Header { return w.header }
+func (w *tokenClientWriter) WriteHeader(int)              {}
+func (w *tokenClientWriter) Write(p []byte) (int, error) {
+	<-w.gate
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+	return w.got.Write(p)
+}
+
+func (w *tokenClientWriter) received() []byte {
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+	return bytes.Clone(w.got.Bytes())
+}
+
+// V6, after the independent review: a response whose CGI has ended no longer counts among those that wait for their
+// client, while the rest of its output reaches it. It counted until all of it was sent, and the next response of
+// that client that had to wait was cut, although no CGI of that client waited.
+func TestRP2_V6_EndedCGINoLongerWaits(t *testing.T) {
+	previousCGP := cgiProcesses.Load()
+	cgiProcesses.Store(4) // One CGI may wait per client
+	t.Cleanup(func() { cgiProcesses.Store(previousCGP) })
+	withCGIOutputLimits(t, cgiOutputLimitSet{memory: 16 << 10, budget: 1 << 20}) // No temporary file
+	gateA := make(chan struct{})
+	a := newCGIOutput(&tokenClientWriter{header: customNetHttp.Header{}, gate: gateA}, "192.0.2.77", nil)
+	chunk := make([]byte, 16<<10)
+	if _, err := a.Write(chunk); err != nil { // The sender takes it and waits for the client
+		t.Fatal(err)
+	}
+	wrote := make(chan error, 1)
+	go func() { _, err := a.Write(chunk); wrote <- err }() // Its CGI has to wait for the client
+	if !eventually(3*time.Second, func() bool { return waitsForClient(a) }) {
+		t.Fatal("the CGI of A never waited")
+	}
+	gateA <- struct{}{} // The client takes the first chunk: the CGI of A writes its last one and ends
+	if err := <-wrote; err != nil {
+		t.Fatal(err)
+	}
+	finished := make(chan struct{})
+	go func() { a.finish(); close(finished) }() // As dynamic does once the CGI ended: the rest waits for the client
+	if !eventually(3*time.Second, func() bool { return shareOf("192.0.2.77").waiting == 0 }) {
+		t.Errorf("the CGI of A ended, and its client still has %d CGIs waiting", shareOf("192.0.2.77").waiting)
+	}
+	gateB := make(chan struct{})
+	b := newCGIOutput(&tokenClientWriter{header: customNetHttp.Header{}, gate: gateB}, "192.0.2.77", func() {})
+	if _, err := b.Write(chunk); err != nil {
+		t.Fatal(err)
+	}
+	errB := make(chan error, 1)
+	go func() { _, err := b.Write(chunk); errB <- err }()
+	answered := false
+	select {
+	case err := <-errB:
+		answered = true
+		if errors.Is(err, errCGIOutputWaitLimit) {
+			t.Errorf("B was cut (%v) although no CGI of its client waits", err)
+		}
+	case <-time.After(500 * time.Millisecond): // B waits for its client
+	}
+	close(gateA)
+	close(gateB)
+	<-finished
+	if !answered {
+		<-errB
+	}
+	b.finish()
+	checkCGIOutputsEnded(t)
+}
+
+// V6, after the independent review: when the budget is full because of other clients (here, as if they had filled
+// it), a client whose responses are within their limits and its share goes on as it reads, a chunk at a time, and
+// none of its responses is cut, however many there are. Every response that had to wait counted, and those of a
+// client that read at once were cut beyond a quarter of the slots.
+func TestRP2_V6_FullBudgetCutsNoOne(t *testing.T) {
+	previousCGP := cgiProcesses.Load()
+	cgiProcesses.Store(4) // One CGI may wait per client
+	t.Cleanup(func() { cgiProcesses.Store(previousCGP) })
+	withCGIOutputLimits(t, cgiOutputLimitSet{memory: 64 << 10, budget: 1 << 20}) // No temporary file
+	cgiOutputSharesMutex.Lock()
+	cgiOutputInUse.Add(1 << 20) // Taken by other clients
+	cgiOutputSharesMutex.Unlock()
+	t.Cleanup(func() {
+		cgiOutputSharesMutex.Lock()
+		cgiOutputInUse.Add(-1 << 20)
+		cgiOutputSharesMutex.Unlock()
+	})
+	chunk := make([]byte, 16<<10)
+	results := make(chan error, 3)
+	var outputs []*cgiOutput
+	for i := 0; i < 3; i++ { // More than the one CGI that may wait for this client
+		output := newCGIOutput(newTestClientWriter(nil, 2*time.Millisecond), "192.0.2.88", func() {})
+		outputs = append(outputs, output)
+		go func() {
+			var err error
+			for j := 0; j < 8 && err == nil; j++ {
+				_, err = output.Write(chunk)
+			}
+			results <- err
+		}()
+	}
+	for i := 0; i < 3; i++ {
+		if err := <-results; err != nil {
+			t.Errorf("a response of a client that reads at once, with the budget full because of others: %v", err)
+		}
+	}
+	for _, output := range outputs {
+		output.finish()
+	}
+	if !eventually(5*time.Second, func() bool { return cgiOutputInUse.Load() == 1<<20 }) {
+		t.Errorf("after the responses: %d bytes counted in memory; expected only the others'", cgiOutputInUse.Load()-1<<20)
+	}
+}
+
+// V18, after the independent review: a CGI that waits in Write for a client that reads nothing when WT runs out is
+// ended by P12, and its slot is freed then; it stayed taken until the sender's write deadline, WT + 2 s.
+func TestRP2_V18_CGIEndedWhileWaitingFreesItsSlot(t *testing.T) {
+	slowClientsSetup(t)
+	base := startServer(t)
+	withCGIOutputLimits(t, cgiOutputLimitSet{memory: 64 << 10, budget: 64 << 20}) // No temporary file: the CGI waits
+	withWT(t, time.Second)
+	conn, err := net.Dial("tcp", strings.TrimPrefix(base, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.(*net.TCPConn).SetReadBuffer(4096)
+	fmt.Fprintf(conn, "GET /x.cgi?big=%d HTTP/1.1\r\nHost: localhost\r\n\r\n", 64<<20) // And never read
+	if !eventually(3*time.Second, func() bool { return cgiSlotsRunning() == 1 }) {
+		t.Fatal("the CGI didn't start")
+	}
+	start := time.Now()
+	if !eventually(1600*time.Millisecond, func() bool { return cgiSlotsRunning() == 0 }) {
+		t.Errorf("%v after the CGI started: the slot of a CGI ended at WT (1 s) while it waited for its client is still taken", time.Since(start).Round(100*time.Millisecond))
 	}
 }

@@ -767,6 +767,45 @@ func TestRP_M03_MalformedSiteSectionsInvalid(t *testing.T) {
 	}
 }
 
+// v2.4.2: a list written directly in a site, outside its "" section (easy to write by hand), makes the file invalid,
+// with a message that points at the site and says where lists go: Turbo doesn't start with it, and a reload keeps the
+// configuration in use. Before, it was skipped without a word: the site had no preprocessors, its scripts served as
+// text.
+func TestRP3_ListOutsideSiteSectionInvalid(t *testing.T) {
+	dir := initForTest(t)
+	base := startServer(t)
+	if err := os.WriteFile(dir+"localhost/@/script.cgi", []byte("SOURCE OF THE SCRIPT"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	loadConfig(t, dir, `{"^":{"v":"2"},"localhost":{"":{"?":{"cgi":"`+toolPath("cgiecho")+`"},"-":{"index.html":"1"}}}}`)
+	for _, site := range []string{`{"?":{"cgi":"` + toolPath("cgiecho") + `"}}`, `{"":{},"-":{"index.html":"1"}}`, `{"":{},"www":{},"&":{}}`} {
+		broken := "{\n\"^\":{\"v\":\"2\"},\n\"localhost\":" + site + "\n}\n"
+		if err := os.WriteFile(dir+"turbo.config", []byte(broken), 0600); err != nil {
+			t.Fatal(err)
+		}
+		withGlobalLock(func() { configFileStamp = configStamp{kind: stampFile, modTime: 3} }) // Changed since it was read
+		err := updateSettings(true)
+		if !errors.As(err, &configSiteError{}) {
+			t.Errorf("reload with the site %s: %v; expected a site section that can't be used", site, err)
+		} else if message := configErrorMessage(err, false); !strings.Contains(message, `inside its "" section`) || !strings.Contains(message, "Line 3") {
+			t.Errorf("the message for the site %s doesn't point at it or say where lists go:\n%s", site, message)
+		}
+		globalMutex.RLock()
+		preprocessor := preprocessors["localhost"]["cgi"]
+		globalMutex.RUnlock()
+		if preprocessor == "" {
+			t.Errorf("after the reload with the site %s: localhost without its preprocessor; expected the configuration in use", site)
+		}
+		if _, body, err := get(base, "/script.cgi", nil); err != nil || strings.Contains(body, "SOURCE OF THE SCRIPT") {
+			t.Errorf("/script.cgi after the reload with the site %s: %.60q %v; expected the output of its preprocessor", site, body, err)
+		}
+	}
+	resetTestState(dir) // A start with the last one
+	if err := updateSettings(false); !errors.As(err, &configSiteError{}) {
+		t.Errorf("start with a list outside the site's section: %v; expected a site section that can't be used", err)
+	}
+}
+
 // Production review, M-03: a preprocessor of turbo.config with a control character is kept, marked, and its extension
 // answers 500 (before, the entry was dropped and the files of the extension were served as text).
 func TestRP_M03_PreprocessorWithControlCharsAnswers500(t *testing.T) {

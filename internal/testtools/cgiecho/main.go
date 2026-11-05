@@ -6,8 +6,8 @@
 // running that long after writing, with its output open. With raw=1 it
 // only writes, as is, the content of the requested script (SCRIPT_FILENAME):
 // any CGI response, headers included. With big=<bytes> it responds with
-// that many bytes, in chunks (a large streaming output; the manual stability
-// test uses it, not the test suite). With child=<ms> it leaves a child
+// that many bytes, in chunks (a large streaming output, for the tests of the
+// CGIs' output and the manual stability test). With child=<ms> it leaves a child
 // that inherits its output, waits that long and creates the file childmark=<path>;
 // with childstdin=<ms>, one that inherits its input (not its output). With
 // procstatus=1 it writes the Cap* lines of /proc/self/status (Linux). With

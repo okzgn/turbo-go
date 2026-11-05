@@ -165,17 +165,37 @@ func FuzzCGIResponse(f *testing.F) {
 		f.Add([]byte(seed))
 	}
 	dir := cgiSite(f)
-	base, errLog := startServerLog(f)
-	addr := strings.TrimPrefix(base, "http://")
 	script := dir + "localhost/@/x.cgi"
-	var client atomic.Uint32
 	// Each input comes from another loopback address: at fuzzing speed, one address would be blocked by the
 	// per-IP limit (429, and then its new connections closed). They go round 65 536 of them: past
 	// ipReferenceLimit addresses, which a worker reaches in a long run, the new ones share the limiter's
 	// overflow entry and get the 429 too (the cleaning that frees the entries doesn't run in the tests).
-	request := func(t *testing.T, path string) (*http.Response, string) {
+	// The client connects from each of them (on Windows, that also spreads the ports in TIME_WAIT) where the
+	// system has them; elsewhere (macOS has only 127.0.0.1), the server sees each connection as coming from one.
+	var client atomic.Uint32
+	nextAddress := func() net.IP {
 		n := client.Add(1)
-		conn := dialRetrying(t, &net.Dialer{LocalAddr: &net.TCPAddr{IP: net.IPv4(127, 1, byte(n>>8), byte(n))}}, addr)
+		return net.IPv4(127, 1, byte(n>>8), byte(n))
+	}
+	aliases := false
+	if probe, err := net.Listen("tcp", "127.1.0.1:0"); err == nil {
+		probe.Close()
+		aliases = true
+	}
+	var base string
+	var errLog *syncBuffer
+	if aliases {
+		base, errLog = startServerLog(f)
+	} else {
+		base, errLog = startServerAs(f, nextAddress)
+	}
+	addr := strings.TrimPrefix(base, "http://")
+	request := func(t *testing.T, path string) (*http.Response, string) {
+		dialer := &net.Dialer{}
+		if aliases {
+			dialer.LocalAddr = &net.TCPAddr{IP: nextAddress()}
+		}
+		conn := dialRetrying(t, dialer, addr)
 		defer conn.Close()
 		conn.SetDeadline(time.Now().Add(15 * time.Second))
 		io.WriteString(conn, "GET "+path+" HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")

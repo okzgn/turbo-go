@@ -9,6 +9,7 @@ package main
 // - V12: delSite waits for a reload in progress, which could bring the site back with the defaults afterwards.
 
 import (
+	"io/fs"
 	"os"
 	"strings"
 	"sync/atomic"
@@ -68,7 +69,7 @@ func wwwScript(t *testing.T, base string) string {
 func TestRP2_V4_CreatingKeptSiteRefused(t *testing.T) {
 	dir, base, tok := keptSitesSetup(t)
 	code, body, err := post(base, "/admin:inside:addSite?s=localhost", tok)
-	if err != nil || code != 400 || !strings.Contains(body, "kept without its folder") {
+	if err != nil || code != 400 || !strings.Contains(body, "is kept, with its settings") {
 		t.Errorf("addSite of localhost, kept without its folder: %d %q %v; expected 400", code, body, err)
 	}
 	globalMutex.RLock()
@@ -108,7 +109,7 @@ func TestRP2_V4_CreatingKeptSubdomainRefused(t *testing.T) {
 	}
 	updateSettings(true)
 	code, body, err := post(base, "/admin:inside:addSubdomain?s=localhost&d=www", tok)
-	if err != nil || code != 400 || !strings.Contains(body, "kept without its folder") {
+	if err != nil || code != 400 || !strings.Contains(body, "is kept, with its settings") {
 		t.Errorf("addSubdomain of www, kept without its folder: %d %q %v; expected 400", code, body, err)
 	}
 	// The deploy ends: www comes back with its preprocessor.
@@ -134,29 +135,37 @@ func TestRP2_V5_ForgettingKeptSiteDeletesNoFolder(t *testing.T) {
 		_, www = dormantSites["localhost"]["www"]
 		return root, www
 	}
-	// www, listed as kept without its folder, has its own folder intact: forgetting it deletes nothing.
-	code, body, err := post(base, "/admin:inside:delSite?s=localhost&d=www&b=Admin", tok)
-	if err != nil || code != 200 || !strings.Contains(body, "no folder is deleted") {
-		t.Fatalf("delSite of www kept: %d %q %v", code, body, err)
+	if code, _, _ := post(base, "/admin:inside:delSite?s=localhost&d=&b=wrong-password", tok); code == 200 {
+		t.Error("delSite without the current password answered 200")
 	}
-	if !fileExists(dir + "localhost/www/@/script.cgi") {
-		t.Error("forgetting www, kept without its folder, deleted its folder")
-	}
-	if root, www := listed(); !root || www {
-		t.Errorf("after forgetting www: kept localhost %v, www %v; expected only localhost", root, www)
-	}
-	// localhost: the files of its folder (outside @, its subdomains, its certificates) stay.
-	code, body, err = post(base, "/admin:inside:delSite?s=localhost&d=&b=Admin", tok)
-	if err != nil || code != 200 || !strings.Contains(body, "no folder is deleted") {
-		t.Fatalf("delSite of localhost kept: %d %q %v", code, body, err)
-	}
-	for _, name := range []string{"localhost/outside-public.txt", "localhost/@.away/script.cgi", "localhost/www/@/script.cgi"} {
-		if !fileExists(dir + name) {
-			t.Errorf("forgetting localhost, kept without its folder, deleted %s", name)
+	// While their folders are there (only the @ of localhost is missing), the settings stay: forgotten, the folders
+	// would come back as new sites with the defaults, their scripts served as text.
+	for _, d := range []string{"www", ""} {
+		code, body, err := post(base, "/admin:inside:delSite?s=localhost&d="+d+"&b=Admin", tok)
+		if err != nil || code != 400 || !strings.Contains(body, "still has its folder") {
+			t.Errorf("forgetting %q while its folder is there: %d %q %v; expected 400", d, code, body, err)
 		}
+	}
+	if root, www := listed(); !root || !www {
+		t.Fatalf("after the refusals: kept localhost %v, www %v; expected both", root, www)
+	}
+	// The folder of localhost goes (moved out of the sites directory): forgetting localhost forgets www too, whose
+	// folder went with it, and deletes nothing.
+	away := t.TempDir() + "/localhost"
+	if err := os.Rename(dir+"localhost", away); err != nil {
+		t.Fatal(err)
+	}
+	code, body, err := post(base, "/admin:inside:delSite?s=localhost&d=&b=Admin", tok)
+	if err != nil || code != 200 || !strings.Contains(body, "no folder is deleted") {
+		t.Fatalf("forgetting localhost without its folder: %d %q %v", code, body, err)
 	}
 	if root, www := listed(); root || www {
 		t.Errorf("after forgetting localhost: kept localhost %v, www %v; expected none", root, www)
+	}
+	for _, name := range []string{"/outside-public.txt", "/@.away/script.cgi", "/www/@/script.cgi"} {
+		if !fileExists(away + name) {
+			t.Errorf("forgetting localhost deleted %s", name)
+		}
 	}
 	if !saveDefaultConfig() {
 		t.Fatal("saving failed")
@@ -164,9 +173,63 @@ func TestRP2_V5_ForgettingKeptSiteDeletesNoFolder(t *testing.T) {
 	if _, saved := savedConfig(t, dir)["localhost"]; saved {
 		t.Error("localhost, forgotten from the panel, is still in turbo.config")
 	}
-	// The password is still needed.
-	if code, _, _ := post(base, "/admin:inside:delSite?s=localhost&d=&b=wrong-password", tok); code == 200 {
-		t.Error("delSite without the current password answered 200")
+}
+
+// A subdomain whose own folder is gone is forgotten alone: its site stays as it is.
+func TestRP2_V5_ForgettingKeptSubdomain(t *testing.T) {
+	dir := initForTest(t)
+	base := startServer(t)
+	tok := login(t, base)
+	configureLocalhost(t, dir)
+	if err := os.MkdirAll(dir+"localhost/www/@", 0755); err != nil {
+		t.Fatal(err)
+	}
+	updateSettings(true)
+	if err := os.RemoveAll(dir + "localhost/www"); err != nil {
+		t.Fatal(err)
+	}
+	updateSettings(true)
+	code, body, err := post(base, "/admin:inside:delSite?s=localhost&d=www&b=Admin", tok)
+	if err != nil || code != 200 {
+		t.Fatalf("forgetting www without its folder: %d %q %v", code, body, err)
+	}
+	globalMutex.RLock()
+	_, wwwKept := dormantSites["localhost"]["www"]
+	globalMutex.RUnlock()
+	if wwwKept {
+		t.Error("www is still kept")
+	}
+	checkLocalhostKept(t, base, "after forgetting its subdomain")
+}
+
+// A site kept without its folder isn't forgotten while its folder can't be looked at (permissions, I/O): it may be
+// there. Its settings stay until it can.
+func TestRP2_V5_ForgettingNeedsAFolderThatCanBeLookedAt(t *testing.T) {
+	dir := initForTest(t)
+	base := startServer(t)
+	tok := login(t, base)
+	configureLocalhost(t, dir)
+	if err := os.Rename(dir+"localhost", t.TempDir()+"/localhost"); err != nil {
+		t.Fatal(err)
+	}
+	updateSettings(true) // Kept without its folder
+	previous := siteDirStat
+	siteDirStat = func(name string) (os.FileInfo, error) {
+		if strings.Contains(name, "localhost") {
+			return nil, &fs.PathError{Op: "stat", Path: name, Err: fs.ErrPermission}
+		}
+		return previous(name)
+	}
+	t.Cleanup(func() { siteDirStat = previous })
+	code, body, err := post(base, "/admin:inside:delSite?s=localhost&d=&b=Admin", tok)
+	if err != nil || code != 400 || !strings.Contains(body, "can't be looked at") {
+		t.Errorf("forgetting localhost while its folder can't be looked at: %d %q %v; expected 400", code, body, err)
+	}
+	globalMutex.RLock()
+	_, kept := dormantSites["localhost"][""]
+	globalMutex.RUnlock()
+	if !kept {
+		t.Error("the settings of localhost were forgotten")
 	}
 }
 
@@ -216,5 +279,40 @@ func TestRP2_V12_DelSiteWaitsForReload(t *testing.T) {
 	globalMutex.RUnlock()
 	if active || kept || fileExists(dir+"other.test") {
 		t.Errorf("after delSite during a reload: active %v, kept %v, folder there %v; expected the site gone", active, kept, fileExists(dir+"other.test"))
+	}
+}
+
+// V12, after the independent review: the folder of a deleted site is put aside while the reloads are held, and
+// removed once they aren't: deleting a large site held every reload, and Turbo's stop, for as long as it took.
+func TestRP2_V12_FolderRemovedWithoutHoldingReloads(t *testing.T) {
+	dir := initForTest(t)
+	if err := os.MkdirAll(dir+"other.test/@", 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir+"other.test/@/index.html", []byte("other"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	updateSettings(true)
+	deleted, message, moved := deleteSiteFromPanel("other.test", "")
+	if !deleted || moved == "" {
+		t.Fatalf("deleteSiteFromPanel: %v %q, folder put aside in %q", deleted, message, moved)
+	}
+	if !settingsUpdateMutex.TryLock() {
+		t.Fatal("the reloads are still held while the folder is removed")
+	}
+	settingsUpdateMutex.Unlock()
+	if fileExists(dir+"other.test") || !fileExists(moved+"/@/index.html") {
+		t.Errorf("the folder of other.test: still there %v, put aside %v", fileExists(dir+"other.test"), fileExists(moved+"/@/index.html"))
+	}
+	updateSettings(true) // A look at the disk doesn't take the folder put aside for a site
+	globalMutex.RLock()
+	for name := range sitesMap {
+		if strings.Contains(name, "turbo-deleted") {
+			t.Errorf("the folder put aside became the site %s", name)
+		}
+	}
+	globalMutex.RUnlock()
+	if err := os.RemoveAll(moved); err != nil {
+		t.Fatal(err)
 	}
 }
