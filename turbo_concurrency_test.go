@@ -126,7 +126,7 @@ func TestR_RealisticRace(t *testing.T) {
 			default:
 			}
 			post(base, "/admin:inside:setRT?b="+password+"&a="+strconv.Itoa(5+i%3)+"s", tok)
-			post(base, "/admin:inside:addHeader?s=localhost&d=&a=X-T&b=v"+strconv.Itoa(i), tok)
+			post(base, "/admin:inside:addHeader?s=localhost&d=&a=X-T&c=Admin&b=v"+strconv.Itoa(i), tok)
 			post(base, "/admin:inside:sites", tok)
 			// Settings that change the credentials, the directory and the error
 			// templates while the server reads them (Server header, Error, ErrorD).

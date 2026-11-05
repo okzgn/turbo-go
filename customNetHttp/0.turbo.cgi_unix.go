@@ -27,7 +27,9 @@ package customNetHttp
 // The process group of a CGI on Unix (turbo:P12, see 0.turbo.cgi.go).
 
 import (
+	"os"
 	"os/exec"
+	"sync"
 	"sync/atomic"
 	"syscall"
 )
@@ -35,7 +37,9 @@ import (
 // turboCGIGroup is a CGI's own process group: the process leads it and the
 // ones it leaves running inherit it.
 type turboCGIGroup struct {
-	pid atomic.Int64
+	pid    atomic.Int64
+	mutex  sync.Mutex
+	reaped bool // The leader was reaped once nothing kills the group any more (Linux): its ID may be another's
 }
 
 // turboCGIPrepare prepares cmd to go in a process group of its own, which
@@ -47,7 +51,7 @@ func turboCGIPrepare(cmd *exec.Cmd) *turboCGIGroup {
 	}
 	cmd.SysProcAttr.Setpgid = true
 	cmd.Cancel = func() error { // cmd.Process already exists when exec calls it
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		return group.signal(cmd.Process.Pid)
 	}
 	return group
 }
@@ -57,12 +61,38 @@ func (g *turboCGIGroup) started(cmd *exec.Cmd) {
 	g.pid.Store(int64(cmd.Process.Pid))
 }
 
+// signal kills the group led by pid, unless its leader was reaped already:
+// then its ID may name another process's group.
+func (g *turboCGIGroup) signal(pid int) error {
+	g.mutex.Lock()
+	defer g.mutex.Unlock()
+	if g.reaped {
+		return os.ErrProcessDone
+	}
+	return syscall.Kill(-pid, syscall.SIGKILL)
+}
+
 // kill kills the whole group.
 func (g *turboCGIGroup) kill() {
 	if pid := int(g.pid.Load()); pid > 0 {
-		syscall.Kill(-pid, syscall.SIGKILL)
+		_ = g.signal(pid)
 	}
 }
 
-// release does nothing on Unix: the group holds nothing.
-func (g *turboCGIGroup) release() {}
+// wait waits for the leader to end (turboCGIWaitExit).
+func (g *turboCGIGroup) wait(cmd *exec.Cmd) {
+	turboCGIWaitExit(cmd)
+}
+
+// release ends the group's watch: on Linux, it reaps the leader, which
+// turboCGIWaitExit left as a zombie, and from then on the group is never
+// killed again.
+func (g *turboCGIGroup) release(cmd *exec.Cmd) {
+	if !turboCGIKeepsLeader {
+		return
+	}
+	g.mutex.Lock()
+	g.reaped = true // Before reaping it: a kill after it would reach whoever gets its ID
+	g.mutex.Unlock()
+	cmd.Wait()
+}

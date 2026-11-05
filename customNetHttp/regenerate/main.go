@@ -15,6 +15,9 @@
 //	                                               UPSTREAM (it doesn't downgrade
 //	                                               without -allow-downgrade)
 //
+// Except with -output, the "go" line of go.mod (-gomod) is the version of
+// UPSTREAM too: -check checks it, and the other modes write it.
+//
 // -output only writes to an empty directory or to one that was already an
 // output of this tool (it marks it with .regenerate), and only deletes the
 // files it generated then.
@@ -113,12 +116,49 @@ func main() {
 	check := flag.Bool("check", false, "don't write: check that -dir matches what would be generated")
 	update := flag.Bool("update", false, "regenerate with the Go version in use even if UPSTREAM says another, and record it")
 	allowDowngrade := flag.Bool("allow-downgrade", false, "with -update, accept a Go version earlier than the one of UPSTREAM")
+	goMod := flag.String("gomod", "go.mod", `the go.mod whose "go" line is the version of UPSTREAM ("": none)`)
 	flag.Parse()
 
-	if err := run(*dir, *output, *nPatches, *check, *update, *allowDowngrade, log); err != nil {
+	err := run(*dir, *output, *nPatches, *check, *update, *allowDowngrade, log)
+	if err == nil && *goMod != "" && *output == "" {
+		err = goModVersion(*goMod, *dir, *check)
+	}
+	if err != nil {
 		log("regenerate: %v", err)
 		os.Exit(1)
 	}
+}
+
+// goModVersion makes the "go" line of goMod the Go version of the UPSTREAM of dir ("go1.26.10": "go 1.26.10"), or,
+// with check, reports that it isn't. With "go 1.26", a build from the source with an older Go 1.26.x mixed the
+// net/http of customNetHttp with that Go's own crypto/tls, net/url and the rest, with the vulnerabilities fixed
+// since; with the version, an older Go downloads this one (GOTOOLCHAIN=auto, the default) or refuses to build.
+func goModVersion(goMod string, dir string, check bool) error {
+	upstream, err := os.ReadFile(filepath.Join(dir, "UPSTREAM"))
+	if err != nil {
+		return err
+	}
+	want := "go " + strings.TrimPrefix(strings.TrimSpace(strings.SplitN(normalize(string(upstream)), "\n", 2)[0]), "go")
+	data, err := os.ReadFile(goMod) // #nosec G304 -- the go.mod named by the one who runs the tool
+	if err != nil {
+		return err
+	}
+	lines := strings.Split(string(data), "\n")
+	for i, line := range lines {
+		content := strings.TrimSuffix(line, "\r")
+		if !strings.HasPrefix(strings.TrimSpace(content), "go ") {
+			continue
+		}
+		if strings.TrimSpace(content) == want {
+			return nil
+		}
+		if check {
+			return fmt.Errorf("%s says %q and UPSTREAM is %s: it must say %q (regenerate writes it)", goMod, strings.TrimSpace(content), strings.TrimPrefix(want, "go "), want)
+		}
+		lines[i] = want + strings.TrimPrefix(line, content) // Its line break as it was
+		return os.WriteFile(goMod, []byte(strings.Join(lines, "\n")), 0o644)
+	}
+	return fmt.Errorf("%s has no \"go\" line", goMod)
 }
 
 func run(dir, output string, nPatches int, check, update, allowDowngrade bool, log func(string, ...any)) error {

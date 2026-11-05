@@ -17,7 +17,7 @@ func TestN23_DeleteRootRemovesSubdomains(t *testing.T) {
 		"/admin:inside:addAlias?s=root.test&d=sub&a=alias-sub.test",
 		"/admin:inside:addAlias?s=root.test&d=&a=alias-root.test",
 		"/admin:inside:addPreprocessor?s=root.test&d=sub&a=php&c=Admin&b=" + toolPath("cgiecho"),
-		"/admin:inside:addHeader?s=root.test&d=sub&a=X-Sub&b=1",
+		"/admin:inside:addHeader?s=root.test&d=sub&a=X-Sub&b=1&c=Admin",
 	} {
 		if code, body, err := post(base, step, tok); err != nil || code != 200 {
 			t.Fatalf("%s: %d %q %v", step, code, body, err)

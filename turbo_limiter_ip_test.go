@@ -145,15 +145,16 @@ func TestN26_LoginFailuresIPv6By64(t *testing.T) {
 	initForTest(t)
 	for i := 1; i <= 5; i++ {
 		ip := "2001:db8:5:6::" + strconv.Itoa(i)
-		if retry := startLoginAttempt(ip); retry > 0 {
+		attempt, retry := startLoginAttempt(ip)
+		if retry > 0 {
 			t.Fatalf("attempt %d blocked", i)
 		}
-		finishLoginAttempt(ip, true)
+		finishLoginAttempt(attempt, true)
 	}
-	if startLoginAttempt("2001:db8:5:6::99") == 0 {
+	if _, retry := startLoginAttempt("2001:db8:5:6::99"); retry == 0 {
 		t.Error("after 5 failures from the same /64, another of its addresses is not blocked")
 	}
-	if startLoginAttempt("2001:db8:5:7::1") != 0 {
+	if _, retry := startLoginAttempt("2001:db8:5:7::1"); retry != 0 {
 		t.Error("another /64 blocked")
 	}
 }

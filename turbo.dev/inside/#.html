@@ -753,14 +753,14 @@ document.addEventListener('DOMContentLoaded', function(){
 			deleteBtn = createDeleteButton(newLinkEl, '/admin:inside:delMIME'), fromOrName = newLinkEl.mime.from, toOrContent = newLinkEl.mime.to,
 			deleteBtn.onclick = function(event){
 				event.preventDefault();
-				showDialog('confirm', { text: 'Delete the MIME "' + fromOrName + '" with "' + toOrContent + '"?', okFn: function(){ apiRequest((deleteBtn.href + getCurrentContext().request + '&a=' + encodeURIComponent(fromOrName)), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.MIME_TYPES][fromOrName]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
+				showDialogSequence({ type: 'confirm', text: 'Delete the MIME "' + fromOrName + '" with "' + toOrContent + '"?', abortOnCancel: true }, { text: 'Current password:', secret: true, required: true, okFn: function(z, password){ apiRequest((deleteBtn.href + getCurrentContext().request + '&a=' + encodeURIComponent(fromOrName) + '&b=' + encodeURIComponent(password)), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.MIME_TYPES][fromOrName]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
 			}, newLinkEl.onclick = function(event){ event.preventDefault(), tempEditValues[0] = fromOrName, tempEditValues[1] = toOrContent, addMimeLink.onclick.call(this); };
 		},
 		'box-headers': function handleNewHeaderEntry(container, newLinkEl, deleteBtn, fromOrName, toOrContent){
 			deleteBtn = createDeleteButton(newLinkEl, '/admin:inside:delHeader'), fromOrName = newLinkEl.header.name, toOrContent = newLinkEl.header.content,
 			deleteBtn.onclick = function(event){
 				event.preventDefault();
-				showDialog('confirm', { text: 'Delete the header "' + fromOrName + '" with "' + toOrContent + '"?', okFn: function(){ apiRequest((deleteBtn.href + getCurrentContext().request + '&a=' + encodeURIComponent(fromOrName)), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.HEADERS][fromOrName]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
+				showDialogSequence({ type: 'confirm', text: 'Delete the header "' + fromOrName + '" with "' + toOrContent + '"?', abortOnCancel: true }, { text: 'Current password:', secret: true, required: true, okFn: function(z, password){ apiRequest((deleteBtn.href + getCurrentContext().request + '&a=' + encodeURIComponent(fromOrName) + '&b=' + encodeURIComponent(password)), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.HEADERS][fromOrName]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
 			}, newLinkEl.onclick = function(event){ event.preventDefault(), tempEditValues[0] = fromOrName, tempEditValues[1] = toOrContent, addHeaderLink.onclick.call(this); };
 		},
 		'box-preprocessors': function handleNewPreprocessorEntry(container, newLinkEl, deleteBtn, fromOrName, toOrContent){
@@ -1167,11 +1167,17 @@ document.addEventListener('DOMContentLoaded', function(){
 			text: 'MIME type:',
 			value: tempEditValues[1] || '',
 			required: true,
-			okFn: function(z, c){
-				b = z.previous.finalValue,
+			okFn: function(z, c){ d.mimeType = c; },
+			cancelFn: resetTempEditValues
+		},{
+			text: 'Current password (a MIME type decides how browsers take the files):',
+			secret: true,
+			required: true,
+			okFn: function(z, password){
+				b = z.previous.previous.finalValue, c = d.mimeType,
 				b = applyCharReplacements((b.charAt(0) != '.' ? b : b.slice(1)), 1).toLowerCase(), // As the server keeps it
 				e = 'mime',
-				apiRequest((addMimeLink.href + getCurrentContext().request + '&a=' + encodeURIComponent(b) + '&b=' + encodeURIComponent(applyCharReplacements(c))), function(r, s, t, u){
+				apiRequest((addMimeLink.href + getCurrentContext().request + '&a=' + encodeURIComponent(b) + '&b=' + encodeURIComponent(applyCharReplacements(c)) + '&c=' + encodeURIComponent(password)), function(r, s, t, u){
 					if(b in subdomainPanel.subdomain[CONFIG_KEYS.MIME_TYPES]){ t = findEntryByProperty(addMimeLink.nextElementSibling, 'a', [e, 'from'], b); }
 					statusMessageEl.dataset.ok = r, subdomainPanel.subdomain[CONFIG_KEYS.MIME_TYPES][b] = c, createKeyValueEntry(addMimeLink.nextElementSibling, b, e, c);
 					if(tempEditValues[0] != null){
@@ -1197,10 +1203,16 @@ document.addEventListener('DOMContentLoaded', function(){
 			text: 'Content:',
 			value: tempEditValues[1] || '',
 			required: true,
-			okFn: function(z, c){
-				b = z.previous.finalValue,
+			okFn: function(z, c){ d.headerContent = c; },
+			cancelFn: resetTempEditValues
+		},{
+			text: 'Current password (a header can change how browsers take the pages):',
+			secret: true,
+			required: true,
+			okFn: function(z, password){
+				b = z.previous.previous.finalValue, c = d.headerContent,
 				b = applyCharReplacements(b, 1), e = 'header',
-				apiRequest((addHeaderLink.href + getCurrentContext().request + '&a=' + encodeURIComponent(b) + '&b=' + encodeURIComponent(applyCharReplacements(c))), function(r, s, t, u){
+				apiRequest((addHeaderLink.href + getCurrentContext().request + '&a=' + encodeURIComponent(b) + '&b=' + encodeURIComponent(applyCharReplacements(c)) + '&c=' + encodeURIComponent(password)), function(r, s, t, u){
 					if(b in subdomainPanel.subdomain[CONFIG_KEYS.HEADERS]){ t = findEntryByProperty(addHeaderLink.nextElementSibling, 'a', [e, 'name'], b); }
 					statusMessageEl.dataset.ok = r, subdomainPanel.subdomain[CONFIG_KEYS.HEADERS][b] = c, createKeyValueEntry(addHeaderLink.nextElementSibling, b, e, c, function(a, b){ return { name: b, content: a } });
 					if(tempEditValues[0] != null){
@@ -1369,7 +1381,7 @@ document.addEventListener('DOMContentLoaded', function(){
 		<h1><img src="/admin:i.png" alt="OKZGN logo"></h1>
 		<h2>Turbo</h2>
 		<p></p>
-		<a target="_blank" href="https://okzgn.com"><span>Help</span></a>
+		<a target="_blank" rel="noopener noreferrer" href="https://okzgn.com"><span>Help</span></a>
 		<a href="/admin:signout:"><span>Sign out</span></a>
 	</header>
 	<aside>

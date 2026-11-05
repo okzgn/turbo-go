@@ -1,0 +1,58 @@
+# The Go that customNetHttp is made from (customNetHttp/UPSTREAM) against Go's releases: a newer Go 1.26.x
+# brings fixes of net/http, which the fork only gets by being regenerated from it (customNetHttp/PATCHES.md). It
+# runs on every push and pull request, every week and by hand; every week and by hand it also looks for new
+# vulnerabilities of the code as it is (govulncheck), which a week without pushes wouldn't see.
+name: Upstream Go
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "23 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  go-release:
+    name: A newer Go of the UPSTREAM series
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Compare UPSTREAM with go.dev/dl
+        run: |
+          pinned="$(sed -n '1p' customNetHttp/UPSTREAM | tr -d '\r')"   # go1.26.10
+          series="${pinned%.*}"                                           # go1.26
+          latest="$(curl -fsS --retry 3 'https://go.dev/dl/?mode=json&include=all' |
+            jq -r --arg series "$series." '[.[] | select(.stable) | .version | select(startswith($series)) | ltrimstr($series) | tonumber] | max // empty')"
+          if [ -z "$latest" ]; then
+            echo "go.dev/dl lists no stable release of $series"; exit 1
+          fi
+          if [ "$latest" -gt "${pinned##*.}" ]; then
+            echo "$series.$latest is out and customNetHttp is $pinned: regenerate it (customNetHttp/PATCHES.md, \"Updating Go\")"; exit 1
+          fi
+          echo "customNetHttp is $pinned, the latest $series release"
+
+  govulncheck:
+    name: Vulnerabilities of the code as it is
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: go
+        run: echo "version=$(sed -n '1s/^go//p' customNetHttp/UPSTREAM)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ steps.go.outputs.version }}
+          cache: false
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          govulncheck ./...

@@ -33,7 +33,7 @@ func TestP01_AddMIMEDotHangs(t *testing.T) {
 	initForTest(t)
 	base := startServer(t)
 	tok := login(t, base)
-	code, body, err := post(base, "/admin:inside:addMIME?s=localhost&d=&a=.&b=image/png", tok)
+	code, body, err := post(base, "/admin:inside:addMIME?s=localhost&d=&a=.&b=image/png&c=Admin", tok)
 	t.Logf("addMIME a='.': code=%d body=%q err=%v", code, body, err)
 	if err != nil {
 		t.Fatalf("addMIME without a response: %v", err)

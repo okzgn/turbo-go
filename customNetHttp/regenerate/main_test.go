@@ -206,3 +206,36 @@ func TestN108_RefusedPatches(t *testing.T) {
 		t.Errorf("a new file that didn't exist: %v %q", err, files["z.go"])
 	}
 }
+
+// R6-04 (production review of 2026-11-04): the "go" line of go.mod is the version of UPSTREAM. With "go 1.26", a
+// build with an older Go 1.26.x mixed the fork's net/http with that Go's own crypto/tls and net/url.
+func TestRP3_R604_GoModVersion(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "UPSTREAM"), []byte("go1.26.10\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	goMod := filepath.Join(dir, "go.mod")
+	if err := os.WriteFile(goMod, []byte("module turbo\r\n\r\ngo 1.26\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := goModVersion(goMod, dir, true); err == nil || !strings.Contains(err.Error(), `"go 1.26.10"`) {
+		t.Errorf("-check with go 1.26: %v; expected that it must say go 1.26.10", err)
+	}
+	if err := goModVersion(goMod, dir, false); err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := os.ReadFile(goMod); string(data) != "module turbo\r\n\r\ngo 1.26.10\r\n" {
+		t.Errorf("go.mod written: %q", data)
+	}
+	if err := goModVersion(goMod, dir, true); err != nil {
+		t.Errorf("-check after writing it: %v", err)
+	}
+	os.WriteFile(goMod, []byte("module turbo\n"), 0o644)
+	if err := goModVersion(goMod, dir, true); err == nil {
+		t.Error("a go.mod without a go line passed")
+	}
+	// The repository's own go.mod says the version of its UPSTREAM.
+	if err := goModVersion(filepath.Join("..", "..", "go.mod"), "..", true); err != nil {
+		t.Error(err)
+	}
+}

@@ -12,10 +12,9 @@ import (
 func TestB6_SessionKeyUnambiguous(t *testing.T) {
 	initForTest(t)
 	handler := serverHandlerFn("")
-	rec := loginFrom(handler, "10.0.0.1", "Turbo", "Admin")
-	token := strings.TrimPrefix(rec.body.String(), "ok")
+	token := newSession(t, "10.0.0.1")
 	if len(token) != 64 {
-		t.Fatalf("login: %d %q", rec.code, rec.body.String())
+		t.Fatalf("session token %q", token)
 	}
 	sites := func(remoteAddr, token string) *responseRecorder {
 		req := newPanelRequest("/admin:inside:sites", remoteAddr)

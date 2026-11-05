@@ -16,7 +16,9 @@
 # it. If it were missing, a CGI could create it and customize the panel with it.
 #
 # Credentials: with /etc/turbo/credentials, the panel never answers with the
-# default ones (Turbo/Admin), not even before the first login. Those variables
+# default ones (Turbo/Admin), not even before the first login. Without it, the
+# default password signs in only from this machine (an SSH tunnel to port 80
+# works), without a proxy in front. Those variables
 # override turbo.config at every start: to change them, edit the file and
 # restart (a change from the panel lasts until the next start). Or, after the
 # first login, change the user and the password from the panel, save the

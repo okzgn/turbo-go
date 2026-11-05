@@ -148,14 +148,14 @@ func (o *turboCGIOutput) watch(ctx context.Context, cmd *exec.Cmd, group *turboC
 	done := make(chan struct{})
 	exited := make(chan struct{})
 	go func() {
-		cmd.Wait()
+		group.wait(cmd) // On Linux without reaping the leader, which release reaps (0.turbo.cgi_linux.go)
 		close(exited)
 	}()
 	go func() {
 		defer close(done)
 		defer func() {
 			<-o.stopped
-			group.release()
+			group.release(cmd)
 		}()
 		select {
 		case <-exited:

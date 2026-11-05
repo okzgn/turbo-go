@@ -98,9 +98,14 @@ func turboErrorTemplate(code int, detail string) (contentType, body string) {
 // panel's, where a template with scripts would run on the panel's origin, or,
 // without a host of its own for the panel, any host; and it isn't always known
 // yet (a URI too long is answered before the headers are read). An error page
-// needs no scripts: the template keeps its styles and data: images.
+// needs no scripts: the template keeps its styles and data: images. sandbox
+// also keeps it from redirecting by itself (a meta refresh to a copy of the
+// panel's login), from sending forms and from opening windows.
 // turbo:P1 turbo:P2 turbo:P3 turbo:P9
-const turboErrorCSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+const turboErrorCSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; sandbox"
+
+// TurboErrorCSP is turboErrorCSP, for Turbo's tests.
+const TurboErrorCSP = turboErrorCSP
 
 // turboWriteError responds with Turbo's error template, for the errors of
 // HTTP/2 that happen before Turbo's handler is reached. As Go's Error does,

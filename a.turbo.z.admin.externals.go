@@ -38,6 +38,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -279,8 +280,8 @@ func sitesDirChainProblem(raw map[string]map[string]interface{}, baseDir string,
 				return reason("whose turbo.config leads back to a directory on the way")
 			}
 		}
-		if redirects >= 2 {
-			return configPointerError{target: first, reason: "and the turbo.config files point to each other", whole: whole}
+		if redirects >= maxSitesDirHops {
+			return configPointerError{target: first, reason: "and from there the turbo.config files lead to more sites directories than Turbo follows (" + strconv.Itoa(maxSitesDirHops) + ", counted from the start directory)", whole: whole}
 		}
 		if _, err := os.ReadDir(resolved); err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
@@ -526,11 +527,16 @@ func writeBackup(path string, data []byte) (string, error) {
 			return candidate, err
 		}
 		_, err = file.Write(data)
+		if syncErr := file.Sync(); err == nil { // On disk before turbo.config is replaced: a power cut can't take both
+			err = syncErr
+		}
 		if closeErr := file.Close(); err == nil {
 			err = closeErr
 		}
 		if err != nil {
 			os.Remove(candidate) // #nosec G104 G703 -- the partial copy just written next to turbo.config; the error that matters is the write's
+		} else {
+			syncDir(filepath.Dir(candidate))
 		}
 		return candidate, err
 	}
@@ -567,15 +573,22 @@ func writeFileAtomic(path string, data []byte) error {
 		os.Remove(tempPath) // #nosec G104 -- best effort: the error that matters is err
 		return err
 	}
-	if runtime.GOOS != "windows" { // Windows can't sync a directory
-		if dirFile, openErr := os.Open(filepath.Clean(dir + ".")); openErr == nil { // #nosec G304 -- the directory of turbo.config
-			if syncErr := dirFile.Sync(); syncErr != nil { // The file is already replaced: only its durability is in doubt
-				slog.Warn("Can't sync the directory of turbo.config", "directory", dir, "error", syncErr)
-			}
-			dirFile.Close() // #nosec G104 -- read-only handle
-		}
-	}
+	syncDir(dir)
 	return nil
+}
+
+// syncDir syncs a directory, so that a file just created or renamed in it survives a power cut too (Windows can't
+// sync a directory). The file is already there: what fails is logged, as only its durability is in doubt.
+func syncDir(dir string) {
+	if runtime.GOOS == "windows" {
+		return
+	}
+	if dirFile, err := os.Open(filepath.Clean(dir)); err == nil { // #nosec G304 G703 -- the directory of turbo.config or of its copies ("" is ".")
+		if syncErr := dirFile.Sync(); syncErr != nil {
+			slog.Warn("Can't sync the directory of turbo.config", "directory", dir, "error", syncErr)
+		}
+		dirFile.Close() // #nosec G104 -- read-only handle
+	}
 }
 
 // jsonString returns s as a JSON string, quotes included. Unlike json.Marshal, it leaves <, > and & as they
@@ -821,9 +834,14 @@ type configFileError struct {
 	path string
 	data []byte
 	err  error
+	once sync.Once
+	text string // describeConfigError's, made once: it goes through the whole file
 }
 
-func (e *configFileError) Error() string { return describeConfigError(e.path, e.data, e.err) }
+func (e *configFileError) Error() string {
+	e.once.Do(func() { e.text = describeConfigError(e.path, e.data, e.err) })
+	return e.text
+}
 
 // Unwrap gives the error of the file, so that configErrorMessage can tell what kind it is.
 func (e *configFileError) Unwrap() error { return e.err }
@@ -885,14 +903,14 @@ func parseConfig(configBytes []byte, raw *map[string]map[string]interface{}) err
 }
 
 // configFileProblem returns, for setM, the error of the turbo.config in dir, if there is one that can't be used, or
-// of the sites directories it leads to (sitesDirChainProblem), as the reload of setM would follow them; with
-// ignorePointer, a pointer there isn't followed.
-func configFileProblem(dir string, ignorePointer bool) error {
+// of the sites directories it leads to (sitesDirChainProblem, counting hops from the start directory to dir), as the
+// reload of setM would follow them; with ignorePointer (the start directory), its "M" isn't followed.
+func configFileProblem(dir string, ignorePointer bool, hops int) error {
 	config, err := parseSiteConfig(dir + configFileName)
-	if err != nil || config.raw == nil || (ignorePointer && isSitesDirPointerMap(config.raw)) {
+	if err != nil || config.raw == nil || ignorePointer {
 		return err
 	}
-	if problem := sitesDirChainProblem(config.raw, dir, 0, true); problem != nil {
+	if problem := sitesDirChainProblem(config.raw, dir, hops, true); problem != nil {
 		data, _ := os.ReadFile(dir + configFileName) // #nosec G304 -- turbo.config of the sites directory chosen by the administrator, for the message
 		return &configFileError{path: dir + configFileName, data: data, err: problem}
 	}
@@ -915,7 +933,8 @@ func (e configSettingError) Error() string { return `"` + e.key + `" can't be us
 // settings that guard the panel.
 type configSiteError struct {
 	domain, where string
-	list          string // The list written in the site, outside its sections ("?"…), if that is the problem
+	list          string   // The list written in the site, outside its sections ("?"…), if that is the problem
+	keys          []string // The keys that lead to what can't be used, from the site (configKeyOffset)
 }
 
 func (e configSiteError) Error() string {
@@ -937,16 +956,16 @@ func siteSectionsProblem(raw map[string]map[string]interface{}) error {
 		for _, subdomain := range sortedKeys(raw[domain]) {
 			where := strconv.Quote(domain) + " > " + strconv.Quote(subdomain)
 			if _, isList := subdomainContentCheckers[subdomain]; isList {
-				return configSiteError{domain: domain, where: where, list: subdomain}
+				return configSiteError{domain: domain, where: where, list: subdomain, keys: []string{domain, subdomain}}
 			}
 			section, isMap := raw[domain][subdomain].(map[string]interface{})
 			if !isMap {
-				return configSiteError{domain: domain, where: where}
+				return configSiteError{domain: domain, where: where, keys: []string{domain, subdomain}}
 			}
 			for _, key := range subdomainContentOrder {
 				if value, present := section[key]; present {
 					if _, isMap := value.(map[string]interface{}); !isMap {
-						return configSiteError{domain: domain, where: where + " > " + strconv.Quote(key)}
+						return configSiteError{domain: domain, where: where + " > " + strconv.Quote(key), keys: []string{domain, subdomain, key}}
 					}
 				}
 			}
@@ -1070,13 +1089,17 @@ func describeConfigError(path string, data []byte, err error) string {
 	if errors.As(err, &syntaxErr) {
 		offset, cause = syntaxErr.Offset, jsonSyntaxCause(syntaxErr.Error())
 	} else if errors.As(err, &configSchemaError{}) {
-		offset, cause = int64(bytes.Index(data, []byte(`"^"`))+1), err.Error()
+		offset, cause = int64(configKeyOffset(data, `"^"`, "^")+1), err.Error()
 	} else if errors.As(err, &configSelfPointerError{}) || errors.As(err, &configPointerError{}) {
-		offset, cause = int64(bytes.Index(data, []byte(`"M"`))+1), err.Error()
+		offset, cause = int64(configKeyOffset(data, `"M"`, ".", "M")+1), err.Error()
 	} else if settingErr := (configSettingError{}); errors.As(err, &settingErr) {
-		offset, cause = int64(bytes.Index(data, []byte(`"`+settingErr.key+`"`))+1), err.Error()
+		offset, cause = int64(configKeyOffset(data, `"`+settingErr.key+`"`, ".", settingErr.key)+1), err.Error()
 	} else if siteErr := (configSiteError{}); errors.As(err, &siteErr) {
-		offset, cause = int64(bytes.Index(data, []byte(jsonString(siteErr.domain)))+1), err.Error()
+		keys := siteErr.keys
+		if len(keys) == 0 {
+			keys = []string{siteErr.domain}
+		}
+		offset, cause = int64(configKeyOffset(data, jsonString(siteErr.domain), keys...)+1), err.Error()
 	} else if errors.As(err, &typeErr) {
 		offset, cause = typeErr.Offset, "an object {...} was expected and there is a value of type "+typeErr.Value
 	}
@@ -1092,7 +1115,18 @@ func describeConfigError(path string, data []byte, err error) string {
 		line = bytes.TrimSuffix(line, []byte("\r"))
 	}
 	lineNumber := bytes.Count(data[:lineStart], []byte("\n")) + 1
-	fragment, mark := configLineFragment(line, position-lineStart)
+	// Only a window around the error goes to configLineFragment, which makes a string per character: turbo.config
+	// is saved in one line, and one of 5 MB with a typo made hundreds of MB of them, enough to end a Turbo with
+	// little memory.
+	column := position - lineStart
+	windowStart, windowEnd := max(0, column-configErrorWindow), min(len(line), column+configErrorWindow)
+	for windowStart > 0 && !utf8.RuneStart(line[windowStart]) {
+		windowStart--
+	}
+	for windowEnd < len(line) && !utf8.RuneStart(line[windowEnd]) {
+		windowEnd++
+	}
+	fragment, mark := configLineFragment(line[windowStart:windowEnd], column-windowStart, windowStart > 0, windowEnd < len(line))
 	message.WriteString("  Line " + strconv.Itoa(lineNumber) + ", column " + strconv.Itoa(position-lineStart+1) + ": " + cause + "\n")
 	message.WriteString("    " + fragment + "\n    " + strings.Repeat(" ", mark) + "^\n")
 	backups := configBackups(path)
@@ -1107,25 +1141,109 @@ func describeConfigError(path string, data []byte, err error) string {
 	return message.String()
 }
 
-// configSecretValue matches the value of "PH" or "P" in a turbo.config, escaped characters included, also when
-// the key is written with escapes ("P").
-var configSecretValue = regexp.MustCompile(`"(?:P|\\u0050)(?:H|\\u0048)?"\s*:\s*"((?:[^"\\]|\\.)*)`)
+// configSecretKey matches the key "PH" or "P" in a turbo.config and the colon after it, also when the key is written
+// with escapes ("P").
+var configSecretKey = regexp.MustCompile(`"(?:P|\\u0050)(?:H|\\u0048)?"\s*:\s*`)
 
-// hideConfigSecrets returns a copy of a turbo.config with the values of "PH" and "P" replaced by asterisks of the
-// same length, so the positions of an error stay the same and the message never shows them.
+// hideConfigSecrets returns a copy of a turbo.config with the values of "PH" and "P", whatever their type, replaced by
+// asterisks of the same length, so the positions of an error stay the same and the message never shows them: the
+// characters of a string (its quotes stay) and the whole of anything else (a number, a list, an object, or what
+// isn't JSON). The file may be broken: a value that doesn't end hides the rest of it.
 func hideConfigSecrets(data []byte) []byte {
 	hidden := bytes.Clone(data)
-	for _, match := range configSecretValue.FindAllSubmatchIndex(hidden, -1) {
-		for i := match[2]; i < match[3]; i++ {
+	for _, match := range configSecretKey.FindAllIndex(hidden, -1) {
+		start, end := configSecretSpan(hidden, match[1])
+		for i := start; i < end; i++ {
 			hidden[i] = '*'
 		}
 	}
 	return hidden
 }
 
+// configSecretSpan is where the value that starts at data[start] is, for hideConfigSecrets: inside the quotes of a
+// string, up to the bracket that closes a list or an object, and up to a comma, a closing bracket or a blank for
+// anything else.
+func configSecretSpan(data []byte, start int) (int, int) {
+	if start >= len(data) {
+		return start, start
+	}
+	switch data[start] {
+	case '"':
+		for i := start + 1; i < len(data); i++ {
+			switch data[i] {
+			case '\\':
+				i++ // The escaped character
+			case '"':
+				return start + 1, i
+			}
+		}
+		return start + 1, len(data)
+	case '[', '{':
+		depth, inString := 0, false
+		for i := start; i < len(data); i++ {
+			switch character := data[i]; {
+			case inString && character == '\\':
+				i++
+			case character == '"':
+				inString = !inString
+			case inString:
+			case character == '[' || character == '{':
+				depth++
+			case character == ']' || character == '}':
+				if depth--; depth == 0 {
+					return start, i + 1
+				}
+			}
+		}
+		return start, len(data)
+	}
+	end := start
+	for end < len(data) && strings.IndexByte(",]} \t\r\n", data[end]) == -1 {
+		end++
+	}
+	return start, end
+}
+
+// configErrorWindow is how many bytes of the line of a turbo.config error, on each side of it, configLineFragment
+// gets: it shows about 120 characters, and a character takes at most 4 bytes.
+const configErrorWindow = 480
+
+// configKeyOffset is where the key at the end of keys (one per level of objects, from the top of a turbo.config)
+// starts, its opening quote; or, if the file doesn't have it, where quoted (a key as written) first appears, or -1.
+// Searching only for quoted took the first key of that name anywhere in the file (a header "PA" of a site, for "PA"
+// of ".").
+func configKeyOffset(data []byte, quoted string, keys ...string) int {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	for depth := 0; depth < len(keys); depth++ {
+		if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+			return bytes.Index(data, []byte(quoted))
+		}
+		for {
+			before := decoder.InputOffset()
+			token, err := decoder.Token()
+			key, isKey := token.(string)
+			if err != nil || !isKey { // The end of the object, or a broken file
+				return bytes.Index(data, []byte(quoted))
+			}
+			if key == keys[depth] {
+				if depth == len(keys)-1 {
+					return int(before) + bytes.IndexByte(data[before:], '"')
+				}
+				break // Into its value
+			}
+			var skipped json.RawMessage
+			if decoder.Decode(&skipped) != nil {
+				return bytes.Index(data, []byte(quoted))
+			}
+		}
+	}
+	return bytes.Index(data, []byte(quoted))
+}
+
 // configLineFragment returns the line of a turbo.config error with control characters and invalid UTF-8
-// escaped, cut to about 120 characters around column (a byte index), and where the mark goes under it.
-func configLineFragment(line []byte, column int) (fragment string, mark int) {
+// escaped, cut to about 120 characters around column (a byte index), and where the mark goes under it. cutBefore
+// and cutAfter say that line is a window of a longer one (configErrorWindow), cut there.
+func configLineFragment(line []byte, column int, cutBefore bool, cutAfter bool) (fragment string, mark int) {
 	const width = 120
 	var pieces []string // One per character of the line, escaped
 	errorPiece := -1
@@ -1163,7 +1281,7 @@ func configLineFragment(line []byte, column int) (fragment string, mark int) {
 		}
 	}
 	var builder strings.Builder
-	if first > 0 {
+	if first > 0 || cutBefore {
 		builder.WriteString("...")
 		mark = 3
 	}
@@ -1173,7 +1291,7 @@ func configLineFragment(line []byte, column int) (fragment string, mark int) {
 		}
 		builder.WriteString(pieces[i])
 	}
-	if last < len(pieces) {
+	if last < len(pieces) || cutAfter {
 		builder.WriteString("...")
 	}
 	return builder.String(), mark

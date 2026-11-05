@@ -46,6 +46,7 @@ func loginFrom(handler func(customNetHttp.ResponseWriter, *customNetHttp.Request
 // gets in, and a second block lasts longer than the first.
 func TestA8_FailedLoginsLimited(t *testing.T) {
 	initForTest(t)
+	password := useTestPassword(t) // From other IPs: the default password signs in only from this machine (O4)
 	handler := serverHandlerFn("")
 	calls := countPasswordKeys(t)
 	for i := 1; i <= 5; i++ {
@@ -64,12 +65,12 @@ func TestA8_FailedLoginsLimited(t *testing.T) {
 	if n := calls.Load() - before; n != 0 {
 		t.Errorf("the blocked attempts computed %d PBKDF2", n)
 	}
-	if rec := loginFrom(handler, "198.51.100.8", "Turbo", "Admin"); rec.code != 200 {
+	if rec := loginFrom(handler, "198.51.100.8", "Turbo", password); rec.code != 200 {
 		t.Errorf("another IP: %d; expected 200", rec.code)
 	}
 
 	expireLoginBlock(t, "198.51.100.7")
-	if rec := loginFrom(handler, "198.51.100.7", "Turbo", "Admin"); rec.code != 200 || !strings.HasPrefix(rec.body.String(), "ok") {
+	if rec := loginFrom(handler, "198.51.100.7", "Turbo", password); rec.code != 200 || !strings.HasPrefix(rec.body.String(), "ok") {
 		t.Fatalf("right login after the block: %d %q", rec.code, rec.body.String())
 	}
 
@@ -81,7 +82,7 @@ func TestA8_FailedLoginsLimited(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		loginFrom(handler, "198.51.100.7", "Turbo", "bad")
 	}
-	rec := loginFrom(handler, "198.51.100.7", "Turbo", "Admin")
+	rec := loginFrom(handler, "198.51.100.7", "Turbo", password)
 	if retry, _ := strconv.Atoi(rec.Header().Get("Retry-After")); rec.code != 429 || retry <= 60 || retry > 120 {
 		t.Errorf("second block: %d, Retry-After %q; expected 2 minutes", rec.code, rec.Header().Get("Retry-After"))
 	}
@@ -91,6 +92,7 @@ func TestA8_FailedLoginsLimited(t *testing.T) {
 // checked, so a burst doesn't compute more than 5 passwords.
 func TestH57_ConcurrentLoginsLimited(t *testing.T) {
 	initForTest(t)
+	password := useTestPassword(t) // From other IPs: the default password signs in only from this machine (O4)
 	handler := serverHandlerFn("")
 	calls := countPasswordKeys(t)
 	// A PBKDF2 slot for each attempt let through, so that none gets 503 (not checked, not counted) waiting for one:
@@ -122,10 +124,10 @@ func TestH57_ConcurrentLoginsLimited(t *testing.T) {
 		t.Errorf("60 concurrent logins: %d passwords computed, %d 403 responses, %d 429; expected at most %d computations",
 			calls.Load(), forbidden.Load(), limited.Load(), loginMaxFailures)
 	}
-	if rec := loginFrom(handler, "198.51.100.20", "Turbo", "Admin"); rec.code != 429 {
+	if rec := loginFrom(handler, "198.51.100.20", "Turbo", password); rec.code != 429 {
 		t.Errorf("after the burst: %d; expected 429", rec.code)
 	}
-	if rec := loginFrom(handler, "198.51.100.21", "Turbo", "Admin"); rec.code != 200 {
+	if rec := loginFrom(handler, "198.51.100.21", "Turbo", password); rec.code != 200 {
 		t.Errorf("another IP after the burst: %d; expected 200", rec.code)
 	}
 }
@@ -146,6 +148,7 @@ func expireLoginBlock(t *testing.T, ip string) {
 // Retry-After: 2 instead of waiting without limit.
 func TestA8_HashQueueBounded(t *testing.T) {
 	initForTest(t)
+	password := useTestPassword(t) // From other IPs: the default password signs in only from this machine (O4)
 	handler := serverHandlerFn("")
 	verifiedPassword.Store(nil) // A password already checked doesn't need a slot
 	verifiedLogin.Store(nil)
@@ -153,7 +156,7 @@ func TestA8_HashQueueBounded(t *testing.T) {
 		passwordHashSlots <- struct{}{}
 	}
 	start := time.Now()
-	rec := loginFrom(handler, "198.51.100.9", "Turbo", "Admin")
+	rec := loginFrom(handler, "198.51.100.9", "Turbo", password)
 	elapsed := time.Since(start)
 	for i := 0; i < cap(passwordHashSlots); i++ {
 		<-passwordHashSlots
@@ -161,7 +164,7 @@ func TestA8_HashQueueBounded(t *testing.T) {
 	if rec.code != 503 || rec.Header().Get("Retry-After") != "2" || elapsed > 3*time.Second {
 		t.Fatalf("with the queue full: %d, Retry-After %q, %v; expected 503 with Retry-After: 2 in about 2 s", rec.code, rec.Header().Get("Retry-After"), elapsed)
 	}
-	if rec := loginFrom(handler, "198.51.100.9", "Turbo", "Admin"); rec.code != 200 {
+	if rec := loginFrom(handler, "198.51.100.9", "Turbo", password); rec.code != 200 {
 		t.Errorf("with the queue free: %d", rec.code)
 	}
 }
@@ -175,6 +178,7 @@ var adminLoginLimit = map[bool]time.Duration{false: 3 * time.Second, true: 6 * t
 
 func TestA8_AdminEntersDuringAttack(t *testing.T) {
 	initForTest(t)
+	password := useTestPassword(t) // From other IPs: the default password signs in only from this machine (O4)
 	handler := serverHandlerFn("")
 	verifiedPassword.Store(nil) // The administrator's login also computes a PBKDF2
 	verifiedLogin.Store(nil)
@@ -188,10 +192,10 @@ func TestA8_AdminEntersDuringAttack(t *testing.T) {
 	}
 	time.Sleep(20 * time.Millisecond)
 	start := time.Now()
-	rec := loginFrom(handler, "192.0.2.1", "Turbo", "Admin")
+	rec := loginFrom(handler, "192.0.2.1", "Turbo", password)
 	if rec.code == 503 {
 		time.Sleep(2 * time.Second)
-		rec = loginFrom(handler, "192.0.2.1", "Turbo", "Admin")
+		rec = loginFrom(handler, "192.0.2.1", "Turbo", password)
 	} else if elapsed := time.Since(start); elapsed > adminLoginLimit {
 		t.Errorf("the administrator took %v to get in", elapsed)
 	}
@@ -252,7 +256,7 @@ func FuzzLogin(f *testing.F) {
 		}
 		req, _ := customNetHttp.NewRequest("POST", "http://localhost/admin:", strings.NewReader(body))
 		req.RequestURI = "/admin:"
-		req.RemoteAddr = "198.51.100.200:40000"
+		req.RemoteAddr = "127.0.0.1:40000" // This machine: the default password signs in only from there (O4)
 		req.Header.Set("Content-Type", contentType)
 		rec := &responseRecorder{}
 		handler(rec, req)
@@ -279,6 +283,7 @@ func TestRL_S12_DefaultPasswordWarningWithAnotherUser(t *testing.T) {
 // it, a login from any of them gets 429 without a PBKDF2, the right password too, while another /48 isn't held back.
 func TestRP_M09_LoginLimitPer48(t *testing.T) {
 	initForTest(t)
+	password := useTestPassword(t) // From other IPs: the default password signs in only from this machine (O4)
 	handler := serverHandlerFn("")
 	for failures, network := 0, 1; failures < loginMaxNetworkFailures; network++ {
 		for i := 1; i < loginMaxFailures && failures < loginMaxNetworkFailures; i++ { // Below the limit of each /64
@@ -290,22 +295,23 @@ func TestRP_M09_LoginLimitPer48(t *testing.T) {
 		}
 	}
 	calls := countPasswordKeys(t)
-	if rec := loginFrom(handler, "[2001:db8:5:ffff::1]", "Turbo", "Admin"); rec.code != 429 {
+	if rec := loginFrom(handler, "[2001:db8:5:ffff::1]", "Turbo", password); rec.code != 429 {
 		t.Errorf("a /64 that never failed, in a /48 with %d failures: %d; expected 429", loginMaxNetworkFailures, rec.code)
 	}
 	if calls.Load() != 0 {
 		t.Errorf("the blocked login computed %d PBKDF2", calls.Load())
 	}
-	if rec := loginFrom(handler, "[2001:db8:6::1]", "Turbo", "Admin"); rec.code != 200 {
+	if rec := loginFrom(handler, "[2001:db8:6::1]", "Turbo", password); rec.code != 200 {
 		t.Errorf("another /48: %d; expected 200", rec.code)
 	}
 }
 
 // Production review, M-09: a PBKDF2 slot is kept for the current password of a request with a session and for the
-// logins from the networks of PA: a flood of logins from elsewhere, which takes the other slots, doesn't keep the
+// logins of the trusted clients (V15): a flood of logins from elsewhere, which takes the other slots, doesn't keep the
 // administrator out.
 func TestRP_M09_ReservedPasswordSlot(t *testing.T) {
 	initForTest(t)
+	password := useTestPassword(t) // From other IPs: the default password signs in only from this machine (O4)
 	handler := serverHandlerFn("")
 	token := newSession(t, "198.51.100.80")
 	verifiedPassword.Store(nil) // A password already checked doesn't need a slot
@@ -321,23 +327,27 @@ func TestRP_M09_ReservedPasswordSlot(t *testing.T) {
 		}
 	}
 	free := fill()
-	if rec := loginFrom(handler, "198.51.100.81", "Turbo", "Admin"); rec.code != 503 {
+	if rec := loginFrom(handler, "198.51.100.81", "Turbo", password); rec.code != 503 {
 		t.Errorf("a login with every other slot taken: %d; expected 503", rec.code)
 	}
-	if rec := apiFrom(handler, "198.51.100.80", token, "/admin:inside:setCII?a=50&b=Admin"); rec.code != 200 {
+	if rec := apiFrom(handler, "198.51.100.80", token, "/admin:inside:setCII?a=50&b="+password); rec.code != 200 {
 		t.Errorf("the current password of a session with every other slot taken: %d %q; expected 200", rec.code, rec.body.String())
 	}
 	free()
 
-	if ok, msg := defaultSettingValidators["."]["PA"]("192.0.2.0/24", internalAuth); !ok {
-		t.Fatal(msg)
+	// A client that signed in correctly in the last 12 hours (V15) takes it too; the networks of PA no longer do.
+	if rec := loginFrom(handler, "192.0.2.5", "Turbo", password); rec.code != 200 {
+		t.Fatalf("login: %d", rec.code)
 	}
 	verifiedPassword.Store(nil)
 	verifiedLogin.Store(nil)
 	free = fill()
 	defer free()
-	if rec := loginFrom(handler, "192.0.2.5", "Turbo", "Admin"); rec.code != 200 {
-		t.Errorf("a login from a network of PA with every other slot taken: %d; expected 200", rec.code)
+	if rec := loginFrom(handler, "192.0.2.6", "Turbo", password); rec.code != 503 {
+		t.Errorf("a client not trusted with every other slot taken: %d; expected 503", rec.code)
+	}
+	if rec := loginFrom(handler, "192.0.2.5", "Turbo", password); rec.code != 200 {
+		t.Errorf("a trusted client with every other slot taken: %d; expected 200", rec.code)
 	}
 }
 

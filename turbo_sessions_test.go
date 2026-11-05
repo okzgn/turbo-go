@@ -36,13 +36,13 @@ func signedIn(rec *responseRecorder) bool {
 	return rec.code == 200 && !strings.Contains(rec.body.String(), "http-equiv")
 }
 
+// newSession opens a session for ip directly, as a correct login does: the default password signs in only from
+// this machine (O4), and the tests of the login use a password of their own (useTestPassword).
 func newSession(t *testing.T, ip string) string {
 	t.Helper()
-	rec := loginFrom(serverHandlerFn(""), ip, "Turbo", "Admin")
-	if rec.code != 200 {
-		t.Fatalf("login: %d", rec.code)
-	}
-	return strings.TrimPrefix(rec.body.String(), "ok")
+	var token string
+	withGlobalLock(func() { token = openSessionLocked(ip) })
+	return token
 }
 
 func sessionExpiry(ip, token string) (int64, bool) {
@@ -137,8 +137,8 @@ func TestN27_ForeignCookieFirst(t *testing.T) {
 func TestI16_PasswordChangeClosesOtherSessions(t *testing.T) {
 	initForTest(t)
 	for _, change := range []string{"/admin:inside:setP?a=NewPassword1&b=Admin", "/admin:inside:setU?a=Other&b=NewPassword1"} {
-		mine := newSessionWith(t, "198.51.100.65")
-		other := newSessionWith(t, "198.51.100.66")
+		mine := newSession(t, "198.51.100.65")
+		other := newSession(t, "198.51.100.66")
 		rec := apiFrom(serverHandlerFn(""), "198.51.100.65", mine, change)
 		if rec.code != 200 {
 			t.Fatalf("%s: %d %q", change, rec.code, rec.body.String())
@@ -157,18 +157,6 @@ func TestI16_PasswordChangeClosesOtherSessions(t *testing.T) {
 			t.Errorf("%s: the cookie doesn't carry the new token: %q", change, cookies)
 		}
 	}
-}
-
-// newSessionWith signs in with the credentials in use (they change during the test).
-func newSessionWith(t *testing.T, ip string) string {
-	t.Helper()
-	for _, credentials := range [][2]string{{"Turbo", "Admin"}, {"Turbo", "NewPassword1"}, {"Other", "NewPassword1"}} {
-		if rec := loginFrom(serverHandlerFn(""), ip, credentials[0], credentials[1]); rec.code == 200 {
-			return strings.TrimPrefix(rec.body.String(), "ok")
-		}
-	}
-	t.Fatal("none of the credentials get in")
-	return ""
 }
 
 // I16: a request from another origin (a resource another page loads) doesn't

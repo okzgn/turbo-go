@@ -1,6 +1,8 @@
 # Turbo's continuous integration: the checks of "Checks Before Publishing" in the README, on every push and
 # pull request. Fuzzing runs 15 s per target in three parallel shards (about four minutes); the full fuzzing
 # (1 min per target) and the upgrade test are run by hand before a release, as the README says.
+# The actions are pinned by commit, with their tag in a comment, and setup-go caches nothing: a tag can be
+# moved, and a cache filled by another branch's run could change what a run builds.
 name: CI
 
 on:
@@ -21,15 +23,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - id: go
         name: Go version (customNetHttp/UPSTREAM)
         run: echo "version=$(sed -n '1s/^go//p' customNetHttp/UPSTREAM)" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ steps.go.outputs.version }}
+          cache: false
       - name: gofmt
         run: |
           unformatted="$(gofmt -l .)"
@@ -71,14 +74,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - id: go
         run: echo "version=$(sed -n '1s/^go//p' customNetHttp/UPSTREAM)" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ steps.go.outputs.version }}
+          cache: false
       - name: go test
         run: go test -count=1 -timeout 30m ./...
 
@@ -87,14 +91,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 75
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - id: go
         run: echo "version=$(sed -n '1s/^go//p' customNetHttp/UPSTREAM)" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ steps.go.outputs.version }}
+          cache: false
       - name: go test -race
         # About ten minutes on twelve CPUs; more on a hosted runner.
         run: go test -race -count=1 -timeout 60m ./...
@@ -104,15 +109,16 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - id: go
         shell: bash
         run: echo "version=$(sed -n '1s/^go//p' customNetHttp/UPSTREAM)" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ steps.go.outputs.version }}
+          cache: false
       - name: go test
         shell: bash
         run: go test -count=1 -timeout 30m ./...
@@ -122,14 +128,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - id: go
         run: echo "version=$(sed -n '1s/^go//p' customNetHttp/UPSTREAM)" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ steps.go.outputs.version }}
+          cache: false
       - name: deploy/real-ports-test.sh
         # Hosted runners have sudo without a password (for setcap) and the ports 80 and 443 free.
         run: bash deploy/real-ports-test.sh
@@ -139,14 +146,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - id: go
         run: echo "version=$(sed -n '1s/^go//p' customNetHttp/UPSTREAM)" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ steps.go.outputs.version }}
+          cache: false
       - name: Build
         env:
           CGO_ENABLED: "0"
@@ -168,14 +176,15 @@ jobs:
       matrix:
         shard: [0, 1, 2]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - id: go
         run: echo "version=$(sed -n '1s/^go//p' customNetHttp/UPSTREAM)" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ steps.go.outputs.version }}
+          cache: false
       - name: The Fuzz targets of this shard
         # Every Fuzz function of the package, split by name across the three shards.
         run: |
@@ -185,7 +194,7 @@ jobs:
           done
       - name: Failing inputs
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: fuzz-testdata-${{ matrix.shard }}
           path: testdata/fuzz
@@ -203,14 +212,15 @@ jobs:
           - { goos: darwin, goarch: amd64 }
           - { goos: darwin, goarch: arm64 }
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - id: go
         run: echo "version=$(sed -n '1s/^go//p' customNetHttp/UPSTREAM)" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ steps.go.outputs.version }}
+          cache: false
       - name: go build
         env:
           CGO_ENABLED: "0"

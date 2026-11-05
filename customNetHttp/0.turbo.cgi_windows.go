@@ -138,9 +138,15 @@ func (g *turboCGIGroup) kill() {
 	}
 }
 
+// wait waits for the CGI's process to end, and reaps it: on Windows the Job
+// Object, not the process's ID, is what release lets go.
+func (g *turboCGIGroup) wait(cmd *exec.Cmd) {
+	cmd.Wait()
+}
+
 // release closes the Job Object without killing anyone: the processes left by
 // a CGI that ended normally go on.
-func (g *turboCGIGroup) release() {
+func (g *turboCGIGroup) release(*exec.Cmd) {
 	g.mutex.Lock()
 	defer g.mutex.Unlock()
 	if g.job == 0 {

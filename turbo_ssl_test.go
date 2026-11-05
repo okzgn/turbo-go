@@ -177,6 +177,9 @@ func TestW_SSL_TLSFlow(t *testing.T) {
 			"TLS 1.1": {MinVersion: tls.VersionTLS11, MaxVersion: tls.VersionTLS11},
 			"3DES":    {MaxVersion: tls.VersionTLS12, CipherSuites: []uint16{tls.TLS_RSA_WITH_3DES_EDE_CBC_SHA}},
 			"RSA kex": {MaxVersion: tls.VersionTLS12, CipherSuites: []uint16{tls.TLS_RSA_WITH_AES_128_GCM_SHA256}},
+			// R3 I-3 (decision D4): TLS 1.2 only with AEAD suites
+			"CBC": {MaxVersion: tls.VersionTLS12, CipherSuites: []uint16{tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA, tls.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
+				tls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA, tls.TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA, tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256, tls.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256}},
 		}
 		for name, cfg := range rejected {
 			if cn, err := handshake("b.test", cfg); err == nil {
@@ -186,6 +189,9 @@ func TestW_SSL_TLSFlow(t *testing.T) {
 		accepted := map[string]*tls.Config{
 			"TLS 1.2": {MinVersion: tls.VersionTLS12, MaxVersion: tls.VersionTLS12},
 			"TLS 1.3": {MinVersion: tls.VersionTLS13, MaxVersion: tls.VersionTLS13},
+			"AES-GCM": {MaxVersion: tls.VersionTLS12, CipherSuites: []uint16{tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384}},
+			"ChaCha20": {MaxVersion: tls.VersionTLS12, CipherSuites: []uint16{tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256, tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256}},
 		}
 		for name, cfg := range accepted {
 			if _, err := handshake("b.test", cfg); err != nil {
@@ -418,7 +424,7 @@ func TestRP_M01_ErrorKinds(t *testing.T) {
 		"http: TLS handshake error from 192.0.2.1:1234: EOF":                        "http: TLS handshake error",
 		"http2: server: error reading preface from client [2001:db8::1]:443: bogus": "http2: server: error reading",
 		"timeout waiting for SETTINGS frames from 192.0.2.1:9":                      "timeout waiting for SETTINGS",
-		"http: panic serving 192.0.2.1:9: boom":                                     "http: panic serving",
+		"http: panic serving 192.0.2.1:9: boom":                                     "http: panic serving boom", // V20: each panic its own kind
 	} {
 		if got := aggregatedLogKind(line); got != kind {
 			t.Errorf("aggregatedLogKind(%q) = %q; expected %q", line, got, kind)

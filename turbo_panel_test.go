@@ -391,7 +391,7 @@ func TestW_AddMIMEPlus(t *testing.T) {
 	initForTest(t)
 	base := startServer(t)
 	tok := login(t, base)
-	code, body, err := post(base, "/admin:inside:addMIME?s=localhost&d=&a=svg&b=image%2Fsvg%2Bxml", tok)
+	code, body, err := post(base, "/admin:inside:addMIME?s=localhost&d=&a=svg&b=image%2Fsvg%2Bxml&c=Admin", tok)
 	if err != nil || code != 200 {
 		t.Fatalf("addMIME: %d %q %v", code, body, err)
 	}
@@ -556,8 +556,9 @@ func TestW_PanelCSRF(t *testing.T) {
 	tok := login(t, base)
 	n := 0
 	action := func(hdr map[string]string) int {
-		n++ // a different header in each request
-		req, _ := http.NewRequest("POST", base+"/admin:inside:addHeader?s=localhost&d=&a=X-Csrf-"+strconv.Itoa(n)+"&b=1", nil)
+		// A different header in each request
+		n++
+		req, _ := http.NewRequest("POST", base+"/admin:inside:addIndex?s=localhost&d=&a=csrf-"+strconv.Itoa(n)+".html", nil) // An action of the session alone
 		req.Host = "localhost"
 		for k, v := range hdr {
 			req.Header.Set(k, v)
@@ -764,8 +765,8 @@ func TestW_PanelAccessDeniedHeaders(t *testing.T) {
 	if err != nil || res.StatusCode != 404 {
 		t.Fatalf("/admin: outside PA -> %v %v; expected 404", res, err)
 	}
-	// The 404 is the error template: no scripts (N89)
-	for k, v := range map[string]string{"X-Frame-Options": "DENY", "Content-Security-Policy": panelCSP, "Cache-Control": "no-store"} {
+	// The 404 is the error template: no scripts (N89), sandboxed (R6-06)
+	for k, v := range map[string]string{"X-Frame-Options": "DENY", "Content-Security-Policy": customNetHttp.TurboErrorCSP, "Cache-Control": "no-store"} {
 		if got := res.Header.Get(k); got != v {
 			t.Errorf("%s = %q; expected %q", k, got, v)
 		}

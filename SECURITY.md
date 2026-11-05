@@ -2,20 +2,22 @@
 
 ## Supported versions
 
-Security fixes go into the latest release. Earlier releases (`v2.4`, `v2.3.rc3` and before) and builds of `main` that are not a release don't get fixes: upgrade, following the notes of [CHANGELOG.md](CHANGELOG.md).
+Security fixes go into the latest release. Earlier releases (`v2.4.1`, `v2.4`, `v2.3.rc3` and before) and builds of `main` that are not a release don't get fixes: upgrade, following the notes of [CHANGELOG.md](CHANGELOG.md).
 
 To know which version you run, look at the first line Turbo writes when it starts (`journalctl -u turbo | grep msg=Starting` under systemd):
 
 ```
-level=INFO msg=Starting server="OKZGN Turbo" version=v2.4.1 commit=<hash> go=go1.26.10
+level=INFO msg=Starting server="OKZGN Turbo" version=v2.4.2 commit=<hash> go=go1.26.10
 ```
 
 A binary built from the source says `version=development`, and `commit=unknown` if it was built without version-control information (from a source archive, for example).
 
 ## Reporting a vulnerability
 
-- **Non-critical vulnerabilities:** open a GitHub issue.
-- **Critical vulnerabilities:** contact us privately, and wait for our response and decision before disclosing anything publicly:
+Report every vulnerability privately, whatever its severity, and never in a public issue: an issue shows it to everyone before there is a fix. Wait for our response and decision before disclosing anything publicly.
+
+- On GitHub: the repository's *Security* tab, **Report a vulnerability** (private reporting).
+- Or through the contact forms:
   - https://okzgn.com/#contact
   - https://okzgn.github.io/#contact
 

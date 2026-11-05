@@ -27,52 +27,35 @@ func apiFrom(handler func(customNetHttp.ResponseWriter, *customNetHttp.Request),
 	return rec
 }
 
-// N9: after 5 wrong current passwords, the sixth gets 429 with Retry-After
-// without computing PBKDF2; when the block ends, the login gets in.
+// N9, and V14 of the production review: the wrong current passwords count per session, and the fifth closes it, so
+// its client signs in again; the IP isn't blocked for them. Counted for the IP, a copy of the session (the same IP)
+// spent them and blocked the administrator's closeSessions with 429, while the copy went on.
 func TestN09_CurrentPasswordLimited(t *testing.T) {
 	initForTest(t)
 	handler := serverHandlerFn("")
-	t.Cleanup(func() {
-		loginFailuresMutex.Lock()
-		clear(loginFailuresByIP)
-		loginFailuresMutex.Unlock()
-	})
+	password := useTestPassword(t) // Logins from 198.51.100.30: the default password signs in only from this machine
 	const ip = "198.51.100.30"
-	rec := loginFrom(handler, ip, "Turbo", "Admin")
-	token := strings.TrimPrefix(rec.body.String(), "ok")
-	if rec.code != 200 || token == "" {
-		t.Fatalf("login: %d %q", rec.code, rec.body.String())
-	}
-	calls := countPasswordKeys(t)
-	for i := 1; i <= 5; i++ {
+	token := newSession(t, ip)
+	for i := 1; i < loginMaxFailures; i++ {
 		rec := apiFrom(handler, ip, token, "/admin:inside:setMUB?a=2000&b=bad"+strconv.Itoa(i))
 		if rec.code != 400 || rec.body.String() != "Wrong current password" {
 			t.Fatalf("wrong b %d: %d %q", i, rec.code, rec.body.String())
 		}
 	}
-	before := calls.Load()
-	for _, password := range []string{"bad6", "Admin"} {
-		rec := apiFrom(handler, ip, token, "/admin:inside:setMUB?a=2000&b="+password)
-		retry, _ := strconv.Atoi(rec.Header().Get("Retry-After"))
-		if rec.code != 429 || retry < 1 || retry > 60 {
-			t.Errorf("b=%q after 5 failures: %d, Retry-After %q; expected 429", password, rec.code, rec.Header().Get("Retry-After"))
-		}
+	rec := apiFrom(handler, ip, token, "/admin:inside:setMUB?a=2000&b=bad"+strconv.Itoa(loginMaxFailures))
+	if rec.Header().Get("X-Turbo-Login") != "required" {
+		t.Errorf("the %dth wrong current password: %d %q; expected the session closed", loginMaxFailures, rec.code, rec.body.String())
 	}
-	if n := calls.Load() - before; n != 0 {
-		t.Errorf("the blocked attempts computed %d PBKDF2", n)
+	if rec := apiFrom(handler, ip, token, "/admin:inside:setMUB?a=2000&b="+password); rec.Header().Get("X-Turbo-Login") != "required" || maxURILength.Load() == 2000 {
+		t.Errorf("the closed session with the right password: %d %q; expected the login", rec.code, rec.body.String())
 	}
-	if maxURILength.Load() == 2000 {
-		t.Error("MUB changed with the IP blocked")
+	rec = loginFrom(handler, ip, "Turbo", password)
+	if rec.code != 200 {
+		t.Fatalf("login after the session was closed: %d; expected 200 (the IP isn't blocked)", rec.code)
 	}
-	if rec := loginFrom(handler, ip, "Turbo", "Admin"); rec.code != 429 {
-		t.Errorf("login with the IP blocked: %d; expected 429", rec.code)
-	}
-	expireLoginBlock(t, ip)
-	if rec := loginFrom(handler, ip, "Turbo", "Admin"); rec.code != 200 {
-		t.Errorf("login after the block: %d", rec.code)
-	}
-	if rec := apiFrom(handler, ip, token, "/admin:inside:setMUB?a=2000&b=Admin"); rec.code != 200 {
-		t.Errorf("setMUB with the right password after the block: %d %q", rec.code, rec.body.String())
+	token = strings.TrimPrefix(rec.body.String(), "ok")
+	if rec := apiFrom(handler, ip, token, "/admin:inside:setMUB?a=2000&b="+password); rec.code != 200 {
+		t.Errorf("setMUB with the right password in a new session: %d %q", rec.code, rec.body.String())
 	}
 }
 
@@ -110,8 +93,7 @@ func TestN26_LoginTimingWithoutUser(t *testing.T) {
 func TestI19_PasswordHashError(t *testing.T) {
 	initForTest(t)
 	handler := serverHandlerFn("")
-	rec := loginFrom(handler, "198.51.100.32", "Turbo", "Admin")
-	token := strings.TrimPrefix(rec.body.String(), "ok")
+	token := newSession(t, "198.51.100.32")
 	previous := derivePasswordKey
 	t.Cleanup(func() { derivePasswordKey = previous })
 	derivePasswordKey = func(password string, salt []byte, iterations int, keyLength int) ([]byte, error) {
@@ -121,7 +103,7 @@ func TestI19_PasswordHashError(t *testing.T) {
 		return previous(password, salt, iterations, keyLength)
 	}
 	logs := captureLog(t)
-	rec = apiFrom(handler, "198.51.100.32", token, "/admin:inside:setP?a=NewPassword1&b=Admin")
+	rec := apiFrom(handler, "198.51.100.32", token, "/admin:inside:setP?a=NewPassword1&b=Admin")
 	if rec.code != 500 {
 		t.Errorf("setP with PBKDF2 failing: %d %q; expected 500", rec.code, rec.body.String())
 	}

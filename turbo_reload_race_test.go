@@ -22,8 +22,8 @@ type loopResults struct{ accepted, refused, limited, other, failed atomic.Int64 
 // the shared maps: adding and deleting sites, subdomains and character
 // replacements and, if the password is given, a setting (setRT) whose
 // parameters go through the replacements. Without a password there is no
-// setting: a wrong current password counts as a failed login and would block
-// the IP.
+// setting: a wrong current password counts for the session, and the fifth
+// would close it.
 func panelLoops(base, tok, password string, stop chan struct{}, wg *sync.WaitGroup) *loopResults {
 	results := &loopResults{}
 	do := func(path string) {

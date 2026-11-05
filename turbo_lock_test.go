@@ -31,7 +31,7 @@ func (w *blockingWriter) Write(b []byte) (int, error) {
 func TestB3_PanelWritesWithoutLock(t *testing.T) {
 	initForTest(t)
 	handler := serverHandlerFn("")
-	token := strings.TrimPrefix(loginFrom(handler, "192.0.2.10", "Turbo", "Admin").body.String(), "ok")
+	token := newSession(t, "192.0.2.10")
 	for _, path := range []string{"/admin:inside:sites", "/admin:inside:subdomains?s=localhost", "/admin:inside:subdomainData?s=localhost&d="} {
 		req := newPanelRequest(path, "192.0.2.10:40000")
 		req.Header.Set("ok", token)

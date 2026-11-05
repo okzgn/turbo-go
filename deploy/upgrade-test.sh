@@ -123,8 +123,8 @@ panel addSite "s=s.test" >/dev/null
 panel addSubdomain "s=a.test&d=sub" >/dev/null
 panel addAlias "s=a.test&d=&a=alias.test" >/dev/null
 panel addRewrite "s=a.test&d=&a=/old&b=/new.html" >/dev/null
-panel addHeader "s=a.test&d=&a=X-Test&b=yes" >/dev/null
-panel addMIME "s=a.test&d=&a=dat&b=text/x-dat" >/dev/null
+panel addHeader "s=a.test&d=&a=X-Test&b=yes&c=Admin" >/dev/null # The password: since v2.4.2 (ignored before)
+panel addMIME "s=a.test&d=&a=dat&b=text/x-dat&c=Admin" >/dev/null
 panel addIndex "s=a.test&d=&a=start.html" >/dev/null
 panel addPreprocessor "s=a.test&d=&a=cgi&b=$TMPD/cgi.sh&c=Admin" >/dev/null
 panel addDenied "s=203.0.113.7&d=4102444800" >/dev/null

@@ -223,7 +223,7 @@ func TestRP_B2_PasswordActionsTakeValuesAsSent(t *testing.T) {
 		t.Error("delPreprocessor with a=cgi didn't delete the preprocessor of cgi")
 	}
 	// The site and the subdomain are never replaced; the other values of an action of the session alone still are.
-	if rec := apiFrom(serverHandlerFn(""), ip, token, "/admin:inside:addHeader?"+url.Values{"s": {"cgtest.test"}, "d": {""}, "a": {"X-Test"}, "b": {"1cg2"}}.Encode()); rec.code != 200 {
+	if rec := apiFrom(serverHandlerFn(""), ip, token, "/admin:inside:addHeader?"+url.Values{"s": {"cgtest.test"}, "d": {""}, "a": {"X-Test"}, "b": {"1cg2"}, "c": {"Admin"}}.Encode()); rec.code != 200 {
 		t.Fatalf("addHeader on cgtest.test: %d %q", rec.code, rec.body.String())
 	}
 	globalMutex.RLock()

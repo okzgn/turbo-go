@@ -142,8 +142,8 @@ func TestRL_S2_UnderscoreHeadersDontReachCGI(t *testing.T) {
 }
 
 // Review of 57cbb3c, S4: the CGI gets in HTTP_HOST and SERVER_NAME the host that chose the site, in lower case,
-// without a final dot, with its port only if it is a number: before, it got whatever came around the name
-// ("[localhost]x'()").
+// without a final dot, with its port: before, it got whatever came around the name ("[localhost]x'()"). Since R2-06
+// (production review of 2026-11-04), a Host with something around the name, or a port that isn't digits, gets 400.
 func TestRL_S4_CanonicalHostForCGI(t *testing.T) {
 	dir := initForTest(t)
 	os.WriteFile(dir+"localhost/@/x.cgi", []byte("x"), 0644)
@@ -152,13 +152,17 @@ func TestRL_S4_CanonicalHostForCGI(t *testing.T) {
 	globalMutex.Unlock()
 	addr := strings.TrimPrefix(startServer(t), "http://")
 	for host, want := range map[string][2]string{
-		"[localhost]x'()": {"localhost", "localhost"},
 		"LocalHost.:8080": {"localhost:8080", "localhost"},
-		"localhost:x":     {"localhost", "localhost"},
+		"LOCALHOST":       {"localhost", "localhost"},
 	} {
 		env := rawCGIEnv(t, addr, "GET /x.cgi?env=SERVER_NAME HTTP/1.1\r\nHost: "+host+"\r\nConnection: close\r\n\r\n")
 		if env["HTTP_HOST"] != want[0] || env["SERVER_NAME"] != want[1] {
 			t.Errorf("Host %q: HTTP_HOST=%q, SERVER_NAME=%q; expected %q and %q", host, env["HTTP_HOST"], env["SERVER_NAME"], want[0], want[1])
+		}
+	}
+	for _, host := range []string{"[localhost]x'()", "localhost:x"} {
+		if res, body := sendRaw(t, addr, "GET /x.cgi HTTP/1.1\r\nHost: "+host+"\r\nConnection: close\r\n\r\n"); res.StatusCode != 400 {
+			t.Errorf("Host %q: %d %q; expected 400", host, res.StatusCode, body)
 		}
 	}
 }

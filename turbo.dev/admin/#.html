@@ -87,7 +87,7 @@ document.addEventListener('DOMContentLoaded', function(G, E, T, U, P){
 		function(Z, S, R){ // S: HTTP status (0 without an answer). 429: too many failed logins from this IP; 503: no room to check the password now
 			delete T.dataset.l, R = Math.max(1, +this.getResponseHeader('Retry-After') || 1), R = R + (R == 1 ? ' second' : ' seconds');
 			switch(S){
-				case 403: U.value = '', P.value = ''; return A('Wrong user or password');
+				case 403: if(this.getResponseHeader('X-Turbo-Login') == 'local-only'){ return A(Z); } U.value = '', P.value = ''; return A('Wrong user or password');
 				case 429: return A('Too many failed attempts: wait ' + R);
 				case 503: return A('Server busy: try again in ' + R);
 				case 413: return A('User or password too long');
@@ -103,7 +103,7 @@ document.addEventListener('DOMContentLoaded', function(G, E, T, U, P){
 <body>
 <form id="E" action="/admin:" method="post">
 <fieldset>
-	<h1><a target="_blank" href="https://okzgn.com"><img src="/admin:i.png" alt="OKZGN logo"><span>Turbo</span></a></h1>
+	<h1><a target="_blank" rel="noopener noreferrer" href="https://okzgn.com"><img src="/admin:i.png" alt="OKZGN logo"><span>Turbo</span></a></h1>
 	<h2>Administration</h2>
 	<p id="G" data-hidden></p>
 	<input type="text" name="u" placeholder="User">

@@ -67,7 +67,7 @@ func TestP05_SlowDownloadWithVisits(t *testing.T) {
 	slowDownload(t, base)
 	get(base, "/hello-warmup", nil)
 	// The panel asks for Lock while the slow download is in progress.
-	go post(base, "/admin:inside:addHeader?s=localhost&d=&a=X-A&b=1", tok)
+	go post(base, "/admin:inside:addHeader?s=localhost&d=&a=X-A&b=1&c=Admin", tok)
 	time.Sleep(200 * time.Millisecond)
 	t0 := time.Now()
 	code, _, err := get(base, "/index.html", nil)

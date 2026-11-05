@@ -153,6 +153,11 @@ var (
 				return false, "Loopback IP"
 			}
 			address := ipAddr(ip)
+			// An IPv6 denial covers its /64 (deniedNetworks): one of ::/64 (::2, ::7f00:1) denied ::1 too, closing the
+			// connections of the health checks, a local proxy or an SSH tunnel.
+			if limiterKey(address) == limiterKey("::1") {
+				return false, "Loopback IP: its /64 holds ::1"
+			}
 			dateText := strings.TrimSpace(unixDate)
 			parsedUnix, parseErr := strconv.ParseInt(dateText, 10, 64)
 			if parseErr != nil {
@@ -330,6 +335,12 @@ var (
 					if loadingConfig { // The same folder written another way: saved as the file writes it
 						sitesDirValue.Set(args[0])
 					}
+					return false, "Sites directory unchanged"
+				}
+				// While a turbo.config is applied, the reload has followed its "M" already (updateSettingsFollowing), or
+				// chose not to (setM to the start directory): the sites directory changes only with the reload that
+				// applies its configuration, at once.
+				if loadingConfig {
 					return false, "Sites directory unchanged"
 				}
 				info, err := diskStat(resolved)
@@ -582,6 +593,9 @@ var (
 					return false, "Value unchanged"
 				}
 				setTimeLimits(func(limits *customNetHttp.Timeouts) { limits.RT = value })
+				if value == 0 && !loadingConfig {
+					warnUnlimitedTimeouts()
+				}
 				return true, "Request read timeout saved"
 			},
 			"RHT": func(args ...string) (bool, string) {
@@ -610,6 +624,9 @@ var (
 					return false, "Value unchanged"
 				}
 				setTimeLimits(func(limits *customNetHttp.Timeouts) { limits.RHT = value })
+				if value == 0 && !loadingConfig {
+					warnUnlimitedTimeouts()
+				}
 				return true, "Header read timeout saved"
 			},
 			"WT": func(args ...string) (bool, string) {
@@ -635,6 +652,9 @@ var (
 					}
 				}
 				setTimeLimits(func(limits *customNetHttp.Timeouts) { limits.WT = value })
+				if value == 0 && !loadingConfig {
+					warnUnlimitedTimeouts()
+				}
 				return true, "Response write timeout saved"
 			},
 			"IT": func(args ...string) (bool, string) {
@@ -660,6 +680,9 @@ var (
 					}
 				}
 				setTimeLimits(func(limits *customNetHttp.Timeouts) { limits.IT = value })
+				if value == 0 && !loadingConfig {
+					warnUnlimitedTimeouts()
+				}
 				return true, "Idle connection timeout saved"
 			},
 		},
@@ -1227,7 +1250,10 @@ var (
 					if printErrors {
 						return false, "The alias is a site's host"
 					}
-					continue // The site wins: dropAliasesOfSites says so, once every site is in
+					// The site wins. Of a site already there when the alias is read (one of turbo.config before it, or
+					// one that came while this one was kept without its folder); dropAliasesOfSites tells the others.
+					slog.Warn("Alias discarded: its host is a site's", "alias", alias, "site", siteKeys[1])
+					continue
 				}
 				if target, assigned := domainAliases[alias]; assigned {
 					if target == siteKeys[1] && printErrors {
@@ -1236,8 +1262,8 @@ var (
 					if printErrors {
 						return false, "Alias already assigned"
 					}
-					if isFromFile && target != siteKeys[1] {
-						slog.Warn("Alias of two sites in turbo.config: the first one is kept", "alias", alias, "site", target, "discarded", siteKeys[1])
+					if isFromFile && target != siteKeys[1] { // From turbo.config, or kept with a site that comes back
+						slog.Warn("Alias of two sites: the first one is kept", "alias", alias, "site", target, "discarded", siteKeys[1])
 					}
 					continue
 				}
@@ -1501,8 +1527,10 @@ var (
 			if argCount < 3 || argCount > 5 {
 				return false, msgMissingData + " for E"
 			}
-			if fromFile { // From turbo.config, which keeps it URL-encoded (createSiteSettingsList); the API gets it decoded
-				email, err := url.QueryUnescape(args[0])
+			// From turbo.config, which keeps it URL-encoded (createSiteSettingsList, where a "+" is "%2B"); the API gets it
+			// decoded. A "+" is kept as it is: no e-mail has a space, and one written by hand (admin+certs@…) was dropped.
+			if fromFile {
+				email, err := url.PathUnescape(args[0])
 				if err != nil {
 					return false, "Invalid e-mail value"
 				}
@@ -1985,6 +2013,25 @@ func rateLimitProblem(cisMillis int64, cii int64) string {
 // half of.
 func readTimeProblem(rt time.Duration, rht time.Duration) bool {
 	return rt > 0 && rht > 0 && 2*rht > rt
+}
+
+// warnUnlimitedTimeouts logs the timeouts without a limit (0): RT and WT, and RHT and IT while RT is 0 too (0 makes
+// them use RT). A client could then hold a connection, or keep a CGI running, as long as it wanted. Turbo warns at the
+// start and when the panel saves a 0; the defaults have limits.
+func warnUnlimitedTimeouts() {
+	limits := serverTimeLimits.Load()
+	var unlimited []string
+	for _, timeout := range []struct {
+		key  string
+		zero bool
+	}{{"RT", limits.RT == 0}, {"RHT", limits.RHT == 0 && limits.RT == 0}, {"WT", limits.WT == 0}, {"IT", limits.IT == 0 && limits.RT == 0}} {
+		if timeout.zero {
+			unlimited = append(unlimited, timeout.key)
+		}
+	}
+	if len(unlimited) > 0 {
+		slog.Warn("Timeouts without a limit (0): a client can hold a connection, or keep a CGI running, as long as it wants", "settings", strings.Join(unlimited, ","))
+	}
 }
 
 // enforceSettingInvariants puts back the defaults of the settings that don't meet their conditions with the ones

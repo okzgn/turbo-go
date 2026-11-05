@@ -24,7 +24,8 @@ package customNetHttp
 
 // Substitute for internal/godebug, which can't be imported outside Go's
 // tree. customNetHttp doesn't read GODEBUG: every setting is "" and Go's
-// code applies its default behaviour (that of go 1.26 in go.mod).
+// code applies its default behaviour (that of the language version of
+// go.mod, 1.26).
 //
 // customNetHttp/regenerate turns each godebug.X of Go's code into
 // godebug_X.

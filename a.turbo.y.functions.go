@@ -23,9 +23,12 @@ For commercial licensing, please visit one of the following:
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"io"
@@ -126,25 +129,69 @@ func requestHostName(hostHeader string) string {
 	return strings.TrimSuffix(strings.ToLower(name), ".")
 }
 
-// hostNameValid reports whether a lower case name is a host name: up to 220 bytes, of labels of 1 to 63
-// characters of [a-z0-9-] that don't start or end with "-" ("--" inside one, as in "xn--", is allowed).
-// canonicalHost is a Host as it chooses the site (requestHostName): the name in lower case and without a final
-// dot, in brackets if it is an IPv6 address, and a ":" with the port only if the port is a number. Without a name,
-// it is left as it is.
-func canonicalHost(hostHeader string) string {
-	name := requestHostName(hostHeader)
-	if name == "" {
-		return hostHeader
+// canonicalHost is a Host as it chooses the site: the name in lower case and without a final dot, an IPv6 address in
+// brackets and in its canonical form, and ":" with the port when there is one (an empty port, which RFC 3986 allows,
+// is dropped). It reports false for what isn't a host: brackets that don't hold an IPv6 address at the start, or
+// text after "]" other than ":port"; an IPv6 address with a zone; more than one ":" outside brackets; a port that
+// isn't 1 to 5 digits; no name; a name that, without its final dot, still ends in ".". It served some of those as
+// another host (the name before a "]"), and a zone carried any text into the HTTP_HOST and SERVER_NAME of a CGI of
+// the site "*". An empty Host (HTTP/1.0) is left as it is.
+func canonicalHost(hostHeader string) (string, bool) {
+	if hostHeader == "" {
+		return "", true
 	}
-	if strings.IndexByte(name, ':') != -1 { // An IPv6 address
-		name = "[" + name + "]"
+	name, port := hostHeader, ""
+	if hostHeader[0] == '[' {
+		end := strings.IndexByte(hostHeader, ']')
+		if end == -1 {
+			return "", false
+		}
+		address, err := netip.ParseAddr(hostHeader[1:end])
+		if err != nil || !address.Is6() || address.Zone() != "" {
+			return "", false
+		}
+		if rest := hostHeader[end+1:]; rest != "" {
+			if rest[0] != ':' {
+				return "", false
+			}
+			port = rest[1:]
+		}
+		name = "[" + address.String() + "]"
+	} else {
+		if strings.ContainsAny(hostHeader, "[]") {
+			return "", false
+		}
+		if colon := strings.IndexByte(hostHeader, ':'); colon != -1 {
+			name, port = hostHeader[:colon], hostHeader[colon+1:]
+		}
+		name = strings.TrimSuffix(strings.ToLower(name), ".")
+		if name == "" || strings.HasSuffix(name, ".") {
+			return "", false
+		}
 	}
-	if _, port, err := net.SplitHostPort(hostHeader); err == nil && port != "" && onlyDigits(port) {
-		return name + ":" + port
+	if port == "" {
+		return name, true
+	}
+	if len(port) > 5 || !onlyDigits(port) { // Another ":" falls here too
+		return "", false
+	}
+	return name + ":" + port, true
+}
+
+// panelHostName is the name of the request's Host as "PA" lists the hosts (parsePanelAccess): requestHostName, and an
+// IP address in its canonical form and unmapped ("[::ffff:127.0.0.1]" is 127.0.0.1).
+func panelHostName(request *customNetHttp.Request) string {
+	name := requestHostName(request.Host)
+	if mayBeIPAddress(name) {
+		if address, err := netip.ParseAddr(name); err == nil {
+			return address.Unmap().String()
+		}
 	}
 	return name
 }
 
+// hostNameValid reports whether a lower case name is a host name: up to 220 bytes, of labels of 1 to 63
+// characters of [a-z0-9-] that don't start or end with "-" ("--" inside one, as in "xn--", is allowed).
 func hostNameValid(name string) bool {
 	if name == "" || len(name) > 220 {
 		return false
@@ -628,11 +675,16 @@ func certificateFor(name string) *tls.Certificate {
 }
 
 // setSiteCertificate loads (or, with nil, removes) the certificate of a site and publishes the names covered.
-// Removing one doesn't affect the others. Callers hold the global lock.
+// Removing one doesn't affect the others. A certificate that doesn't cover the site's own name is used for the names
+// it covers, and the log says so. Callers hold the global lock.
 func setSiteCertificate(siteKey string, cert *tls.Certificate) {
+	delete(siteCertificateStamps, siteKey) // Its files are looked at again (refreshSiteCertificates)
 	if cert == nil {
 		delete(siteCertificates, siteKey)
 	} else {
+		if previous := siteCertificates[siteKey]; !sameCertificate(previous, cert) && !certificateCovers(cert, siteKey) {
+			slog.Warn("The certificate of a site doesn't cover its name: it is used only for the names it covers", "site", siteKey, "names", strings.Join(certificateNames(cert), ","))
+		}
 		siteCertificates[siteKey] = cert
 	}
 	if !certificatePublishPaused { // While a turbo.config is applied, they are published once at the end
@@ -640,28 +692,119 @@ func setSiteCertificate(siteKey string, cert *tls.Certificate) {
 	}
 }
 
-// publishCertificates publishes the names covered by the panel's certificate and by those of the sites, the
-// panel's first. Callers hold the global lock.
+// publishCertificates publishes the names covered by the panel's certificate and by those of the sites, in this
+// order: the panel's; each site's own, while it is valid, for the site's name; the other names of the valid ones;
+// and the names still free of those that aren't (expired, or not valid yet). It went by the alphabetical order of
+// the sites alone: an expired certificate of example.com that also covered shop.example.com was served there
+// instead of shop's own, valid one. They are published again when one of them expires or becomes valid. Callers
+// hold the global lock.
 func publishCertificates() {
+	now := time.Now()
 	siteKeys := make([]string, 0, len(siteCertificates))
 	for key := range siteCertificates {
 		siteKeys = append(siteKeys, key)
 	}
 	sort.Strings(siteKeys) // A name covered twice always gets the same certificate
 	byName := make(map[string]*tls.Certificate)
-	if panelCertificate != nil {
-		for _, name := range certificateNames(panelCertificate) {
-			byName[name] = panelCertificate
+	take := func(name string, cert *tls.Certificate) {
+		if _, taken := byName[name]; !taken {
+			byName[name] = cert
 		}
 	}
-	for _, key := range siteKeys {
-		for _, name := range certificateNames(siteCertificates[key]) {
-			if _, taken := byName[name]; !taken {
-				byName[name] = siteCertificates[key]
+	if panelCertificate != nil {
+		for _, name := range certificateNames(panelCertificate) {
+			take(name, panelCertificate)
+		}
+	}
+	for _, key := range siteKeys { // Each site's own certificate, valid, for the site's name
+		if cert := siteCertificates[key]; certificateValid(cert, now) && certificateCovers(cert, key) {
+			take(key, cert)
+		}
+	}
+	for _, valid := range []bool{true, false} { // The other names of the valid ones, then of the others
+		for _, key := range siteKeys {
+			if cert := siteCertificates[key]; certificateValid(cert, now) == valid {
+				for _, name := range certificateNames(cert) {
+					// A name that a valid wildcard covers stays with it: handshakes look for the exact name first,
+					// and an expired certificate of shop.example.com won over a valid one of *.example.com.
+					if _, parent, _ := strings.Cut(name, "."); !valid && parent != "" && certificateValid(byName["*."+parent], now) {
+						continue
+					}
+					take(name, cert)
+				}
 			}
 		}
 	}
 	certificatesByName.Store(&byName)
+	scheduleCertificatesPublish(now)
+}
+
+// certificatesPublishTimer publishes the certificates again (publishCertificates) when the first of the sites' ones
+// expires or becomes valid, which changes the names it gets. Guarded by globalMutex.
+var certificatesPublishTimer *time.Timer
+
+// scheduleCertificatesPublish sets certificatesPublishTimer for the next NotBefore or NotAfter after now of the
+// sites' certificates. Callers hold the global lock.
+func scheduleCertificatesPublish(now time.Time) {
+	if certificatesPublishTimer != nil {
+		certificatesPublishTimer.Stop()
+		certificatesPublishTimer = nil
+	}
+	var next time.Time
+	for _, cert := range siteCertificates {
+		if leaf := certificateLeaf(cert); leaf != nil {
+			for _, moment := range []time.Time{leaf.NotBefore, leaf.NotAfter} {
+				if moment.After(now) && (next.IsZero() || moment.Before(next)) {
+					next = moment
+				}
+			}
+		}
+	}
+	if !next.IsZero() {
+		certificatesPublishTimer = time.AfterFunc(certificatesPublishDelay(next, now), func() { withGlobalLock(publishCertificates) })
+	}
+}
+
+// certificatesPublishDelay is how long until the certificates are published again for a change at next: a second
+// after it, and a day at most. A certificate valid for centuries (a NotAfter of 9999, as RFC 5280 allows) made the
+// delay overflow into a negative one, and the timer published and rearmed itself in a loop, holding the global lock.
+func certificatesPublishDelay(next time.Time, now time.Time) time.Duration {
+	return min(next.Sub(now), 24*time.Hour) + time.Second
+}
+
+// certificateLeaf is the first certificate of a chain, parsed (nil if it can't be).
+func certificateLeaf(cert *tls.Certificate) *x509.Certificate {
+	if cert == nil {
+		return nil
+	}
+	if cert.Leaf == nil && len(cert.Certificate) > 0 {
+		leaf, _ := x509.ParseCertificate(cert.Certificate[0])
+		return leaf
+	}
+	return cert.Leaf
+}
+
+// certificateValid reports whether a certificate is valid at now: not expired, nor before its start.
+func certificateValid(cert *tls.Certificate, now time.Time) bool {
+	leaf := certificateLeaf(cert)
+	return leaf != nil && !now.Before(leaf.NotBefore) && now.Before(leaf.NotAfter)
+}
+
+// certificateCovers reports whether a certificate covers a site's name: one of its names is that one, or a wildcard
+// whose parent is the name's ("*.example.com" covers shop.example.com).
+func certificateCovers(cert *tls.Certificate, siteKey string) bool {
+	_, parent, _ := strings.Cut(siteKey, ".")
+	for _, name := range certificateNames(cert) {
+		if name == siteKey || !strings.HasPrefix(siteKey, "*.") && parent != "" && name == "*."+parent {
+			return true
+		}
+	}
+	return false
+}
+
+// sameCertificate reports whether two certificates are the same one (their first certificates are).
+func sameCertificate(a *tls.Certificate, b *tls.Certificate) bool {
+	return a != nil && b != nil && len(a.Certificate) > 0 && len(b.Certificate) > 0 && bytes.Equal(a.Certificate[0], b.Certificate[0])
 }
 
 // panelCertificate is the certificate of the panel's own host, read from <sites>/turbo.panel/ (nil without one),
@@ -735,10 +878,7 @@ func applyPanelCertificate(baseDir string, look panelCertificateLook) {
 
 // certificateNames returns the host names a certificate covers: its DNS names, or its common name without them.
 func certificateNames(cert *tls.Certificate) []string {
-	leaf := cert.Leaf
-	if leaf == nil && len(cert.Certificate) > 0 {
-		leaf, _ = x509.ParseCertificate(cert.Certificate[0])
-	}
+	leaf := certificateLeaf(cert)
 	if leaf == nil {
 		return nil
 	}
@@ -764,29 +904,37 @@ func loadSiteCertificate(siteKey string, siteDir string) error {
 	return nil
 }
 
+// activeSiteFolders are the folders of the active sites and subdomains, by site key ("sub.example.com" for a
+// subdomain): an index made once, where looking for each key among the sites cost as many sites as there are.
+// Callers hold the global lock, or its read lock.
+func activeSiteFolders() map[string]string {
+	folders := make(map[string]string)
+	baseDir := sitesDir.Get()
+	for domain, subdomains := range sitesMap {
+		for subdomain := range subdomains {
+			siteKey := domain
+			if subdomain != "" {
+				siteKey = subdomain + "." + domain
+			}
+			folders[siteKey] = baseDir + siteFolder(domain, subdomain)
+		}
+	}
+	return folders
+}
+
 // loadPendingCertificates loads the certificates of the sites with HTTPS on whose files couldn't be loaded when
 // turbo.config was read (the "S" of a site whose folder came back before its .pem, or a key not readable yet). The
 // files are read without the global lock; each certificate is put in use if its site still wants it.
 func loadPendingCertificates() {
 	pending := make(map[string]string) // Site key -> its folder
 	withReadLock(func() {
+		folders := activeSiteFolders()
 		for siteKey := range siteSSLConfig {
 			if _, loaded := siteCertificates[siteKey]; loaded || !httpsEnabled(siteKey) {
 				continue
 			}
-			domain, subdomain := siteKey, ""
-			if sitesMap[siteKey] == nil { // "sub.example.com": the subdomain of a site
-				for site := range sitesMap {
-					if prefix, found := strings.CutSuffix(siteKey, "."+site); found {
-						if _, isSubdomain := sitesMap[site][prefix]; isSubdomain {
-							domain, subdomain = site, prefix
-							break
-						}
-					}
-				}
-			}
-			if _, active := sitesMap[domain][subdomain]; active {
-				pending[siteKey] = sitesDir.Get() + siteFolder(domain, subdomain)
+			if folder, active := folders[siteKey]; active {
+				pending[siteKey] = folder
 			}
 		}
 	})
@@ -804,6 +952,65 @@ func loadPendingCertificates() {
 				safeServerStart(servers[0], tlsConfig) // Opens httpsAddr (:443), as enabling HTTPS does
 			}
 			slog.Info("Certificate loaded: the site has HTTPS again", "site", siteKey)
+		})
+	}
+}
+
+// siteCertificateStamps are the dates and sizes of the certificate files of each site whose certificate is in use,
+// when refreshSiteCertificates last looked at them (none until it does, after each load). Guarded by globalMutex.
+var siteCertificateStamps = make(map[string]string)
+
+// certificateFilesStamp is the dates and sizes of the certificate files (fullchain.pem and privkey.pem) of a folder,
+// "" without them.
+func certificateFilesStamp(dir string) string {
+	stamp := ""
+	for _, name := range []string{certFileName, keyFileName} {
+		if info, err := siteDirStat(dir + name); err == nil {
+			stamp += strconv.FormatInt(info.ModTime().UnixNano(), 10) + "/" + strconv.FormatInt(info.Size(), 10) + ";"
+		}
+	}
+	return stamp
+}
+
+// refreshSiteCertificates reads again the certificate of each site with HTTPS on whose files changed since they
+// were looked at (a renewal outside Turbo, or files copied by hand), as the panel's: it was read only when
+// turbo.config was applied, and a renewal wasn't seen until Turbo restarted. The files are looked at, and read,
+// without the global lock. A pair that can't be loaded (a new chain whose key hasn't come yet) leaves the
+// certificate in use, and one is put in use only if nothing changed the site's certificate meanwhile.
+func refreshSiteCertificates() {
+	type inUse struct {
+		folder, stamp string
+		cert          *tls.Certificate
+	}
+	sites := make(map[string]inUse)
+	withReadLock(func() {
+		folders := activeSiteFolders()
+		for siteKey, cert := range siteCertificates {
+			if folder, active := folders[siteKey]; active && httpsEnabled(siteKey) {
+				sites[siteKey] = inUse{folder, siteCertificateStamps[siteKey], cert}
+			}
+		}
+	})
+	for siteKey, site := range sites {
+		stamp := certificateFilesStamp(site.folder)
+		if stamp == site.stamp || stamp == "" { // Without its files, the one in use stays
+			continue
+		}
+		cert, err := tls.LoadX509KeyPair(site.folder+certFileName, site.folder+keyFileName)
+		withGlobalLock(func() {
+			if siteCertificates[siteKey] != site.cert || siteCertificateStamps[siteKey] != site.stamp || !httpsEnabled(siteKey) {
+				return // It changed meanwhile: the next look sees it
+			}
+			switch {
+			case err != nil:
+				if site.stamp != "" {
+					slog.Warn("The certificate files of a site changed and can't be loaded: the certificate in use stays", "site", siteKey, "error", err)
+				}
+			case !sameCertificate(&cert, site.cert): // site.stamp "" is the first look after a load: the files may be newer
+				setSiteCertificate(siteKey, &cert)
+				slog.Info("The certificate of a site changed on disk: the new one is in use", "site", siteKey, "names", strings.Join(certificateNames(&cert), ","))
+			}
+			siteCertificateStamps[siteKey] = stamp
 		})
 	}
 }
@@ -1196,7 +1403,7 @@ func panelCertificateCovers(hosts []string) bool {
 // through os.Root. Nothing else of turbo.panel/ is served. It reports whether it answered.
 func panelACMEChallenge(responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request) bool {
 	const challengePrefix = "/.well-known/acme-challenge/"
-	if !strings.HasPrefix(request.RequestURI, challengePrefix) || !panelAccess.Load().hosts[requestHostName(request.Host)] {
+	if !strings.HasPrefix(request.RequestURI, challengePrefix) || !panelAccess.Load().hosts[panelHostName(request)] {
 		return false
 	}
 	token := cutAt(request.RequestURI[len(challengePrefix):], '?')
@@ -1328,14 +1535,31 @@ func startCertbot(key string, prepare func() (certbotJob, bool), finish func(sta
 
 // certbotWaitDelay is how long the output of Certbot is waited for once it has ended, or been killed when its time
 // ran out: a child that keeps it open (a hook of its configuration) held the attempt, and with it every later one,
-// until Turbo was restarted.
-const certbotWaitDelay = 10 * time.Second
+// until Turbo was restarted. A variable so that tests can shorten it.
+var certbotWaitDelay = 10 * time.Second
 
-// certbotCommand is Certbot with args, ended with ctx and with certbotWaitDelay.
+// certbotCommand is Certbot with args, ended with ctx and with certbotWaitDelay, and with Turbo's environment
+// without its own variables (certbotEnvironment).
 func certbotCommand(ctx context.Context, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "certbot", args...) // #nosec G204 -- fixed program; arguments checked by runCertbot (hostOk, parsePanelAccess, certbotEmailProblem, validCertbotAdapter)
 	cmd.WaitDelay = certbotWaitDelay
+	cmd.Env = certbotEnvironment()
 	return cmd
+}
+
+// certbotEnvironment is Turbo's environment without the variables of Turbo (TURBO_*, in any case, as Windows
+// doesn't tell them apart): TURBO_PASSWORD is the panel's password, and Certbot and its hooks, which may run
+// programs of a DNS provider's plugin, don't need any of them.
+func certbotEnvironment() []string {
+	environment := os.Environ()
+	kept := environment[:0:0]
+	for _, variable := range environment {
+		if name, _, _ := strings.Cut(variable, "="); len(name) >= 6 && strings.EqualFold(name[:6], "TURBO_") {
+			continue
+		}
+		kept = append(kept, variable)
+	}
+	return kept
 }
 
 // runCertbot runs Certbot for job and moves the new certificate to job.destDir. It returns true, or why it
@@ -1352,6 +1576,10 @@ func runCertbot(timeoutCtx context.Context, job certbotJob) interface{} {
 			return "Error emptying the previous certificate directory"
 		}
 	}
+	// Nor one for each site: Certbot's folder of each site gets the account of its e-mail that another site's Certbot
+	// made (R2-03), and Let's Encrypt still refused the tenth new site issued within 3 hours.
+	shared := acmeAccountsDir(job.email)
+	copyACMEAccounts(shared, job.certDir+"/accounts/")
 	// Names checked by hostOk (sites) or parsePanelAccess (PA), the e-mail by certbotEmailProblem and the
 	// adapter by validCertbotAdapter.
 	args := []string{"certonly"}
@@ -1371,10 +1599,26 @@ func runCertbot(timeoutCtx context.Context, job certbotJob) interface{} {
 		"--config-dir", job.certDir,
 		"--work-dir", job.certDir+"/work",
 		"--logs-dir", job.certDir+"/logs")
-	cmdOutput, err := certbotCommand(timeoutCtx, args...).CombinedOutput()
+	cmd := certbotCommand(timeoutCtx, args...)
+	cmdOutput, err := cmd.CombinedOutput()
+	if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.Success() {
+		// Certbot ended well, and something it started (a hook) kept its output open: the certificate is there.
+		// Discarding it, an issuance retried every day ran into Let's Encrypt's limit of duplicate certificates.
+		slog.Warn("Certbot ended well, but something it started kept its output open: its certificate is used", "names", strings.Join(job.names, ","))
+		err = nil
+	}
 	if err != nil {
+		if acmeAccountRefused(string(cmdOutput)) {
+			// Shared, an account the server no longer takes would be copied into every new site's folder, and their
+			// issuances would fail until someone removed it by hand: it goes, with the site's, and the next attempt
+			// makes a new one.
+			slog.Warn("The ACME server refused Certbot's account: it is removed, and the next attempt makes a new one", "names", strings.Join(job.names, ","))
+			os.RemoveAll(job.certDir + "/accounts")       // #nosec G104 -- best effort: Certbot's own error is the answer
+			os.RemoveAll(strings.TrimSuffix(shared, "/")) // #nosec G104 -- as above
+		}
 		return string(cmdOutput)
 	}
+	copyACMEAccounts(job.certDir+"/accounts/", shared) // The account it made, for the next sites
 
 	archiveDir := job.certDir + "/archive/"
 	archiveEntries, err := os.ReadDir(archiveDir)
@@ -1409,11 +1653,130 @@ func runCertbot(timeoutCtx context.Context, job certbotJob) interface{} {
 	if fullchainPath == "" || privkeyPath == "" {
 		return "Certificate files missing when obtaining it"
 	}
-	if os.Rename(fullchainPath, job.destDir+certFileName) != nil {
+	return installCertificate(fullchainPath, privkeyPath, job.destDir)
+}
+
+// renameFile is os.Rename, a variable so that tests can make one fail.
+var renameFile = os.Rename
+
+// installCertificate puts a new certificate, its chain and its key from Certbot's archive, in place of the
+// fullchain.pem and privkey.pem of dir: next to them first (".new"), loaded as a pair, and then over them, the key
+// first and the chain after it; if the chain can't follow, the previous key comes back. It was two renames, and when
+// the second failed (an antivirus holding privkey.pem, on Windows), the folder kept the new chain with the old key,
+// which no handshake can use. It returns true, or why it failed.
+func installCertificate(chainPath string, keyPath string, dir string) interface{} {
+	chain, key := dir+certFileName, dir+keyFileName
+	newChain, newKey := chain+".new", key+".new"
+	discard := func() {
+		os.Remove(newChain) // #nosec G104 -- best effort: what failed is what the caller reports
+		os.Remove(newKey)   // #nosec G104 -- as above
+	}
+	if renameFile(chainPath, newChain) != nil {
 		return "'Fullchain' can't be moved when obtaining it"
 	}
-	if os.Rename(privkeyPath, job.destDir+keyFileName) != nil {
+	if renameFile(keyPath, newKey) != nil {
+		discard()
 		return "'Privkey' can't be moved when obtaining it"
 	}
+	if _, err := tls.LoadX509KeyPair(newChain, newKey); err != nil {
+		discard()
+		return "The new certificate can't be loaded: " + err.Error()
+	}
+	previousKey, previousErr := os.ReadFile(key) // #nosec G304 -- the key of a site's or the panel's folder, to put back
+	if renameFile(newKey, key) != nil {
+		discard()
+		return "'Privkey' can't be put in place when obtaining it"
+	}
+	if renameFile(newChain, chain) != nil {
+		switch {
+		case previousErr == nil:
+			if err := writeFileAtomic(key, previousKey); err != nil {
+				slog.Error("Can't put the previous certificate key back: the certificate files of the folder don't match until it is issued again", "folder", dir, "error", err)
+			}
+		case errors.Is(previousErr, os.ErrNotExist):
+			os.Remove(key) // #nosec G104 -- there was no certificate: none, as before the attempt
+		}
+		discard()
+		return "'Fullchain' can't be put in place when obtaining it"
+	}
 	return true
+}
+
+// acmeAccountRefused reports whether Certbot's output says that the ACME server refused its account (deactivated, or
+// unknown to it).
+func acmeAccountRefused(output string) bool {
+	lower := strings.ToLower(output)
+	return strings.Contains(lower, "accountdoesnotexist") || strings.Contains(lower, "account is not valid") || strings.Contains(lower, "account has been deactivated")
+}
+
+// acmeAccountsDirName is the folder of the certificates directory where the ACME accounts that Certbot makes are
+// kept, one folder per e-mail, for every site's Certbot folder (copyACMEAccounts). Site names have no "_".
+const acmeAccountsDirName = "_acme-accounts"
+
+// acmeAccountsDir is the folder of the ACME accounts of an e-mail (acmeAccountsDirName): each e-mail keeps its own,
+// as Certbot registers it with the account.
+func acmeAccountsDir(email string) string {
+	sum := sha256.Sum256([]byte(strings.ToLower(email)))
+	return sitesDir.Get() + putSlash(certificatesDirName) + acmeAccountsDirName + "/" + hex.EncodeToString(sum[:8]) + "/"
+}
+
+// copyACMEAccounts copies the accounts of each ACME server of from (a Certbot "accounts" folder, or the shared one of
+// an e-mail) that to doesn't have: the server's folder whole, only folders and regular files, private (0700, 0600),
+// and put in place at once. Certbot uses an account it finds there instead of making one. What fails is logged, and
+// Certbot makes one, as before.
+func copyACMEAccounts(from string, to string) {
+	servers, err := os.ReadDir(from)
+	if err != nil {
+		return // No account yet
+	}
+	for _, server := range servers {
+		if !server.IsDir() {
+			continue
+		}
+		target := to + server.Name()
+		if _, err := os.Lstat(target); err == nil { // It has its own
+			continue
+		}
+		temporary := target + ".copy"
+		err := os.RemoveAll(temporary)
+		if err == nil {
+			err = copyPrivateTree(from+server.Name(), temporary)
+		}
+		if err == nil {
+			err = os.Rename(temporary, target)
+		}
+		if err != nil {
+			os.RemoveAll(temporary) // #nosec G104 -- best effort: the error is logged
+			slog.Warn("Can't share Certbot's ACME account: Certbot may make a new one", "from", from+server.Name(), "to", target, "error", err)
+		}
+	}
+}
+
+// copyPrivateTree copies the folders and regular files of from to a new folder to, readable only by Turbo: symbolic
+// links and anything else are left out.
+func copyPrivateTree(from string, to string) error {
+	if err := os.MkdirAll(to, 0700); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(from)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		source, target := from+"/"+entry.Name(), to+"/"+entry.Name()
+		switch {
+		case entry.IsDir():
+			err = copyPrivateTree(source, target)
+		case entry.Type().IsRegular():
+			var data []byte
+			data, err = os.ReadFile(source) // #nosec G304 -- a file of Certbot's folder
+			if err == nil {
+				err = os.WriteFile(target, data, 0600) // #nosec G703 -- into a new folder of Turbo's certificates directory
+			}
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }

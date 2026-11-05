@@ -248,8 +248,19 @@ func TestRP3_SentOutputReleased(t *testing.T) {
 	if !eventually(3*time.Second, func() bool { return shareOf("192.0.2.41").files == 0 }) {
 		t.Errorf("with all of it sent, the temporary files take %d bytes; expected none", shareOf("192.0.2.41").files)
 	}
-	if left := cgiOutputTempFiles(t, temp); len(left) != 1 || left[0] != 0 {
-		t.Errorf("with all of it sent, temporary files of %v bytes; expected one, empty, to go on with", left)
+	output.mutex.Lock()
+	var sizes []int64
+	for _, segment := range output.segments { // Without a name on Unix: looked at through the file itself
+		info, err := segment.file.Stat()
+		if err != nil {
+			t.Error(err)
+			continue
+		}
+		sizes = append(sizes, info.Size())
+	}
+	output.mutex.Unlock()
+	if len(sizes) != 1 || sizes[0] != 0 {
+		t.Errorf("with all of it sent, temporary files of %v bytes; expected one, empty, to go on with", sizes)
 	}
 	end()
 	if !bytes.Equal(client.received(), written.Bytes()) {

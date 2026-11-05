@@ -100,7 +100,7 @@ func TestB9_AllTextParametersReplaced(t *testing.T) {
 	if got := (*httpResponses.Load())[404]; got != "-,- does not exist" {
 		t.Errorf("saved template %q; expected it as sent, \"-,- does not exist\"", got)
 	}
-	if code, body, _ := post(base, "/admin:inside:addHeader?"+url.Values{"s": {"localhost"}, "d": {""}, "a": {"X-Test"}, "b": {"1zz2"}}.Encode(), tok); code != 200 {
+	if code, body, _ := post(base, "/admin:inside:addHeader?"+url.Values{"s": {"localhost"}, "d": {""}, "a": {"X-Test"}, "b": {"1zz2"}, "c": {"Admin"}}.Encode(), tok); code != 200 {
 		t.Fatalf("addHeader: %d %q", code, body)
 	}
 	globalMutex.RLock()
@@ -109,7 +109,7 @@ func TestB9_AllTextParametersReplaced(t *testing.T) {
 	if value != "1|2" {
 		t.Errorf("the header value 1zz2 was saved as %q; expected 1|2", value)
 	}
-	if code, body, _ := post(base, "/admin:inside:delHeader?"+url.Values{"s": {"localhost"}, "d": {""}, "a": {"X-Test"}}.Encode(), tok); code != 200 {
+	if code, body, _ := post(base, "/admin:inside:delHeader?"+url.Values{"s": {"localhost"}, "d": {""}, "a": {"X-Test"}, "b": {"Admin"}}.Encode(), tok); code != 200 {
 		t.Errorf("delHeader X-Test: %d %q", code, body)
 	}
 }

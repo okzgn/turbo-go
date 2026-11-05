@@ -3,7 +3,7 @@ package main
 // T28 (I17, D28 (a)): addPreprocessor, hardUpload, delSite and cfgC a=0 ask
 // for the current password besides the session (in c for addPreprocessor,
 // whose b is the executable; in b for the others). Without it, 400; wrong, it
-// counts as a failed login.
+// counts for the session, which the fifth closes.
 
 import (
 	"bytes"
@@ -70,16 +70,19 @@ func TestI17_DangerousActionsNeedPassword(t *testing.T) {
 			t.Errorf("%s without a password: %d; expected 400", action.name, code)
 		}
 	}
-	for i := 0; i < 5; i++ { // Five wrong ones: the IP's logins are blocked
+	for i := 0; i < loginMaxFailures; i++ { // Five wrong ones: the session is closed, and the IP isn't blocked (V14)
 		action := actions[i%len(actions)]
 		send(action.name, action.path, action.passed, "Bad")
 	}
-	if retry := startLoginAttempt("127.0.0.1"); retry == 0 {
-		t.Error("five wrong current passwords didn't block the IP's logins")
+	if code, _, _, _ := postSession(base, "/admin:inside:sites", tok); code != 401 {
+		t.Errorf("the session after five wrong current passwords: %d; expected it closed (401)", code)
 	}
-	loginFailuresMutex.Lock()
-	clear(loginFailuresByIP)
-	loginFailuresMutex.Unlock()
+	if attempt, retry := startLoginAttempt("127.0.0.1"); retry != 0 {
+		t.Error("five wrong current passwords blocked the IP's logins")
+	} else {
+		finishLoginAttempt(attempt, false)
+	}
+	tok = login(t, base)
 	for _, action := range actions[:3] {
 		// cfgC a=0 answers 400 "No certificate" here: what matters is that the reason is no longer the password
 		if code := send(action.name, action.path, action.passed, "Admin"); code == 400 && action.name != "cfgC a=0" {
@@ -140,7 +143,7 @@ func TestI17_PanelCertificateDeleteNeedsPassword(t *testing.T) {
 
 // N96: without its preprocessor, an extension's files are served as text, their source included (the keys of a
 // database, for example). Deleting one needs the current password (b), as adding one: without it, 400; wrong,
-// it counts as a failed login and the preprocessor stays.
+// it counts for the session and the preprocessor stays.
 func TestN96_DeletePreprocessorNeedsPassword(t *testing.T) {
 	initForTest(t)
 	base := startServer(t)

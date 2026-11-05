@@ -177,6 +177,11 @@ tls_old tls1 "TLS 1.0"
 tls_old tls1_1 "TLS 1.1"
 check "TLS 1.2" "$(tls tls1_2)" "TLSv1.2"
 check "TLS 1.3" "$(tls tls1_3)" "TLSv1.3"
+# TLS 1.2 only with AEAD suites: a client that offers only suites with CBC is refused.
+cbc="$(echo | timeout 5 openssl s_client -connect localhost:443 -servername localhost -tls1_2 \
+	-cipher 'ECDHE-RSA-AES128-SHA:ECDHE-ECDSA-AES128-SHA:ECDHE-RSA-AES256-SHA:ECDHE-ECDSA-AES256-SHA:ECDHE-RSA-AES128-SHA256:ECDHE-ECDSA-AES128-SHA256:@SECLEVEL=0' 2>&1)"
+if echo "$cbc" | grep -q 'Cipher is (NONE)' || ! echo "$cbc" | grep -q 'Cipher is '; then cbc=refused; else cbc="$(echo "$cbc" | grep -oE 'Cipher is [A-Z0-9-]+' | head -1)"; fi
+check "TLS 1.2 with CBC" "$cbc" "refused"
 check "Without SNI (access by IP)" "$(echo | timeout 5 openssl s_client -connect 127.0.0.1:443 -noservername 2>&1 | grep -c 'BEGIN CERTIFICATE')" "0"
 check "Unknown SNI" "$(echo | timeout 5 openssl s_client -connect localhost:443 -servername other.test 2>&1 | grep -c 'BEGIN CERTIFICATE')" "0"
 

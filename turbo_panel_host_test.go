@@ -205,13 +205,18 @@ func TestN89_ErrorTemplateWithoutScriptsOnPanelOrigin(t *testing.T) {
 	if !ok {
 		t.Fatal(msg)
 	}
-	scriptsAllowed := func(policy string) bool {
+	scriptsAllowed := func(policy string) bool { // script-src, if there is one, decides; else default-src
+		sources := map[string][]string{}
 		for _, directive := range strings.Split(policy, ";") {
-			if fields := strings.Fields(directive); len(fields) > 1 && (fields[0] == "script-src" || fields[0] == "default-src") {
-				return fields[1] != "'none'"
+			if fields := strings.Fields(directive); len(fields) > 1 {
+				sources[fields[0]] = fields[1:]
 			}
 		}
-		return true
+		list, found := sources["script-src"]
+		if !found {
+			list, found = sources["default-src"]
+		}
+		return !found || !(len(list) == 1 && list[0] == "'none'")
 	}
 	for _, path := range []string{"/admin:missing.html", "/admin:inside:missing", "/something-else", "/.well-known/acme-challenge/x"} {
 		res, body, err := rawGet(base, "panel.test", path)
@@ -247,10 +252,10 @@ func TestRM1_ErrorsBeforeHandlerWithoutScripts(t *testing.T) {
 	if !ok {
 		t.Fatal(msg)
 	}
-	withoutScripts := func(what string, policy string) {
+	withoutScripts := func(what string, policy string) { // Nor, with sandbox, a meta refresh, forms or windows (R6-06)
 		t.Helper()
-		if !strings.Contains(policy, "default-src 'none'") || strings.Contains(policy, "script-src") {
-			t.Errorf("%s: Content-Security-Policy %q; expected one that allows no scripts", what, policy)
+		if !strings.Contains(policy, "default-src 'none'") || strings.Contains(policy, "script-src") || !strings.HasSuffix(policy, "; sandbox") {
+			t.Errorf("%s: Content-Security-Policy %q; expected one that allows no scripts, sandboxed", what, policy)
 		}
 	}
 
@@ -262,6 +267,7 @@ func TestRM1_ErrorsBeforeHandlerWithoutScripts(t *testing.T) {
 		{"malformed Host", addr, "GET / HTTP/1.1\r\nHost: panel test\r\n\r\n"},
 		{"unknown Transfer-Encoding", addr, "POST / HTTP/1.1\r\nHost: panel.test\r\nTransfer-Encoding: bogus\r\n\r\n"},
 		{"plain HTTP to the TLS port", tlsAddr, "GET / HTTP/1.1\r\nHost: panel.test\r\n\r\n"},
+		{"unknown Expect", addr, "GET / HTTP/1.1\r\nHost: panel.test\r\nExpect: bogus\r\n\r\n"},
 	} {
 		res, body := sendRaw(t, c.addr, c.request)
 		if !strings.Contains(body, "<script>") {
@@ -282,6 +288,16 @@ func TestRM1_ErrorsBeforeHandlerWithoutScripts(t *testing.T) {
 		t.Errorf("HTTP/2, headers too long: %v; expected 431", fields)
 	} else {
 		withoutScripts("HTTP/2, headers too long", fields["content-security-policy"])
+	}
+	for _, c := range []struct{ what, name, value, status string }{ // R2-07
+		{"te other than trailers", "te", "gzip", "400"},
+	} {
+		h = dialH2(t, tlsAddr)
+		if fields := h.readHeaders(h.request("/", c.name, c.value)); fields[":status"] != c.status {
+			t.Errorf("HTTP/2, %s: %v; expected %s", c.what, fields, c.status)
+		} else {
+			withoutScripts("HTTP/2, "+c.what, fields["content-security-policy"])
+		}
 	}
 }
 

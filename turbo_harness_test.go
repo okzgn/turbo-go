@@ -67,6 +67,7 @@ func resetTestState(dir string) {
 
 	serverSetLogState(visitsLogName, nil)
 	serverSetLogState(denialsLogName, nil)
+	errorLines.reopen() // Grouped again, as at the start, also after a test that ran the shutdown
 
 	panelUser.Set("Turbo")
 	setPanelPassword("Admin")
@@ -74,6 +75,9 @@ func resetTestState(dir string) {
 	sitesDir.Set(dir)
 	sitesDirValue.Set(dir)
 	startDir = dir
+	settingsUpdateMutex.Lock()
+	sitesDirHops = 0 // The start directory, as at the start
+	settingsUpdateMutex.Unlock()
 
 	resetSettings()
 
@@ -96,10 +100,15 @@ func resetTestState(dir string) {
 	globalMutex.Unlock()
 
 	ipReferences.Clear()
-	ipReferenceCount.Store(0)
-	// Wrong current passwords count as failed logins: one test's must not block the next one's IP.
+	for level := range ipReferenceCounts {
+		ipReferenceCounts[level].Store(0)
+	}
+	// One test's failed logins, trusted clients (V15) and wrong current passwords of a session (V14) must not
+	// carry over to the next one.
 	loginFailuresMutex.Lock()
 	clear(loginFailuresByIP)
+	clear(loginTrusted)
+	clear(sessionPasswordChecks)
 	loginFailuresMutex.Unlock()
 	globalRequestLimit.Store(0)
 	globalRequestWindow.Store(0)
@@ -143,6 +152,12 @@ func (b *syncBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
+}
+
+func (b *syncBuffer) Reset() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.buf.Reset()
 }
 
 func startServer(t testing.TB) string {
