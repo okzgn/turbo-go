@@ -2,9 +2,13 @@
 
 [English](CHANGELOG.md)
 
-v2.4.3 es la versión siguiente a v2.4.2. Si actualiza desde **v2.4.2**, lea antes [Actualizar desde v2.4.2](#actualizar-desde-v242). Si actualiza desde **v2.4.1**, también se aplica v2.4.2: lea [Actualizar desde v2.4.1](#actualizar-desde-v241), y después [Actualizar desde v2.4.2](#actualizar-desde-v242). Si actualiza desde **v2.4**, lea [Actualizar desde v2.4](#actualizar-desde-v24), y después esas dos. Si actualiza desde **v2.3.rc3**, se aplican todas las etapas de v2.4 y todas las versiones posteriores: lea antes [Actualizar desde v2.3.rc3](#actualizar-desde-v23rc3), y después las otras tres.
+v2.4.4 es la versión siguiente a v2.4.3. Si actualiza desde **v2.4.3**, no cambia nada de lo que hace Turbo: vea [Actualizar desde v2.4.3](#actualizar-desde-v243). Si actualiza desde **v2.4.2**, lea antes [Actualizar desde v2.4.2](#actualizar-desde-v242). Si actualiza desde **v2.4.1**, también se aplica v2.4.2: lea [Actualizar desde v2.4.1](#actualizar-desde-v241), y después [Actualizar desde v2.4.2](#actualizar-desde-v242). Si actualiza desde **v2.4**, lea [Actualizar desde v2.4](#actualizar-desde-v24), y después esas dos. Si actualiza desde **v2.3.rc3**, se aplican todas las etapas de v2.4 y todas las versiones posteriores: lea antes [Actualizar desde v2.3.rc3](#actualizar-desde-v23rc3), y después las otras tres.
 
 Los binarios publicados son estáticos y se compilan con el último parche de Go 1.26. Compruebe la descarga con `SHA256SUMS`, en la carpeta de la descarga: `sha256sum -c --ignore-missing SHA256SUMS` (`--ignore-missing` comprueba solo los binarios que descargó; sin él, `sha256sum` falla por los demás). Una versión firmada trae además `SHA256SUMS.sig`: [SECURITY.md](SECURITY.md) dice cómo comprobarla.
+
+## Actualizar desde v2.4.3
+
+Sustituya el binario, y nada más: v2.4.4 es el servidor de v2.4.3, sin cambios en lo que hace, en su API ni en `turbo.config`, y sin cambios incompatibles. Lo que cambia es el isotipo que muestran el panel y el sitio de ejemplo (una copia de `turbo.dev` en el directorio de sitios sigue mostrando su propio `admin/i.png`) y, para quien compila Turbo o trabaja en él, dónde está su código en el repositorio: vea [v2.4.4](#v244).
 
 ## Actualizar desde v2.4.2
 
@@ -93,6 +97,18 @@ Antes de actualizar:
 **Los commits "v2.3.rc4." (`9307623`) y "v2.4." (`808dc6f`) de `main` no son versiones publicadas:** `9307623` tiene las etapas 1 a 3 de v2.4 y `808dc6f` las etapas 1 a 4; v2.4 es el commit "v2.4." `57cbb3c`, con las etapas 1 a 5. Si compiló Turbo desde uno de los dos primeros, actualice también; su `turbo.config` ya tiene el esquema 2, así que los puntos 2 y 3 no se aplican, y los cambios incompatibles que revisar son los de las etapas que le faltan (la 4 y la 5 a `9307623`, la 5 a `808dc6f`) y los de v2.4.1.
 
 ---
+
+## v2.4.4
+
+Sin publicar todavía: la versión siguiente a v2.4.3. El servidor es el mismo, sin cambios en lo que hace: esta versión trae su isotipo nuevo y, en el repositorio, el código en una carpeta y dos pruebas que ya no dependen de lo rápida que sea la máquina.
+
+### Novedades
+- **Isotipo nuevo:** el panel y el sitio de ejemplo muestran el isotipo nuevo de Turbo, y los iconos del repositorio (`turbo.icon.png`, `turbo.icon.small.png`, `turbo.icon.nano.png`) también son el nuevo. Una copia de `turbo.dev` en el directorio de sitios sigue mostrando su propio `admin/i.png`.
+
+### En el repositorio
+- **El código y sus pruebas, en `server/`:** la raíz del repositorio tenía los 19 archivos del código y los 111 de sus pruebas. Ahora son el paquete `server`, en la carpeta de ese nombre, con `testdata` y el `turbo.dev` que se embebe (Go solo deja que las pruebas de un paquete estén en su carpeta), y en la raíz queda `main.go`, que solo lo arranca (`main()` es ahora `Main()`, de ese paquete). `go build .` compila Turbo como antes y `release.sh` le da su versión de la misma manera; las pruebas de Turbo son `go test ./server` (`./...` las sigue ejecutando todas), y la configuración de ejemplo es `server/testdata/config/v2-example.json`.
+- **Pruebas que dependían de la velocidad de la máquina:** `TestV02_PHPReal`, que se ejecuta donde está instalado `php-cgi`, daba a todos sus casos un `WT` de 2 s para comprobar el 504 de un script más lento que él, y el primer arranque de `php-cgi` en una máquina puede tardar más: la integración continua de v2.4.3 falló una vez por eso. Ahora solo tiene ese límite el caso que lo mide. `TestT21_P11_RSTStream` enviaba sus 500 flujos cancelados antes de leer nada, y el servidor cierra la conexión un segundo después de su `GOAWAY`: en una máquina que se detuviera más tiempo, la prueba recibía un error de la conexión en vez del marco. Ahora los envía en rondas, y falla también si el `GOAWAY` llega antes del límite.
+- **`release.sh` y los scripts de `deploy/` son ejecutables en el repositorio:** el registro de cambios de v2.4.3 lo decía, y su commit los había dejado otra vez sin el permiso.
 
 ## v2.4.3
 

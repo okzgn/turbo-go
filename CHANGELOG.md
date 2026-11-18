@@ -2,9 +2,13 @@
 
 [Español](CHANGELOG.es.md)
 
-v2.4.3 is the next release after v2.4.2. If you upgrade from **v2.4.2**, read [Upgrading from v2.4.2](#upgrading-from-v242) first. If you upgrade from **v2.4.1**, v2.4.2 applies too: read [Upgrading from v2.4.1](#upgrading-from-v241), and then [Upgrading from v2.4.2](#upgrading-from-v242). If you upgrade from **v2.4**, read [Upgrading from v2.4](#upgrading-from-v24), and then those two. If you upgrade from **v2.3.rc3**, every stage of v2.4 and every later version applies: read [Upgrading from v2.3.rc3](#upgrading-from-v23rc3) first, and then the other three.
+v2.4.4 is the next release after v2.4.3. If you upgrade from **v2.4.3**, nothing changes in what Turbo does: see [Upgrading from v2.4.3](#upgrading-from-v243). If you upgrade from **v2.4.2**, read [Upgrading from v2.4.2](#upgrading-from-v242) first. If you upgrade from **v2.4.1**, v2.4.2 applies too: read [Upgrading from v2.4.1](#upgrading-from-v241), and then [Upgrading from v2.4.2](#upgrading-from-v242). If you upgrade from **v2.4**, read [Upgrading from v2.4](#upgrading-from-v24), and then those two. If you upgrade from **v2.3.rc3**, every stage of v2.4 and every later version applies: read [Upgrading from v2.3.rc3](#upgrading-from-v23rc3) first, and then the other three.
 
 Published binaries are static and built with the latest Go 1.26 patch. Check the download with `SHA256SUMS`, in the folder of the download: `sha256sum -c --ignore-missing SHA256SUMS` (`--ignore-missing` checks only the binaries you downloaded; without it, `sha256sum` fails for the others). A signed release also has `SHA256SUMS.sig`: [SECURITY.md](SECURITY.md) says how to check it.
+
+## Upgrading from v2.4.3
+
+Replace the binary, and nothing else: v2.4.4 is the server of v2.4.3, without a change in what it does, in its API or in `turbo.config`, and without breaking changes. What changes is the isotype that the panel and the sample site show (a copy of `turbo.dev` in the sites directory goes on showing its own `admin/i.png`) and, for those who build Turbo or work on it, where its source is in the repository: see [v2.4.4](#v244).
 
 ## Upgrading from v2.4.2
 
@@ -93,6 +97,18 @@ Before upgrading:
 **The commits "v2.3.rc4." (`9307623`) and "v2.4." (`808dc6f`) of `main` are not releases:** `9307623` has stages 1 to 3 of v2.4 and `808dc6f` stages 1 to 4; v2.4 is the commit "v2.4." `57cbb3c`, with stages 1 to 5. If you built Turbo from one of the first two, upgrade too; its `turbo.config` already has schema 2, so points 2 and 3 don't apply, and the breaking changes to review are those of the stages it lacks (4 and 5 from `9307623`, 5 from `808dc6f`) and those of v2.4.1.
 
 ---
+
+## v2.4.4
+
+Not published yet: the next version after v2.4.3. The server is the same, without a change in what it does: this version brings its new isotype and, in the repository, the source in a folder and two tests that no longer depend on how fast the machine is.
+
+### New
+- **New isotype:** the panel and the sample site show Turbo's new isotype, and the icons of the repository (`turbo.icon.png`, `turbo.icon.small.png`, `turbo.icon.nano.png`) are the new one too. A copy of `turbo.dev` in the sites directory goes on showing its own `admin/i.png`.
+
+### In the repository
+- **The source and its tests, in `server/`:** the root of the repository had the 19 files of the code and the 111 of its tests. They are now the package `server`, in the folder of that name, with `testdata` and the `turbo.dev` that is embedded (Go only lets the tests of a package be in its folder), and the root keeps `main.go`, which only starts it (`main()` is now `Main()`, of that package). `go build .` builds Turbo as before and `release.sh` gives it its version in the same way; the tests of Turbo are `go test ./server` (`./...` goes on running them all), and the example configuration is `server/testdata/config/v2-example.json`.
+- **Tests that depended on the speed of the machine:** `TestV02_PHPReal`, which runs where `php-cgi` is installed, gave all its cases a `WT` of 2 s to check the 504 of a script slower than it, and the first start of `php-cgi` on a machine can take longer than that: the continuous integration of v2.4.3 failed once for it. Only the case that measures the limit has it now. `TestT21_P11_RSTStream` sent its 500 cancelled streams before reading anything, and the server closes the connection a second after its `GOAWAY`: on a machine that stalled for longer, the test got an error of the connection instead of the frame. It sends them in rounds now, and also fails if the `GOAWAY` comes before the limit.
+- **`release.sh` and the scripts of `deploy/` are executable in the repository:** the changelog of v2.4.3 said so, and its commit had left them without the bit again.
 
 ## v2.4.3
 

@@ -10,7 +10,7 @@
 #   files, or files marked so that git doesn't see their changes), so that the
 #   published binaries are exactly the code of the tag.
 # - It requires that no file ignored by git goes into the build: those of
-#   turbo.dev (they are embedded) and the .go, .s, .S, .sx or .syso files of the
+#   server/turbo.dev (they are embedded) and the .go, .s, .S, .sx or .syso files of the
 #   folders Go builds (not those starting with _ or ., nor testdata), and go.work
 #   or go.work.sum.
 # - It builds with a fixed Go environment (without the go env file or the GOFLAGS,
@@ -55,7 +55,7 @@ fi
 # reads go.work: the binary would carry something that is not in the repository. The folders Go doesn't
 # look at (those starting with "_" or "." and testdata) don't count.
 IGNORED="$(
-	git ls-files --others --ignored --exclude-standard -- turbo.dev
+	git ls-files --others --ignored --exclude-standard -- server/turbo.dev
 	git ls-files --others --ignored --exclude-standard | grep -E '(\.(go|s|S|sx|syso)|(^|/)go\.work(\.sum)?)$' |
 		grep -vE '(^|/)(_|\.)[^/]*/|(^|/)testdata/' || true
 )"
@@ -83,9 +83,9 @@ echo "Go: $(go env GOVERSION) (go.mod: $(go list -m -f '{{.GoVersion}}'))"
 
 # The GUI is embedded as it is (//go:embed): with CR, the binary would depend on
 # where it is built. A Windows copy older than .gitattributes may have them; they
-# are fixed with: rm -r turbo.dev && git checkout -- turbo.dev
-if grep -rlq $'\r' --include='*.html' --include='*.css' turbo.dev; then
-	echo "turbo.dev has CRLF line endings: rm -r turbo.dev && git checkout -- turbo.dev" >&2
+# are fixed with: rm -r server/turbo.dev && git checkout -- server/turbo.dev
+if grep -rlq $'\r' --include='*.html' --include='*.css' server/turbo.dev; then
+	echo "server/turbo.dev has CRLF line endings: rm -r server/turbo.dev && git checkout -- server/turbo.dev" >&2
 	exit 1
 fi
 

@@ -1,0 +1,932 @@
+/*
+Turbo - A cross-platform, high-performance HTTP web server with a real-time, visual management interface. Manage unlimited domains and multi-level wildcard subdomains, SSL certificates, URI rewrites, request preprocessing, fine-grained request rate and size limiting, as well as custom aliases, headers, MIMEs, and indexes.
+Copyright (C) 2026 OKZGN
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as
+published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+For commercial licensing, please visit one of the following:
+- https://okzgn.com/#contact
+- https://okzgn.github.io/#contact
+*/
+
+package server
+
+// The validators of what a site has: its settings section, its rewrites, MIME types, headers, preprocessors, indexes and
+// aliases, as turbo.config and the panel add them and delete them.
+
+import (
+	"log/slog"
+	"mime"
+	"sort"
+	"strconv"
+	"strings"
+
+	"turbo/customNetHttp"
+)
+
+// indexPosition reads the position saved for an index, as text ("1", "2"...) or as a JSON number (1, 2...);
+// anything else goes last.
+var indexPosition = func(value interface{}) int {
+	if text, isValue := configNumberOrString(value); isValue {
+		if number, err := strconv.Atoi(text); err == nil && number > 0 {
+			return number
+		}
+	}
+	return int(^uint(0) >> 1)
+}
+
+var subdomainContentCheckers = map[string]func(bool, interface{}, bool, ...string) (bool, string){ // Subdomains content check
+	"!": func(printErrors bool, configData interface{}, isFromFile bool, siteKeys ...string) (bool, string) { // SSLs check
+		if len(siteKeys) != 2 {
+			return false, msgMissingData + " for configurations"
+		}
+		mapData, isMap := configData.(map[string]interface{})
+		if !isMap {
+			return false, "Invalid configuration data"
+		}
+
+		for _, setting := range siteSSLSettingOrder {
+			if _, exists := mapData[setting]; !exists {
+				continue
+			}
+
+			strVal, isValue := configNumberOrString(mapData[setting]) // A string, or a JSON integer ("S": 1)
+			if !isValue {
+				boolVal, isBool := mapData[setting].(bool)
+				if isBool {
+					isValue = true
+					if boolVal {
+						strVal = "1"
+					} else {
+						strVal = "0"
+					}
+				} else {
+					intVal, isInt := mapData[setting].(int)
+					if isInt {
+						isValue = true
+						strVal = strconv.Itoa(intVal)
+					}
+				}
+			}
+
+			if !isValue {
+				if printErrors {
+					return false, "Invalid configuration value"
+				}
+				slog.Warn("turbo.config site setting discarded: wrong type", "site", siteKeys[0], "subdomain", siteKeys[1], "setting", setting)
+				continue
+			}
+
+			if applied, msg := siteSSLSettingCheckers[setting](isFromFile, strVal, siteKeys[0], siteKeys[1]); !applied {
+				if printErrors {
+					return false, msg
+				}
+				// The state of the certificate (C), an empty e-mail or adapter, and R or W off in a subdomain (as
+				// Turbo itself saves them, and v2.3.rc3 too) aren't errors of the file.
+				redirectOffInSubdomain := (setting == "R" || setting == "W") && siteKeys[1] != "" && strVal == "0"
+				if setting != "C" && strVal != "" && !redirectOffInSubdomain {
+					slog.Warn("turbo.config site setting discarded", "site", siteKeys[0], "subdomain", siteKeys[1], "setting", setting, "value", strVal, "reason", msg)
+				}
+			}
+		}
+		return true, "Configurations processed"
+	},
+	"=": func(printErrors bool, rewriteData interface{}, isFromFile bool, siteKeys ...string) (bool, string) { // Rewrites check
+		if len(siteKeys) != 2 {
+			return false, msgMissingData + " for rewrites"
+		}
+		mapData, isMap := rewriteData.(map[string]interface{})
+		if !isMap {
+			return false, "Invalid rewrites content"
+		}
+
+		if printErrors && !siteExists(siteKeys[0], siteKeys[1]) {
+			return false, missingSiteMessage(siteKeys[1])
+		}
+
+		for _, targetURI := range sortedKeys(mapData) {
+			rawTarget := mapData[targetURI]
+			strVal, isString := rawTarget.(string)
+			if !isString {
+				if printErrors {
+					return false, "Invalid rewrite value"
+				}
+				continue
+			}
+
+			if !isFromFile { // turbo.config keeps the values decoded
+				targetURI = replaceURIChars(targetURI)
+			}
+			current, isExisting := sitesMap[siteKeys[0]][siteKeys[1]][targetURI]
+			valueLen := len(targetURI)
+			if valueLen < 1 || strings.Contains(targetURI, "//") || strings.Contains(targetURI, "..") || targetURI[0] != '/' {
+				if printErrors {
+					return false, "Invalid relative address"
+				}
+				continue
+			}
+			if valueLen > 128 {
+				if printErrors {
+					return false, "Relative address too long"
+				}
+				continue
+			}
+			if !isFromFile {
+				strVal = replaceURIChars(strVal)
+			}
+			valueLen = len(strVal)
+			if valueLen < 1 || strings.Contains(strVal, "..") {
+				if printErrors {
+					return false, "Invalid rewrite"
+				}
+				continue
+			}
+			schemeMode := "N"
+			if lower := strings.ToLower(strVal); strings.HasPrefix(lower, "http://") { // The scheme in any case
+				schemeMode = "H"
+				strVal = strVal[7:]
+			} else if strings.HasPrefix(lower, "https://") {
+				schemeMode = "S"
+				strVal = strVal[8:]
+			}
+			if schemeMode != "N" && (strVal == "" || strVal[0] == '/' || strVal[0] == '?') { // "https://" alone would redirect anywhere
+				if printErrors {
+					return false, "The target needs a host"
+				}
+				if isFromFile {
+					slog.Warn("Rewrite discarded: the target has no host", "site", siteKeys[0], "subdomain", siteKeys[1], "source", targetURI)
+				}
+				continue
+			}
+			if unknown := unknownPlaceholder(strVal); unknown != "" {
+				if printErrors {
+					return false, "Unknown keyword: " + unknown
+				}
+				if isFromFile {
+					slog.Warn("Rewrite discarded: unknown keyword", "site", siteKeys[0], "subdomain", siteKeys[1], "source", targetURI, "keyword", unknown)
+				}
+				continue
+			}
+			if strings.Contains(strVal, "//") {
+				if printErrors {
+					return false, "Invalid rewrite"
+				}
+				continue
+			}
+			if schemeMode == "N" && strVal[0] != '/' {
+				if printErrors {
+					return false, "The rewrite must start with /, http:// or https://"
+				}
+				if isFromFile { // Accepted by older versions: say why it disappears from the config
+					slog.Warn("Rewrite discarded: the target must start with /, http:// or https://", "site", siteKeys[0], "subdomain", siteKeys[1], "source", targetURI, "target", strVal)
+				}
+				continue
+			}
+			if valueLen > 512 {
+				if printErrors {
+					return false, "Rewrite too long"
+				}
+				continue
+			}
+			// Compared as it is kept: decoded, and with its scheme in a letter. It was compared as written, so the
+			// same target answered "Rewrite changed", and a target without its scheme "Rewrite unchanged".
+			if isExisting && current == schemeMode+strVal {
+				if printErrors {
+					return false, "Rewrite unchanged"
+				}
+				continue
+			}
+			sitesMap[siteKeys[0]][siteKeys[1]][targetURI] = schemeMode + strVal
+			if printErrors {
+				if !isExisting {
+					return true, "Rewrite created"
+				} else {
+					return true, "Rewrite changed"
+				}
+			}
+		}
+		return true, "Rewrites processed"
+	},
+	"$": func(printErrors bool, mimeData interface{}, isFromFile bool, siteKeys ...string) (bool, string) { // MIMEs check
+		if len(siteKeys) != 2 {
+			return false, msgMissingData + " for MIMEs"
+		}
+		entries, isMap := mimeData.(map[string]interface{})
+		if !isMap {
+			return false, "Invalid MIMEs content"
+		}
+
+		if printErrors && !siteExists(siteKeys[0], siteKeys[1]) {
+			return false, missingSiteMessage(siteKeys[1])
+		}
+		if siteKeys[1] != "" {
+			siteKeys[1] += "." + siteKeys[0]
+		} else {
+			siteKeys[1] = siteKeys[0]
+		}
+
+		if _, exists := mimeTypes[siteKeys[1]]; !exists {
+			return false, "No MIMEs defined"
+		}
+
+		for _, writtenExt := range sortedKeys(entries) {
+			rawMIME := entries[writtenExt]
+			ext := strings.ToLower(writtenExt) // Looked up in lower case (ext): ".PHP" is also preprocessed
+			// ".HTML" and "html" are the same extension: the first one is kept, as with the headers. The second
+			// replaced it without a word.
+			if _, repeated := mimeTypes[siteKeys[1]][strings.TrimPrefix(ext, ".")]; isFromFile && repeated {
+				slog.Warn("MIME repeated in turbo.config (with a dot or in other case): the first one is kept", "site", siteKeys[1], "extension", writtenExt)
+				continue
+			}
+			mimeType, isString := rawMIME.(string)
+			if !isString {
+				if printErrors {
+					return false, "Invalid MIME value"
+				}
+				continue
+			}
+
+			var existed bool
+			if !isFromFile {
+				mimeType = replaceURIChars(mimeType)
+			}
+			if current, exists := mimeTypes[siteKeys[1]][strings.TrimPrefix(ext, ".")]; exists {
+				existed = true
+				if current == mimeType {
+					if printErrors {
+						return false, "MIME unchanged"
+					}
+					continue
+				}
+			} else {
+				existed = false
+			}
+			extLen := len(ext)
+			if extLen > 12 {
+				if printErrors {
+					return false, "Extension too long"
+				}
+				continue
+			}
+			if extLen > 0 && !extChars(ext) {
+				if printErrors {
+					return false, "Invalid extension"
+				}
+				continue
+			}
+			if extLen > 0 && ext[0] == '.' {
+				ext = ext[1:]
+			}
+			if mimeLen := len(mimeType); mimeLen < 4 || mimeLen > 128 {
+				if printErrors {
+					return false, "MIME too long or too short"
+				}
+				continue
+			}
+			_, _, parseErr := mime.ParseMediaType(mimeType)
+			if parseErr != nil {
+				if printErrors {
+					return false, "Invalid MIME"
+				}
+				continue
+			}
+			mimeTypes[siteKeys[1]][ext] = mimeType
+			if printErrors {
+				if !existed {
+					return true, "MIME created"
+				} else {
+					return true, "MIME changed"
+				}
+			}
+		}
+		return true, "MIMEs processed"
+	},
+	".": func(printErrors bool, headerData interface{}, isFromFile bool, siteKeys ...string) (bool, string) { // Headers check
+		if len(siteKeys) != 2 {
+			return false, msgMissingData + " for headers"
+		}
+		entries, isMap := headerData.(map[string]interface{})
+		if !isMap {
+			return false, "Invalid headers content"
+		}
+
+		if printErrors && !siteExists(siteKeys[0], siteKeys[1]) {
+			return false, missingSiteMessage(siteKeys[1])
+		}
+		if siteKeys[1] != "" {
+			siteKeys[1] += "." + siteKeys[0]
+		} else {
+			siteKeys[1] = siteKeys[0]
+		}
+
+		if _, exists := customHeaders[siteKeys[1]]; !exists {
+			return false, "No headers defined"
+		}
+
+		for _, header := range sortedKeys(entries) {
+			rawValue := entries[header]
+			if isFromFile && headerSetCaseInsensitive(customHeaders[siteKeys[1]], header) {
+				slog.Warn("Header repeated in turbo.config (in upper or lower case): the first one is kept", "site", siteKeys[1], "header", header)
+				continue
+			}
+			value, isString := rawValue.(string)
+			if !isString {
+				if printErrors {
+					return false, "Invalid header value"
+				}
+				continue
+			}
+
+			var existed bool
+			if !isFromFile {
+				value = replaceURIChars(value)
+			}
+			if _, exists := customHeaders[siteKeys[1]][header]; exists {
+				existed = true
+				if customHeaders[siteKeys[1]][header] == value {
+					if printErrors {
+						return false, "Header unchanged"
+					}
+					continue
+				}
+			} else {
+				existed = false
+			}
+			if !headerChars(header) {
+				if printErrors {
+					return false, "Invalid header"
+				}
+				continue
+			}
+			if nameLen := len(header); nameLen < 1 || nameLen > maxHeaderKeyLength {
+				if printErrors {
+					return false, "Header too long or too short"
+				}
+				continue
+			}
+			if valueLen := len(value); valueLen < 1 || valueLen > maxHeaderValueLength {
+				if printErrors {
+					return false, "Content too long or too short"
+				}
+				continue
+			}
+			if reservedResponseHeaders[customNetHttp.CanonicalHeaderKey(header)] {
+				if printErrors {
+					return false, "Header reserved"
+				}
+				if isFromFile {
+					slog.Warn("turbo.config header discarded: Header reserved, HTTP sets it", "site", siteKeys[1], "header", header)
+				}
+				continue
+			}
+			if !isFromFile { // The same header in other case is this one: replaced (both would go out, either first)
+				for existing := range customHeaders[siteKeys[1]] {
+					if existing != header && strings.EqualFold(existing, header) {
+						delete(customHeaders[siteKeys[1]], existing)
+						existed = true
+					}
+				}
+			}
+			customHeaders[siteKeys[1]][header] = value
+			if printErrors {
+				if !existed {
+					return true, "Header created"
+				} else {
+					return true, "Header changed"
+				}
+			}
+		}
+		return true, "Headers processed"
+	},
+	"?": func(printErrors bool, preprocessorData interface{}, isFromFile bool, siteKeys ...string) (bool, string) { // Preprocessors check
+		if len(siteKeys) != 2 {
+			return false, msgMissingData + " for preprocessors"
+		}
+		entries, isMap := preprocessorData.(map[string]interface{})
+		if !isMap {
+			return false, "Invalid preprocessors content"
+		}
+
+		if printErrors && !siteExists(siteKeys[0], siteKeys[1]) {
+			return false, missingSiteMessage(siteKeys[1])
+		}
+		if siteKeys[1] != "" {
+			siteKeys[1] += "." + siteKeys[0]
+		} else {
+			siteKeys[1] = siteKeys[0]
+		}
+
+		if _, exists := preprocessors[siteKeys[1]]; !exists {
+			return false, "No preprocessors defined"
+		}
+
+		for _, writtenExt := range sortedKeys(entries) {
+			rawValue := entries[writtenExt]
+			ext := strings.ToLower(writtenExt) // Looked up in lower case (ext): ".PHP" is also preprocessed
+			site := siteKeys[1]
+			if _, repeated := preprocessors[site][strings.TrimPrefix(ext, ".")]; repeated && isFromFile {
+				slog.Warn("Preprocessor repeated in turbo.config (in upper or lower case): the first one is kept", "site", site, "extension", writtenExt)
+				continue
+			}
+			// From turbo.config, an entry that can't be used is kept and its extension answers 500: never the
+			// source of the files it should run, and saving doesn't lose it.
+			keepFailing := func(value string, reason string) {
+				if value == "" { // An empty value would mean no preprocessor
+					value = invalidPreprocessorMark
+				}
+				slog.Warn("turbo.config preprocessor that can't be used: the extension will answer 500", "site", site, "extension", ext, "reason", reason)
+				preprocessors[site][strings.TrimPrefix(ext, ".")] = value
+			}
+			value, isString := rawValue.(string) // From the panel, as sent: no character replacements (literalActions)
+			if !isString {
+				if printErrors {
+					return false, "Invalid preprocessor value"
+				}
+				keepFailing(invalidPreprocessorMark, "the value is not a string")
+				continue
+			}
+			if extLen := len(ext); extLen > 12 || extLen > 0 && !extChars(ext) {
+				reason := "Invalid extension"
+				dotInside := strings.IndexByte(strings.TrimPrefix(ext, "."), '.') != -1
+				switch {
+				case extLen > 12:
+					reason = "Extension too long"
+				case dotInside:
+					reason = "Invalid extension: it is what follows the last dot of a name (php, not blade.php)"
+				}
+				if printErrors {
+					return false, reason
+				}
+				if dotInside && extLen <= 12 { // Kept, so that saving doesn't lose it, though it matches no file: nothing answers 500 for it
+					slog.Warn("turbo.config preprocessor whose extension has a dot inside: it runs nothing, as the extension of a name is what follows its last dot", "site", site, "extension", ext)
+					preprocessors[site][strings.TrimPrefix(ext, ".")] = invalidPreprocessorMark + value
+					continue
+				}
+				keepFailing(invalidPreprocessorMark+value, reason)
+				continue
+			}
+			ext = strings.TrimPrefix(ext, ".")
+
+			var existed bool
+			if current, exists := preprocessors[site][ext]; exists {
+				existed = true
+				if current == value {
+					if printErrors {
+						return false, "Preprocessor unchanged"
+					}
+					continue
+				}
+			}
+			executable, problem := preprocessorCommand(value)
+			if problem != "" {
+				if printErrors {
+					return false, problem
+				}
+				keepFailing(value, problem)
+				continue
+			}
+			if info, err := diskStat(executable); err != nil || info.IsDir() { // Doesn't exist, the path isn't valid on this system or it is a folder
+				if printErrors {
+					if err != nil {
+						return false, "Preprocessor not found"
+					}
+					return false, "Invalid preprocessor"
+				}
+				keepFailing(value, "the executable does not exist or is a folder: "+executable)
+				continue
+			}
+
+			preprocessors[site][ext] = value // As written: {TURBO_CURRENT_DIR} is replaced when it runs
+			if printErrors {
+				if !existed {
+					return true, "Preprocessor added"
+				} else {
+					return true, "Preprocessor modified"
+				}
+			}
+		}
+		return true, "Preprocessors processed"
+	},
+	"-": func(printErrors bool, indexData interface{}, isFromFile bool, siteKeys ...string) (bool, string) { // Indexes check
+		if len(siteKeys) != 2 {
+			return false, msgMissingData + " for indexes"
+		}
+		entries, isMap := indexData.(map[string]interface{})
+		if !isMap {
+			return false, "Invalid indexes content"
+		}
+
+		if printErrors && !siteExists(siteKeys[0], siteKeys[1]) {
+			return false, missingSiteMessage(siteKeys[1])
+		}
+		if siteKeys[1] != "" {
+			siteKeys[1] += "." + siteKeys[0]
+		} else {
+			siteKeys[1] = siteKeys[0]
+		}
+
+		if _, exists := indexFiles[siteKeys[1]]; !exists {
+			return false, "No indexes defined"
+		}
+
+		// From turbo.config, each index comes with its position; from the panel, it goes after the rest.
+		names := sortedKeys(entries) // Indexes with the same position go by name
+		sort.SliceStable(names, func(left, right int) bool {
+			return indexPosition(entries[names[left]]) < indexPosition(entries[names[right]])
+		})
+		for _, name := range names {
+			if !isFromFile {
+				name = replaceURIChars(name)
+			}
+			length := len(name)
+			if length < 1 || length > 48 {
+				if printErrors {
+					return false, "Index file too long or too short"
+				}
+				continue
+			}
+			// The rules of the request paths, with those of Windows on every system: there, "index.php." or
+			// "INDEX~1.PHT" would open another file than the name says, and its extension wouldn't be preprocessed.
+			if strings.IndexByte(name, '\\') != -1 || strings.IndexByte(name, '/') != -1 || strings.Contains(name, "..") || !textAllowed(name, false) || !pathSegmentAllowed(name, true) {
+				if printErrors {
+					return false, "Invalid index file"
+				}
+				if isFromFile {
+					slog.Warn("turbo.config index discarded: name not allowed", "site", siteKeys[1], "index", name)
+				}
+				continue
+			}
+			addIndex(siteKeys[1], name)
+			if printErrors {
+				return true, "Index assigned"
+			}
+		}
+		return true, "Indexes processed"
+	},
+	"&": func(printErrors bool, aliasData interface{}, isFromFile bool, siteKeys ...string) (bool, string) { // Alias check
+		if len(siteKeys) != 2 {
+			return false, msgMissingData + " for aliases"
+		}
+		entries, isMap := aliasData.(map[string]interface{})
+		if !isMap {
+			return false, "Invalid aliases content"
+		}
+
+		if printErrors && !siteExists(siteKeys[0], siteKeys[1]) {
+			return false, missingSiteMessage(siteKeys[1])
+		}
+		if siteKeys[1] != "" {
+			siteKeys[1] += "." + siteKeys[0]
+		} else {
+			siteKeys[1] = siteKeys[0]
+		}
+
+		for _, alias := range sortedKeys(entries) {
+			if strings.IndexByte(alias, '*') != -1 {
+				if printErrors {
+					return false, "Wildcards not allowed"
+				}
+				continue
+			}
+			validHost, hostMsg := hostOk(alias, false)
+			if !validHost {
+				if printErrors {
+					return false, hostMsg
+				}
+				continue
+			}
+			if served, _, _, _ := hostExist(alias); served { // The alias would hide the site (aliases go first)
+				if printErrors {
+					return false, "The alias is a site's host"
+				}
+				// The site wins. Of a site already there when the alias is read (one of turbo.config before it, or
+				// one that came while this one was kept without its folder); dropAliasesOfSites tells the others.
+				slog.Warn("Alias discarded: its host is a site's", "alias", alias, "site", siteKeys[1])
+				continue
+			}
+			if target, assigned := domainAliases[alias]; assigned {
+				if target == siteKeys[1] && printErrors {
+					return false, "Alias unchanged"
+				}
+				if printErrors {
+					return false, "Alias already assigned"
+				}
+				if isFromFile && target != siteKeys[1] { // From turbo.config, or kept with a site that comes back
+					slog.Warn("Alias of two sites: the first one is kept", "alias", alias, "site", target, "discarded", siteKeys[1])
+				}
+				continue
+			}
+			domainAliases[alias] = siteKeys[1]
+			if printErrors {
+				return true, "Alias assigned"
+			}
+		}
+		return true, "Aliases processed"
+	},
+}
+
+var subdomainContentDeleters = map[string]func(bool, interface{}, ...string) (bool, string){ // Subdomains content deletion check
+	"=": func(printErrors bool, rewriteData interface{}, siteKeys ...string) (bool, string) {
+		if len(siteKeys) != 2 {
+			return false, msgMissingData + " for deleting rewrites"
+		}
+		entries, isMap := rewriteData.(map[string]interface{})
+		if !isMap {
+			return false, "Invalid rewrites content"
+		}
+
+		if !siteExists(siteKeys[0], siteKeys[1]) {
+			return false, missingSiteMessage(siteKeys[1])
+		}
+
+		for rewriteKey := range entries {
+			rewriteKey = replaceURIChars(rewriteKey)
+			if _, exists := sitesMap[siteKeys[0]][siteKeys[1]][rewriteKey]; !exists {
+				if printErrors {
+					return false, "Rewrite not found"
+				}
+				continue
+			}
+			delete(sitesMap[siteKeys[0]][siteKeys[1]], rewriteKey)
+			if printErrors {
+				return true, "Rewrite deleted"
+			}
+		}
+		return true, "Rewrites processed"
+	},
+	"$": func(printErrors bool, mimeData interface{}, siteKeys ...string) (bool, string) {
+		if len(siteKeys) != 2 {
+			return false, msgMissingData + " for deleting MIMEs"
+		}
+		entries, isMap := mimeData.(map[string]interface{})
+		if !isMap {
+			return false, "Invalid MIMEs content"
+		}
+
+		if !siteExists(siteKeys[0], siteKeys[1]) {
+			return false, missingSiteMessage(siteKeys[1])
+		}
+
+		if siteKeys[1] != "" {
+			siteKeys[1] += "." + siteKeys[0]
+		} else {
+			siteKeys[1] = siteKeys[0]
+		}
+
+		if _, exists := mimeTypes[siteKeys[1]]; !exists {
+			return false, "No MIMEs defined"
+		}
+
+		for ext := range entries {
+			ext = strings.ToLower(ext)
+			if len(ext) > 0 && ext[0] == '.' {
+				ext = ext[1:]
+			}
+			if _, exists := mimeTypes[siteKeys[1]][ext]; !exists {
+				if printErrors {
+					return false, "MIME not found"
+				}
+				continue
+			}
+			delete(mimeTypes[siteKeys[1]], ext)
+			if printErrors {
+				return true, "MIME deleted"
+			}
+		}
+		return true, "MIMEs processed"
+	},
+	".": func(printErrors bool, headerData interface{}, siteKeys ...string) (bool, string) {
+		if len(siteKeys) != 2 {
+			return false, msgMissingData + " for deleting headers"
+		}
+		entries, isMap := headerData.(map[string]interface{})
+		if !isMap {
+			return false, "Invalid headers content"
+		}
+
+		if !siteExists(siteKeys[0], siteKeys[1]) {
+			return false, missingSiteMessage(siteKeys[1])
+		}
+
+		if siteKeys[1] != "" {
+			siteKeys[1] += "." + siteKeys[0]
+		} else {
+			siteKeys[1] = siteKeys[0]
+		}
+
+		if _, exists := customHeaders[siteKeys[1]]; !exists {
+			return false, "No headers defined"
+		}
+
+		for header := range entries {
+			// In any case, as addHeader replaces a header written in other capitals: "x-test" deletes "X-Test"
+			deleted := false
+			for existing := range customHeaders[siteKeys[1]] {
+				if strings.EqualFold(existing, header) {
+					delete(customHeaders[siteKeys[1]], existing)
+					deleted = true
+				}
+			}
+			if !deleted {
+				if printErrors {
+					return false, "Header not found"
+				}
+				continue
+			}
+			if printErrors {
+				return true, "Header deleted"
+			}
+		}
+		return true, "Headers processed"
+	},
+	"?": func(printErrors bool, preprocessorData interface{}, siteKeys ...string) (bool, string) {
+		if len(siteKeys) != 2 {
+			return false, msgMissingData + " for deleting preprocessors"
+		}
+		entries, isMap := preprocessorData.(map[string]interface{})
+		if !isMap {
+			return false, "Invalid preprocessors content"
+		}
+
+		if !siteExists(siteKeys[0], siteKeys[1]) {
+			return false, missingSiteMessage(siteKeys[1])
+		}
+
+		if siteKeys[1] != "" {
+			siteKeys[1] += "." + siteKeys[0]
+		} else {
+			siteKeys[1] = siteKeys[0]
+		}
+
+		if _, exists := preprocessors[siteKeys[1]]; !exists {
+			return false, "No preprocessors defined"
+		}
+
+		for ext := range entries {
+			ext = strings.ToLower(ext)
+			if len(ext) > 0 && ext[0] == '.' {
+				ext = ext[1:]
+			}
+			if _, exists := preprocessors[siteKeys[1]][ext]; !exists {
+				if printErrors {
+					return false, "Preprocessor not found"
+				}
+				continue
+			}
+			delete(preprocessors[siteKeys[1]], ext)
+			if printErrors {
+				return true, "Preprocessor deleted"
+			}
+		}
+		return true, "Preprocessors processed"
+	},
+	"-": func(printErrors bool, indexData interface{}, siteKeys ...string) (bool, string) {
+		if len(siteKeys) != 2 {
+			return false, msgMissingData + " for deleting indexes"
+		}
+		entries, isMap := indexData.(map[string]interface{})
+		if !isMap {
+			return false, "Invalid indexes content"
+		}
+
+		if !siteExists(siteKeys[0], siteKeys[1]) {
+			return false, missingSiteMessage(siteKeys[1])
+		}
+
+		if siteKeys[1] != "" {
+			siteKeys[1] += "." + siteKeys[0]
+		} else {
+			siteKeys[1] = siteKeys[0]
+		}
+
+		if _, exists := indexFiles[siteKeys[1]]; !exists {
+			return false, "No indexes defined"
+		}
+
+		for indexName := range entries {
+			indexName = replaceURIChars(indexName)
+			if _, exists := indexFiles[siteKeys[1]][indexName]; !exists {
+				if printErrors {
+					return false, "Index not found"
+				}
+				continue
+			}
+			delete(indexFiles[siteKeys[1]], indexName)
+			if printErrors {
+				return true, "Index deleted"
+			}
+		}
+		return true, "Indexes processed"
+	},
+	"&": func(printErrors bool, aliasData interface{}, siteKeys ...string) (bool, string) {
+		if len(siteKeys) != 2 {
+			return false, msgMissingData + " for deleting aliases"
+		}
+		entries, isMap := aliasData.(map[string]interface{})
+		if !isMap {
+			return false, "Invalid aliases content"
+		}
+
+		if !siteExists(siteKeys[0], siteKeys[1]) {
+			return false, missingSiteMessage(siteKeys[1])
+		}
+
+		if siteKeys[1] != "" {
+			siteKeys[1] += "." + siteKeys[0]
+		} else {
+			siteKeys[1] = siteKeys[0]
+		}
+
+		for alias := range entries {
+			if _, exists := domainAliases[alias]; !exists {
+				if printErrors {
+					return false, "Alias not found"
+				}
+				continue
+			} else if domainAliases[alias] != siteKeys[1] {
+				if printErrors {
+					return false, "Alias of another site"
+				}
+				continue
+			}
+			delete(domainAliases, alias)
+			if printErrors {
+				return true, "Alias deleted"
+			}
+		}
+		return true, "Aliases processed"
+	},
+}
+
+// unknownPlaceholder returns the first "{NAME}" of a rewrite target that isn't a placeholder, or "".
+func unknownPlaceholder(target string) string {
+	for {
+		openBraceIdx := strings.IndexByte(target, '{')
+		if openBraceIdx == -1 {
+			return ""
+		}
+		closeBraceIdx := strings.IndexByte(target[openBraceIdx:], '}')
+		if closeBraceIdx == -1 {
+			return ""
+		}
+		placeholder := target[openBraceIdx : openBraceIdx+closeBraceIdx+1]
+		if _, known := shortcutWordReplacers[placeholder[1:len(placeholder)-1]]; !known {
+			return placeholder
+		}
+		target = target[openBraceIdx+closeBraceIdx+1:]
+	}
+}
+
+// reservedResponseHeaders are the headers that HTTP sets for the connection and the length of a body, by their
+// canonical names: set by a site, they could cut a response or join it with the next one. A CGI can't set those of
+// the connection either (cgiHopByHopHeaders).
+var reservedResponseHeaders = map[string]bool{"Content-Length": true, "Transfer-Encoding": true, "Connection": true, "Keep-Alive": true, "Proxy-Connection": true, "Te": true, "Trailer": true, "Upgrade": true}
+
+// headerSetCaseInsensitive reports whether headers has name, in any case.
+func headerSetCaseInsensitive(headers map[string]string, name string) bool {
+	for header := range headers {
+		if strings.EqualFold(header, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// invalidPreprocessorMark starts the value of a preprocessor of turbo.config whose extension or type is wrong: no
+// value written can have a NUL, so it only marks it (the rest is the value as written, kept for saving).
+const invalidPreprocessorMark = "\x00"
+
+// preprocessorCommand returns the executable a preprocessor value runs ("[<protocol>>]<path>", as written in
+// turbo.config or addPreprocessor, with {TURBO_CURRENT_DIR} replaced), or why it can't run. The limit of 128
+// characters is for the path as written, without the protocol.
+func preprocessorCommand(value string) (executable string, problem string) {
+	if strings.HasPrefix(value, invalidPreprocessorMark) {
+		return "", "invalid turbo.config entry"
+	}
+	protocol, path, hasProtocol := strings.Cut(value, ">")
+	if !hasProtocol {
+		protocol, path = "cgi", value
+	}
+	if pathLen := len(path); pathLen < 1 || pathLen > 128 {
+		return "", "Preprocessor path too long or too short"
+	}
+	if strings.ToLower(protocol) != "cgi" { // "dx>" isn't implemented
+		return "", "Invalid preprocessor protocol."
+	}
+	placeholder := "{" + currentDirPlaceholder + "}"
+	if !strings.Contains(path, placeholder) {
+		return path, "" // Most values: the working directory isn't asked for on each request to a CGI
+	}
+	return strings.Replace(path, placeholder, currentDir(), 1), ""
+}

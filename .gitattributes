@@ -6,5 +6,5 @@
 
 # The GUI is embedded as it is in the binary (//go:embed): with LF, the binary is
 # the same wherever it is built.
-turbo.dev/**/*.html text eol=lf
-turbo.dev/**/*.css text eol=lf
+server/turbo.dev/**/*.html text eol=lf
+server/turbo.dev/**/*.css text eol=lf

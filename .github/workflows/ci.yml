@@ -40,7 +40,7 @@ jobs:
             echo "Not formatted with gofmt:"; echo "$unformatted"; exit 1
           fi
       - name: go vet
-        # Also as Windows builds it: its own files (a.turbo.y.tempfile.windows.go, customNetHttp/0.turbo.cgi_windows.go)
+        # Also as Windows builds it: its own files (server/a.turbo.y.tempfile.windows.go, customNetHttp/0.turbo.cgi_windows.go)
         # are otherwise only compiled here.
         run: |
           go vet ./...
@@ -70,11 +70,11 @@ jobs:
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
           govulncheck ./...
-      - name: gosec (the main package)
+      - name: gosec (the program and the package server)
         run: |
           go install github.com/securego/gosec/v2/cmd/gosec@v2.30.0
-          gosec .
-          GOOS=windows gosec . # With the files of Windows
+          gosec . ./server
+          GOOS=windows gosec . ./server # With the files of Windows
 
   tests:
     name: Tests (Linux)
@@ -234,18 +234,18 @@ jobs:
           go-version: ${{ steps.go.outputs.version }}
           cache: false
       - name: The Fuzz targets of this shard
-        # Every Fuzz function of the package, split by name across the three shards.
+        # Every Fuzz function of the package server, split by name across the three shards.
         run: |
-          for target in $(grep -ho '^func Fuzz[A-Za-z0-9_]*' *_test.go | cut -c6- | sort | awk -v n=3 -v i=${{ matrix.shard }} 'NR % n == i'); do
+          for target in $(grep -ho '^func Fuzz[A-Za-z0-9_]*' server/*_test.go | cut -c6- | sort | awk -v n=3 -v i=${{ matrix.shard }} 'NR % n == i'); do
             echo "== $target"
-            go test -run '^$' -fuzz "^$target\$" -fuzztime 15s -timeout 10m .
+            go test -run '^$' -fuzz "^$target\$" -fuzztime 15s -timeout 10m ./server
           done
       - name: Failing inputs
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: fuzz-testdata-${{ matrix.shard }}
-          path: testdata/fuzz
+          path: server/testdata/fuzz
 
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}

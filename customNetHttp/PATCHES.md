@@ -68,7 +68,7 @@ With a clean repository it is enough to edit the generated files and save `git d
 
 ## Patches
 
-Each patch cites its tests with the file they are in (in the repository root).
+Each patch cites its tests with the file they are in (in `server/`).
 
 ### P1. Errors before the handler in HTTP/1 with Turbo's template
 
@@ -190,7 +190,7 @@ The patches change the code, not the comments around it, so that each one stays 
 
 ## Without a patch
 
-- **Maximum of 50 HTTP/2 streams per connection:** Turbo's HTTPS server sets it with `Server.HTTP2.MaxConcurrentStreams` (`a.turbo.main.go`).
+- **Maximum of 50 HTTP/2 streams per connection:** Turbo's HTTPS server sets it with `Server.HTTP2.MaxConcurrentStreams` (`server/a.turbo.main.go`).
 
 ## Customizations of the previous fork that were dropped
 

@@ -8,24 +8,24 @@ How the tests of Turbo are run, how they are organized and what the names of the
 go test -count=1 ./...
 ```
 
-That is everything: about six minutes for the main package, and less than one for `customNetHttp` and its regenerator. It needs the Go of `go.mod` and nothing else: no network, no ports of the system (each test listens on `127.0.0.1:0`) and no Certbot.
+That is everything: about six minutes for the package `server`, which is Turbo, and less than one for `customNetHttp` and its regenerator. It needs the Go of `go.mod` and nothing else: no network, no ports of the system (each test listens on `127.0.0.1:0`) and no Certbot.
 
 - **The helper tools.** The tests build two programs of `internal/testtools` before they start: `cgiecho`, a CGI that answers with what it received, and `fakecertbot`, which stands for Certbot. They go to a temporary folder, or to the one named in `TOOLS_BIN`. On Windows that folder has to be a short path: Turbo refuses a preprocessor whose path has more than 128 characters.
-- **One test, or some.** `go test -count=1 -run 'TestR6_O11' .` runs the tests whose name matches. The tests of the main package share the state of the server, so they don't run in parallel with each other.
+- **One test, or some.** `go test -count=1 -run 'TestR6_O11' ./server` runs the tests whose name matches. The tests of `server` share the state of the server, so they don't run in parallel with each other.
 - **The race detector.** `go test -race -count=1 -timeout 60m ./...`, on Linux or in WSL (it needs cgo and a C compiler). It takes several times longer than the plain run.
 - **Another order.** `go test -count=1 -shuffle=on ./...` runs them in a random order, which the log names so that it can be repeated. No test may depend on the ones before it.
-- **Fuzz targets.** Each `Fuzz…` function runs its seeds as a test in every run. To let one look for new inputs: `go test -run '^$' -fuzz '^FuzzHost$' -fuzztime 1m .` (one target at a time).
-- **Benchmarks.** `go test -run '^$' -bench 'ResolveRequest' -benchtime 2s .` The continuous integration runs every benchmark once, so that they keep working; it doesn't compare their times.
-- **What isn't here.** `deploy/systemd-test.sh`, `deploy/real-ports-test.sh` and `deploy/upgrade-test.sh` check, on a real system, the reference unit, the ports 80 and 443 and the upgrade from the previous version. Certbot against a certificate authority, and PHP, are checked by hand before a version (`turbo_php_real_test.go` runs where `php-cgi` is installed, and is skipped elsewhere).
+- **Fuzz targets.** Each `Fuzz…` function runs its seeds as a test in every run. To let one look for new inputs: `go test -run '^$' -fuzz '^FuzzHost$' -fuzztime 1m ./server` (one target at a time).
+- **Benchmarks.** `go test -run '^$' -bench 'ResolveRequest' -benchtime 2s ./server` The continuous integration runs every benchmark once, so that they keep working; it doesn't compare their times.
+- **What isn't here.** `deploy/systemd-test.sh`, `deploy/real-ports-test.sh` and `deploy/upgrade-test.sh` check, on a real system, the reference unit, the ports 80 and 443 and the upgrade from the previous version. Certbot against a certificate authority, and PHP, are checked by hand before a version (`turbo_php_real_test.go` runs where `php-cgi` is installed, as in the continuous integration, and is skipped elsewhere).
 
 ## How They Are Organized
 
-All the tests of Turbo itself are in the main package, next to the code, in files named `turbo_<subject>_test.go`. They test the server from as far out as each thing allows: most make requests to a server started for the test, or call the handler with a request; some call a validator or a function directly.
+All the tests of Turbo itself are in the folder [`server`](./server), next to the code they test (the files `a.turbo.*.go`), in files named `turbo_<subject>_test.go`. They are of the same package as the code, which Go only allows in its folder: that is why the code and its tests are there together, and the root of the repository has only `main.go`, which starts the program. They test the server from as far out as each thing allows: most make requests to a server started for the test, or call the handler with a request; some call a validator or a function directly.
 
-[`turbo_harness_test.go`](./turbo_harness_test.go) has what they share:
+[`turbo_harness_test.go`](./server/turbo_harness_test.go) has what they share:
 
-- `initForTest(t)` leaves Turbo as `main()` leaves it before reading its configuration, with a temporary sites directory that has the site `localhost`. Every test that touches the state of the server starts with it.
-- `startServer(t)` starts an HTTP server like the one of `main()` on a free port and returns its address; `login`, `post` and `rawGet` talk to it.
+- `initForTest(t)` leaves Turbo as `Main()` leaves it before reading its configuration, with a temporary sites directory that has the site `localhost`. Every test that touches the state of the server starts with it.
+- `startServer(t)` starts an HTTP server like the one of `Main()` on a free port and returns its address; `login`, `post` and `rawGet` talk to it.
 - `useFakeCertbot(t, mode)` puts the simulated Certbot in the `PATH`.
 
 Two things are checked for every test that starts with `initForTest`, whatever it tests:
