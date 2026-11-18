@@ -7,6 +7,7 @@ package main
 // prefix, and the path is saved with {TURBO_CURRENT_DIR} (D13).
 
 import (
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -110,4 +111,34 @@ func TestN07_PreprocessorLimitWithoutProtocol(t *testing.T) {
 			t.Errorf("cgi> plus 128 characters: %q; the prefix must not count", msg)
 		}
 	})
+}
+
+// R6 V-10: an extension with a dot inside matches no file, as the extension of a name is what follows its last dot:
+// it is refused, instead of answered as added while the files it was meant for were served as text.
+func TestR6_V10_ExtensionWithADotInside(t *testing.T) {
+	for extension, valid := range map[string]bool{"php": true, ".php": true, "php5": true, "x-y": true, "blade.php": false, ".tar.gz": false, "a.b.c": false, "php.": false, ".": false} {
+		if extChars(extension) != valid {
+			t.Errorf("extChars(%q) = %v; expected %v", extension, !valid, valid)
+		}
+	}
+	dir := initForTest(t)
+	os.WriteFile(dir+"localhost/@/view.blade.php", []byte("SOURCE"), 0644)
+	base := startServer(t)
+	tok := login(t, base)
+	code, body, _ := post(base, "/admin:inside:addPreprocessor?"+url.Values{"s": {"localhost"}, "d": {""}, "a": {"blade.php"}, "b": {toolPath("cgiecho")}, "c": {"Admin"}}.Encode(), tok)
+	if code != 400 || !strings.Contains(body, "Invalid extension") {
+		t.Errorf("addPreprocessor blade.php: %d %q; expected 400 \"Invalid extension…\"", code, body)
+	}
+	if code, body, _ := post(base, "/admin:inside:addMIME?"+url.Values{"s": {"localhost"}, "d": {""}, "a": {"tar.gz"}, "b": {"application/gzip"}, "c": {"Admin"}}.Encode(), tok); code != 400 {
+		t.Errorf("addMIME tar.gz: %d %q; expected 400", code, body)
+	}
+	// From turbo.config it is kept, with a warning that says what it does: nothing
+	logs := captureLog(t)
+	loadConfig(t, dir, `{"localhost":{"":{"-":{"index.html":"1"},"?":{"blade.php":"`+toolPath("cgiecho")+`"}}}}`)
+	if !strings.Contains(logs.String(), "has a dot inside") {
+		t.Errorf("no warning for the extension of turbo.config:\n%s", logs.String())
+	}
+	if !strings.Contains(createDefaultConfig(true, false, true), "blade.php") {
+		t.Error("saving loses the entry of turbo.config")
+	}
 }

@@ -211,7 +211,7 @@ func TestRL_S16_ShutdownEndsRunningCGIs(t *testing.T) {
 	if ok, msg := defaultSettingValidators["."]["WT"]("30s", "Admin"); !ok && !strings.Contains(msg, "unchanged") {
 		t.Fatal(msg)
 	}
-	server := &customNetHttp.Server{ConnState: connHandler, Handler: customNetHttp.HandlerFunc(serverHandlerFn(""))}
+	server := &customNetHttp.Server{ConnState: connHandler, Handler: customNetHttp.HandlerFunc(serverHandlerFn(false))}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -246,7 +246,7 @@ func TestRL_S16_ShutdownEndsRunningCGIs(t *testing.T) {
 	time.Sleep(200 * time.Millisecond) // Its child started too
 
 	start := time.Now()
-	shutdown(syscall.SIGTERM)
+	shutdown(syscall.SIGTERM, nil)
 	if elapsed := time.Since(start); elapsed > 4*time.Second {
 		t.Errorf("the stop took %v", elapsed)
 	}

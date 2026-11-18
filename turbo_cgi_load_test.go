@@ -121,7 +121,7 @@ func TestI11_CGIChunkedBody(t *testing.T) {
 func TestI11_CGIHTTP2BodyWithoutLength(t *testing.T) {
 	cgiSite(t)
 	cfg := selfSignedTLS(t)
-	srv := &customNetHttp.Server{Handler: customNetHttp.HandlerFunc(serverHandlerFn("s")), TLSConfig: cfg, ConnState: connHandler}
+	srv := &customNetHttp.Server{Handler: customNetHttp.HandlerFunc(serverHandlerFn(true)), TLSConfig: cfg, ConnState: connHandler}
 	l, err := tls.Listen("tcp", "127.0.0.1:0", cfg)
 	if err != nil {
 		t.Fatal(err)

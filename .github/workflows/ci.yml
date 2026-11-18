@@ -40,7 +40,11 @@ jobs:
             echo "Not formatted with gofmt:"; echo "$unformatted"; exit 1
           fi
       - name: go vet
-        run: go vet ./...
+        # Also as Windows builds it: its own files (a.turbo.y.tempfile.windows.go, customNetHttp/0.turbo.cgi_windows.go)
+        # are otherwise only compiled here.
+        run: |
+          go vet ./...
+          GOOS=windows go vet ./...
       - name: customNetHttp = Go of UPSTREAM + the patches
         run: go run ./customNetHttp/regenerate -check
       - name: staticcheck
@@ -49,17 +53,19 @@ jobs:
         run: |
           go install honnef.co/go/tools/cmd/staticcheck@v0.8.2
           # Exit code 0: no warnings; 1: warnings (as JSON). Anything else, or a 1 with no output, means the
-          # analysis did not finish.
-          set +e
-          staticcheck -f json ./... > staticcheck.json
-          status=$?
-          set -e
-          if [ "$status" -gt 1 ] || { [ "$status" -eq 1 ] && [ ! -s staticcheck.json ]; }; then
-            echo "staticcheck did not finish the analysis (exit code $status)"; exit 1
-          fi
-          jq -r 'select(.location.file | test("/customNetHttp/[1-9a-z][^/]*\\.go$") | not)
-                 | "\(.location.file):\(.location.line):\(.location.column): \(.message) (\(.code))"' staticcheck.json > warnings.txt
-          if [ -s warnings.txt ]; then cat warnings.txt; exit 1; fi
+          # analysis did not finish. Once as Linux builds the code and once as Windows does (its own files).
+          for goos in linux windows; do
+            set +e
+            GOOS="$goos" staticcheck -f json ./... > staticcheck.json
+            status=$?
+            set -e
+            if [ "$status" -gt 1 ] || { [ "$status" -eq 1 ] && [ ! -s staticcheck.json ]; }; then
+              echo "staticcheck did not finish the analysis of $goos (exit code $status)"; exit 1
+            fi
+            jq -r 'select(.location.file | test("/customNetHttp/[1-9a-z][^/]*\\.go$") | not)
+                   | "\(.location.file):\(.location.line):\(.location.column): \(.message) (\(.code))"' staticcheck.json > warnings.txt
+            if [ -s warnings.txt ]; then echo "As $goos builds it:"; cat warnings.txt; exit 1; fi
+          done
       - name: govulncheck
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
@@ -68,6 +74,7 @@ jobs:
         run: |
           go install github.com/securego/gosec/v2/cmd/gosec@v2.30.0
           gosec .
+          GOOS=windows gosec . # With the files of Windows
 
   tests:
     name: Tests (Linux)
@@ -85,6 +92,27 @@ jobs:
           cache: false
       - name: go test
         run: go test -count=1 -timeout 30m ./...
+      - name: Benchmarks, once
+        # So that they keep building and running; their times aren't compared here.
+        run: go test -run '^$' -bench . -benchtime 1x ./...
+
+  tests-shuffled:
+    name: Tests in a random order (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: go
+        run: echo "version=$(sed -n '1s/^go//p' customNetHttp/UPSTREAM)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ steps.go.outputs.version }}
+          cache: false
+      - name: go test -shuffle=on
+        # A test that depends on another one's leftovers fails here; the seed it prints repeats the order.
+        run: go test -count=1 -shuffle=on -timeout 30m ./...
 
   race:
     name: Tests with the race detector (Linux)
@@ -121,6 +149,26 @@ jobs:
           cache: false
       - name: go test
         shell: bash
+        run: go test -count=1 -timeout 30m ./...
+
+  tests-macos:
+    name: Tests (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 40
+    # Not required yet: 0.turbo.cgi_unix_other.go (macOS and the BSDs) was only built until now. Once it has passed for
+    # two weeks, the line goes and the job counts as the others do.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: go
+        run: echo "version=$(sed -n '1s/^go//p' customNetHttp/UPSTREAM)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ steps.go.outputs.version }}
+          cache: false
+      - name: go test
         run: go test -count=1 -timeout 30m ./...
 
   real-ports:

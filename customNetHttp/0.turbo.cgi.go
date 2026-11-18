@@ -42,6 +42,9 @@ import (
 // is still read: reading stops after that long without new data.
 var turboCGIOutputGrace = time.Second
 
+// turboCGIReadBuffer is the size of the buffer the output of a CGI is read into.
+const turboCGIReadBuffer = 32 << 10
+
 // turboCGIClockStart is the origin of the turboCGINow clock.
 var turboCGIClockStart = time.Now()
 
@@ -76,16 +79,25 @@ func turboCGIOutputPipe() (*turboCGIOutput, *os.File, error) {
 	go func() {
 		defer close(o.ended)
 		defer close(o.chunks)
+		// A read that fills at least a quarter of the buffer hands the buffer over, and the next one gets a new one;
+		// a shorter one hands over a copy of its size. A CGI that writes line by line (events, progress) took, and
+		// kept while its client read, 32 KiB for each line.
+		buffer := make([]byte, turboCGIReadBuffer)
 		for {
-			buffer := make([]byte, 32<<10)
 			o.lastData.Store(turboCGINow()) // Also after waiting for the previous data to be taken (a slow client)
 			o.reading.Store(true)
 			n, err := readEnd.Read(buffer)
 			o.reading.Store(false)
 			if n > 0 {
 				o.lastData.Store(turboCGINow())
+				chunk := buffer[:n]
+				if n < turboCGIReadBuffer/4 {
+					chunk = append([]byte(nil), chunk...)
+				} else {
+					buffer = make([]byte, turboCGIReadBuffer)
+				}
 				select {
-				case o.chunks <- buffer[:n]:
+				case o.chunks <- chunk:
 				case <-o.stopped:
 					return
 				}

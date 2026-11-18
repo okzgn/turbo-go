@@ -27,7 +27,7 @@ func TestW_ExitWithoutPort80(t *testing.T) {
 	dir := t.TempDir()
 	cmd := exec.Command(bin)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "TURBO_DIR="+dir)
+	cmd.Env = append(testEnviron(), "TURBO_DIR="+dir)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -97,13 +97,13 @@ func TestT25_ServeOnConfiguredAddress(t *testing.T) {
 	dir := t.TempDir()
 	cmd := exec.Command(bin)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "TURBO_DIR="+dir, "TURBO_HTTP_ADDR="+addr)
+	cmd.Env = append(testEnviron(), "TURBO_DIR="+dir, "TURBO_HTTP_ADDR="+addr)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
 	defer func() { cmd.Process.Kill(); cmd.Wait() }()
 	for start := time.Now(); time.Since(start) < 15*time.Second; time.Sleep(100 * time.Millisecond) {
-		res, err := http.Get("http://" + addr + "/")
+		res, err := (&http.Client{Timeout: clientTimeout()}).Get("http://" + addr + "/")
 		if err != nil {
 			continue
 		}
@@ -134,7 +134,7 @@ func TestR6_VersionAtStartup(t *testing.T) {
 		dir := t.TempDir()
 		cmd := exec.Command(bin)
 		cmd.Dir = dir
-		cmd.Env = append(os.Environ(), "TURBO_DIR="+dir+"/", "TURBO_HTTP_ADDR=127.0.0.1:"+freePort(t), "TURBO_HTTPS_ADDR=127.0.0.1:"+freePort(t))
+		cmd.Env = append(testEnviron(), "TURBO_DIR="+dir+"/", "TURBO_HTTP_ADDR=127.0.0.1:"+freePort(t), "TURBO_HTTPS_ADDR=127.0.0.1:"+freePort(t))
 		var out syncBuffer
 		cmd.Stdout, cmd.Stderr = &out, &out
 		if err := cmd.Start(); err != nil {

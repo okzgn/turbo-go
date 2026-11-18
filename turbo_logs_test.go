@@ -125,3 +125,42 @@ func TestRL_S5_LogFieldQuotesWhatDoesNotPrint(t *testing.T) {
 		}
 	}
 }
+
+// R6 O-1: a request writes no line, and waits for no lock, for a log that isn't open; once it is open, every line
+// reaches it, and once closed, none.
+func TestR6_O1_NoLogLineWithoutALog(t *testing.T) {
+	dir := initForTest(t)
+	base := startServer(t)
+	if visitsLogOpen.Load() || denialsLogOpen.Load() {
+		t.Fatal("a log is open without its file")
+	}
+	logMutex.Lock() // A request that needed it would wait here
+	done := make(chan struct{})
+	go func() {
+		serverWriteLogs(visitsLogName, nil, 0, "Visit")
+		serverWriteLogs(denialsLogName, nil, 0, "203.0.113.9 conn denial")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		logMutex.Unlock()
+		t.Fatal("writing a line for logs that aren't open waited for the lock of the logs")
+	}
+	logMutex.Unlock()
+	if err := os.WriteFile(dir+visitsLogName, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	updateSettings(true)
+	if !visitsLogOpen.Load() || denialsLogOpen.Load() {
+		t.Fatalf("with turbo.visits there: visits open %v, denials open %v", visitsLogOpen.Load(), denialsLogOpen.Load())
+	}
+	get(base, "/", nil)
+	if data, _ := os.ReadFile(dir + visitsLogName); !strings.Contains(string(data), "Visit ") {
+		t.Errorf("the visit wasn't written: %q", data)
+	}
+	serverSetLogState(visitsLogName, nil)
+	if visitsLogOpen.Load() {
+		t.Error("the log is closed and still counts as open")
+	}
+}

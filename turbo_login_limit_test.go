@@ -47,7 +47,7 @@ func loginFrom(handler func(customNetHttp.ResponseWriter, *customNetHttp.Request
 func TestA8_FailedLoginsLimited(t *testing.T) {
 	initForTest(t)
 	password := useTestPassword(t) // From other IPs: the default password signs in only from this machine (O4)
-	handler := serverHandlerFn("")
+	handler := serverHandlerFn(false)
 	calls := countPasswordKeys(t)
 	for i := 1; i <= 5; i++ {
 		if rec := loginFrom(handler, "198.51.100.7", "Turbo", "bad"+strconv.Itoa(i)); rec.code != 403 {
@@ -93,7 +93,7 @@ func TestA8_FailedLoginsLimited(t *testing.T) {
 func TestH57_ConcurrentLoginsLimited(t *testing.T) {
 	initForTest(t)
 	password := useTestPassword(t) // From other IPs: the default password signs in only from this machine (O4)
-	handler := serverHandlerFn("")
+	handler := serverHandlerFn(false)
 	calls := countPasswordKeys(t)
 	// A PBKDF2 slot for each attempt let through, so that none gets 503 (not checked, not counted) waiting for one:
 	// with 4 CPUs there are 2, and under -race a PBKDF2 can take longer than passwordSlotWait.
@@ -149,7 +149,7 @@ func expireLoginBlock(t *testing.T, ip string) {
 func TestA8_HashQueueBounded(t *testing.T) {
 	initForTest(t)
 	password := useTestPassword(t) // From other IPs: the default password signs in only from this machine (O4)
-	handler := serverHandlerFn("")
+	handler := serverHandlerFn(false)
 	verifiedPassword.Store(nil) // A password already checked doesn't need a slot
 	verifiedLogin.Store(nil)
 	for i := 0; i < cap(passwordHashSlots); i++ {
@@ -179,7 +179,7 @@ var adminLoginLimit = map[bool]time.Duration{false: 3 * time.Second, true: 6 * t
 func TestA8_AdminEntersDuringAttack(t *testing.T) {
 	initForTest(t)
 	password := useTestPassword(t) // From other IPs: the default password signs in only from this machine (O4)
-	handler := serverHandlerFn("")
+	handler := serverHandlerFn(false)
 	verifiedPassword.Store(nil) // The administrator's login also computes a PBKDF2
 	verifiedLogin.Store(nil)
 	var wg sync.WaitGroup
@@ -234,7 +234,7 @@ func FuzzLogin(f *testing.F) {
 	panelPasswordHash.Set("pbkdf2-sha256$1$MDEyMzQ1Njc4OWFiY2RlZg==$" + base64.StdEncoding.EncodeToString(key))
 	verifiedPassword.Store(nil)
 	verifiedLogin.Store(nil)
-	handler := serverHandlerFn("")
+	handler := serverHandlerFn(false)
 	f.Fuzz(func(t *testing.T, body string, multipartBody bool) {
 		loginFailuresMutex.Lock()
 		clear(loginFailuresByIP)
@@ -284,7 +284,7 @@ func TestRL_S12_DefaultPasswordWarningWithAnotherUser(t *testing.T) {
 func TestRP_M09_LoginLimitPer48(t *testing.T) {
 	initForTest(t)
 	password := useTestPassword(t) // From other IPs: the default password signs in only from this machine (O4)
-	handler := serverHandlerFn("")
+	handler := serverHandlerFn(false)
 	for failures, network := 0, 1; failures < loginMaxNetworkFailures; network++ {
 		for i := 1; i < loginMaxFailures && failures < loginMaxNetworkFailures; i++ { // Below the limit of each /64
 			ip := "[2001:db8:5:" + strconv.FormatInt(int64(network), 16) + "::" + strconv.Itoa(i) + "]" // As in RemoteAddr
@@ -312,7 +312,7 @@ func TestRP_M09_LoginLimitPer48(t *testing.T) {
 func TestRP_M09_ReservedPasswordSlot(t *testing.T) {
 	initForTest(t)
 	password := useTestPassword(t) // From other IPs: the default password signs in only from this machine (O4)
-	handler := serverHandlerFn("")
+	handler := serverHandlerFn(false)
 	token := newSession(t, "198.51.100.80")
 	verifiedPassword.Store(nil) // A password already checked doesn't need a slot
 	verifiedLogin.Store(nil)
@@ -357,13 +357,13 @@ func TestRP_M09_NewPasswordLength(t *testing.T) {
 	const ip = "198.51.100.82"
 	token := newSession(t, ip)
 	for _, password := range []string{"ElevenBytes", strings.Repeat("x", 65)} {
-		if rec := apiFrom(serverHandlerFn(""), ip, token, "/admin:inside:setP?"+url.Values{"a": {password}, "b": {"Admin"}}.Encode()); rec.code != 400 || rec.body.String() != "The password must have 12 to 64 bytes" {
+		if rec := apiFrom(serverHandlerFn(false), ip, token, "/admin:inside:setP?"+url.Values{"a": {password}, "b": {"Admin"}}.Encode()); rec.code != 400 || rec.body.String() != "The password must have 12 to 64 bytes" {
 			t.Errorf("setP with %d bytes: %d %q; expected 400", len(password), rec.code, rec.body.String())
 		}
 	}
 	current := "Admin" // Shorter, already in use: it keeps working
 	for _, password := range []string{"TwelveBytes!", strings.Repeat("y", 64)} {
-		rec := apiFrom(serverHandlerFn(""), ip, token, "/admin:inside:setP?"+url.Values{"a": {password}, "b": {current}}.Encode())
+		rec := apiFrom(serverHandlerFn(false), ip, token, "/admin:inside:setP?"+url.Values{"a": {password}, "b": {current}}.Encode())
 		if rec.code != 200 {
 			t.Fatalf("setP with %d bytes: %d %q; expected 200", len(password), rec.code, rec.body.String())
 		}

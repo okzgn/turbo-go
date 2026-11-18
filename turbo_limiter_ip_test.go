@@ -21,11 +21,11 @@ func TestN35_ExactlyCIIPerWindow(t *testing.T) {
 	initForTest(t)
 	limits(1000, 100)
 	for i := 1; i <= 100; i++ {
-		if perIPNotAvailable("198.51.100.40", true) {
+		if perIPNotAvailable(clientOf("198.51.100.40"), true) {
 			t.Fatalf("request %d of 100 blocked", i)
 		}
 	}
-	if !perIPNotAvailable("198.51.100.40", true) {
+	if !perIPNotAvailable(clientOf("198.51.100.40"), true) {
 		t.Error("request 101 of the first window was not blocked")
 	}
 }
@@ -35,10 +35,10 @@ func TestN35_ExactlyCIIPerWindow(t *testing.T) {
 func TestN35_CIIOne(t *testing.T) {
 	initForTest(t)
 	limits(50, 1)
-	if perIPNotAvailable("198.51.100.41", true) {
+	if perIPNotAvailable(clientOf("198.51.100.41"), true) {
 		t.Fatal("the first request with CII=1 was blocked")
 	}
-	if !perIPNotAvailable("198.51.100.41", true) {
+	if !perIPNotAvailable(clientOf("198.51.100.41"), true) {
 		t.Error("the second request in the same window with CII=1 was not blocked")
 	}
 }
@@ -51,12 +51,12 @@ func TestN13_IPReferencesCapped(t *testing.T) {
 	previous := ipReferenceLimit
 	ipReferenceLimit = 100
 	t.Cleanup(func() { ipReferenceLimit = previous })
-	if perIPNotAvailable("198.51.100.50", true) {
+	if perIPNotAvailable(clientOf("198.51.100.50"), true) {
 		t.Fatal("the known IP was blocked on its first request")
 	}
 	blocked := 0
 	for i := 0; i < 1000; i++ {
-		if perIPNotAvailable("2001:db8:50::"+strconv.FormatInt(int64(i), 16), true) {
+		if perIPNotAvailable(clientOf("2001:db8:50::"+strconv.FormatInt(int64(i), 16)), true) {
 			blocked++
 		}
 	}
@@ -68,7 +68,7 @@ func TestN13_IPReferencesCapped(t *testing.T) {
 	if blocked == 0 {
 		t.Error("the new IPs above the cap don't share the limit")
 	}
-	if perIPNotAvailable("198.51.100.50", true) {
+	if perIPNotAvailable(clientOf("198.51.100.50"), true) {
 		t.Error("the known IP was blocked because of the overflow")
 	}
 }
@@ -82,13 +82,13 @@ func TestN36_ClockBackwards(t *testing.T) {
 	monotonicNow = func() int64 { return clock }
 	t.Cleanup(func() { monotonicNow = previous })
 	for i := 0; i < 10; i++ {
-		if perIPNotAvailable("198.51.100.51", true) {
+		if perIPNotAvailable(clientOf("198.51.100.51"), true) {
 			t.Fatalf("request %d blocked", i+1)
 		}
 	}
 	clock -= int64(5 * time.Second)
 	for i := 0; i < 5; i++ {
-		if perIPNotAvailable("198.51.100.51", true) {
+		if perIPNotAvailable(clientOf("198.51.100.51"), true) {
 			t.Fatalf("request %d blocked after the clock went back", i+1)
 		}
 	}
@@ -101,13 +101,13 @@ func BenchmarkPerIPLimiter(b *testing.B) {
 	b.Run("known", func(b *testing.B) {
 		b.RunParallel(func(pb *testing.PB) {
 			for pb.Next() {
-				perIPNotAvailable("198.51.100.52", true)
+				perIPNotAvailable(clientOf("198.51.100.52"), true)
 			}
 		})
 	})
 	b.Run("new", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
-			perIPNotAvailable("2001:db8:52::"+strconv.Itoa(i), true)
+			perIPNotAvailable(clientOf("2001:db8:52::"+strconv.Itoa(i)), true)
 		}
 	})
 }
@@ -120,23 +120,23 @@ func TestN13_IPv6LimitedBy64(t *testing.T) {
 	limits(50000, 100)
 	blocked := 0
 	for i := 1; i <= 1000; i++ {
-		if perIPNotAvailable("2001:db8:1:2::"+strconv.FormatInt(int64(i), 16), true) {
+		if perIPNotAvailable(clientOf("2001:db8:1:2::"+strconv.FormatInt(int64(i), 16)), true) {
 			blocked++
 		}
 	}
 	if blocked != 900 {
 		t.Errorf("1 000 addresses of the same /64: %d blocked; expected 900 (they count as one, with CII=100)", blocked)
 	}
-	if perIPNotAvailable("2001:db8:1:3::1", true) {
+	if perIPNotAvailable(clientOf("2001:db8:1:3::1"), true) {
 		t.Error("another /64 blocked")
 	}
 	for i := 1; i <= 100; i++ {
-		perIPNotAvailable("192.0.2.7", true)
+		perIPNotAvailable(clientOf("192.0.2.7"), true)
 	}
-	if !perIPNotAvailable("::ffff:192.0.2.7", true) {
+	if !perIPNotAvailable(clientOf("::ffff:192.0.2.7"), true) {
 		t.Error("::ffff:192.0.2.7 doesn't count as 192.0.2.7")
 	}
-	if perIPNotAvailable("192.0.2.8", true) {
+	if perIPNotAvailable(clientOf("192.0.2.8"), true) {
 		t.Error("another IPv4 blocked")
 	}
 }

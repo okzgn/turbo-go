@@ -5,8 +5,10 @@ package main
 // one place is not applied.
 
 import (
+	"go/build"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -238,4 +240,133 @@ func TestRP3_R604_GoModVersion(t *testing.T) {
 	if err := goModVersion(filepath.Join("..", "..", "go.mod"), "..", true); err != nil {
 		t.Error(err)
 	}
+}
+
+// R6 N-10: a deletion that doesn't remove the whole file, a name with folders, and the line break at the end of a
+// file as "\ No newline at end of file" says. A deletion deleted the file whatever its hunks covered, only the last
+// part of a path was taken ("sub/x.go" changed "x.go"), and the marker was skipped: the result kept the ending of the
+// original.
+func TestR6_N10_WhatAPatchSays(t *testing.T) {
+	cases := []struct {
+		name, patch string
+		ok          bool
+		file        string // x.go after the patch; "-" if it was deleted
+	}{
+		{"a deletion of part of the file", "--- a/x.go\n+++ /dev/null\n@@ -1,2 +0,1 @@\n-a\n b\n", false, ""},
+		{"a deletion of the whole file", "--- a/x.go\n+++ /dev/null\n@@ -1,3 +0,0 @@\n-a\n-b\n-c\n", true, "-"},
+		{"a name with folders", "--- a/sub/x.go\n+++ b/sub/x.go\n@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n", false, ""},
+		{"a name with folders, Windows style", "--- a/sub\\x.go\n+++ b/sub\\x.go\n@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n", false, ""},
+		{"the result without a final line break", "--- a/x.go\n+++ b/x.go\n@@ -2,2 +2,2 @@\n b\n-c\n+C\n\\ No newline at end of file\n", true, "a\nb\nC"},
+		{"the original without one, said of a file that has one", "--- a/x.go\n+++ b/x.go\n@@ -2,2 +2,2 @@\n b\n-c\n\\ No newline at end of file\n+C\n", false, ""},
+	}
+	for _, c := range cases {
+		files := map[string]string{"x.go": "a\nb\nc\n"}
+		err := applyPatch(files, c.patch)
+		if (err == nil) != c.ok {
+			t.Errorf("%s: %v", c.name, err)
+			continue
+		}
+		if !c.ok {
+			continue
+		}
+		if got, kept := files["x.go"]; c.file == "-" && kept || c.file != "-" && got != c.file {
+			t.Errorf("%s: x.go is %q (there %v); expected %q", c.name, got, kept, c.file)
+		}
+	}
+	// A file without a final line break: a hunk that reaches its end says so, and the result ends as it says
+	for _, c := range []struct {
+		name, patch string
+		ok          bool
+		file        string
+	}{
+		{"it says nothing", "--- a/x.go\n+++ b/x.go\n@@ -2,2 +2,2 @@\n b\n-c\n+C\n", false, ""},
+		{"it keeps it so", "--- a/x.go\n+++ b/x.go\n@@ -2,2 +2,2 @@\n b\n-c\n\\ No newline at end of file\n+C\n\\ No newline at end of file\n", true, "a\nb\nC"},
+		{"it adds the line break", "--- a/x.go\n+++ b/x.go\n@@ -2,2 +2,2 @@\n b\n-c\n\\ No newline at end of file\n+C\n", true, "a\nb\nC\n"},
+		{"a hunk before the end", "--- a/x.go\n+++ b/x.go\n@@ -1,2 +1,2 @@\n-a\n+A\n b\n", true, "A\nb\nc"},
+	} {
+		files := map[string]string{"x.go": "a\nb\nc"}
+		err := applyPatch(files, c.patch)
+		if (err == nil) != c.ok {
+			t.Errorf("without a final line break, %s: %v", c.name, err)
+			continue
+		}
+		if c.ok && files["x.go"] != c.file {
+			t.Errorf("without a final line break, %s: %q; expected %q", c.name, files["x.go"], c.file)
+		}
+	}
+}
+
+// R6 N-10: a patch that leaves customNetHttp with a type error stops the regeneration. Only the syntax and the
+// format were checked: the error was found when building.
+func TestR6_N10_TypesAfterThePatches(t *testing.T) {
+	if testing.Short() {
+		t.Skip("regenerates the fork")
+	}
+	dir := forkCopy(t)
+	const name = "1.net.http.server.go"
+	data, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSuffix(normalize(string(data)), "\n"), "\n")
+	context := 3
+	for ; context < len(lines) && occurrences(lines, lines[len(lines)-context:]) > 1; context++ {
+	}
+	start := len(lines) - context + 1
+	patch := "--- a/" + name + "\n+++ b/" + name + "\n@@ -" + strconv.Itoa(start) + "," + strconv.Itoa(context) + " +" + strconv.Itoa(start) + "," + strconv.Itoa(context+2) + " @@\n"
+	for _, line := range lines[len(lines)-context:] {
+		patch += " " + line + "\n"
+	}
+	patch += "+\n+var _ int = \"not an int\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "patches", "99-broken-type.patch"), []byte(patch), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkIn(dir); err == nil || !strings.Contains(err.Error(), "type-check") {
+		t.Errorf("-check with a patch that breaks a type: %v", err)
+	}
+}
+
+// R6 N-11: NOTICE names the Go release of UPSTREAM and the versions of golang.org/x/net and golang.org/x/text that it
+// vendors; -check verifies them and -update writes them, keeping the lines of NOTICE.
+func TestR6_N11_NoticeVersions(t *testing.T) {
+	dir := t.TempDir()
+	notice := "taken from the Go release\nnamed in the UPSTREAM file (go1.26.10: golang.org/x/net\nv0.47.0 and golang.org/x/text v0.31.0,\nas vendored by that release).\n"
+	os.WriteFile(filepath.Join(dir, "NOTICE"), []byte(notice), 0o644)
+	vendored := map[string]string{"golang.org/x/net": "v0.47.1-0.20261008201845-026a91c07857", "golang.org/x/text": "v0.32.0"}
+	if err := checkNotice(dir, "go1.26.11", vendored); err == nil {
+		t.Error("NOTICE with older versions passes the check")
+	}
+	if err := updateNotice(dir, "go1.26.11", vendored); err != nil {
+		t.Fatal(err)
+	}
+	updated, _ := os.ReadFile(filepath.Join(dir, "NOTICE"))
+	want := "taken from the Go release\nnamed in the UPSTREAM file (go1.26.11: golang.org/x/net\nv0.47.1-0.20261008201845-026a91c07857 and golang.org/x/text v0.32.0,\nas vendored by that release).\n"
+	if string(updated) != want {
+		t.Errorf("NOTICE after the update:\n%s\nexpected:\n%s", updated, want)
+	}
+	if err := checkNotice(dir, "go1.26.11", vendored); err != nil {
+		t.Errorf("NOTICE after the update: %v", err)
+	}
+	if err := checkNotice("..", strings.TrimSpace(strings.SplitN(readFile(t, "../UPSTREAM"), "\n", 2)[0]), mustVendored(t)); err != nil {
+		t.Errorf("the NOTICE of customNetHttp: %v", err)
+	}
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return normalize(string(data))
+}
+
+// mustVendored is vendoredVersions of the GOROOT in use, which must be the release of UPSTREAM.
+func mustVendored(t *testing.T) map[string]string {
+	t.Helper()
+	versions, err := vendoredVersions(build.Default.GOROOT)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return versions
 }

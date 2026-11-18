@@ -52,7 +52,7 @@ func TestN38_AbsoluteForm(t *testing.T) {
 		t.Errorf("absolute form with another Host: %d %q", res.StatusCode, body)
 	}
 	// A redirection to www keeps the path, not the absolute URI.
-	withGlobalLock(func() { siteSSLConfig["localhost"]["W"] = true })
+	withGlobalLock(func() { siteSSLConfig["localhost"].rootToWWW = true })
 	res, _ = rawFullRequest(t, base, "GET http://localhost/a?b=1 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
 	if location := res.Header.Get("Location"); res.StatusCode != 301 || location != "http://www.localhost/a?b=1" {
 		t.Errorf("W redirect in absolute form: %d %q", res.StatusCode, location)
@@ -74,7 +74,7 @@ func TestN38_OptionsAsterisk(t *testing.T) {
 func TestRL_S3_TargetWithoutSlash(t *testing.T) {
 	initForTest(t)
 	globalMutex.Lock()
-	siteSSLConfig["localhost"]["W"] = true // localhost redirects to www.localhost
+	siteSSLConfig["localhost"].rootToWWW = true // localhost redirects to www.localhost
 	globalMutex.Unlock()
 	addr := strings.TrimPrefix(startServer(t), "http://")
 	for _, target := range []string{"x:@evil.test", "*"} {

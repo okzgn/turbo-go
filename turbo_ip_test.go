@@ -33,7 +33,7 @@ func TestB7_IPAddrCanonical(t *testing.T) {
 // deleted written in another form.
 func TestB7_DeniedIPNormalized(t *testing.T) {
 	initForTest(t)
-	handler := serverHandlerFn("")
+	handler := serverHandlerFn(false)
 	request := func(remoteAddr string) int {
 		req, _ := customNetHttp.NewRequest("GET", "http://localhost/", nil)
 		req.RequestURI = "/"
@@ -77,7 +77,7 @@ func TestRL_S7_IPv6DenialCoversItsSlash64(t *testing.T) {
 	future := strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)
 	withGlobalLock(func() { adminAddHandlers["@"]("2001:db8::1", future) })
 	for ip, want := range map[string]bool{"2001:db8::1": true, "2001:db8::2": true, "2001:db8::ffff:0:9": true, "2001:db8:0:1::1": false, "203.0.113.5": false} {
-		if blocked, _ := ipBlocked(ip); blocked != want {
+		if blocked, _ := ipBlocked(clientOf(ip)); blocked != want {
 			t.Errorf("ipBlocked(%s) = %v; expected %v", ip, blocked, want)
 		}
 	}
@@ -85,7 +85,7 @@ func TestRL_S7_IPv6DenialCoversItsSlash64(t *testing.T) {
 		t.Error("an address of the administrator's /64 isn't taken for theirs")
 	}
 	withGlobalLock(func() { adminDeleteHandlers["@"]("2001:db8::1") })
-	if blocked, _ := ipBlocked("2001:db8::2"); blocked {
+	if blocked, _ := ipBlocked(clientOf("2001:db8::2")); blocked {
 		t.Error("the /64 is still denied after removing its address")
 	}
 }

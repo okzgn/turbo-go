@@ -113,7 +113,7 @@ func TestW_ManualDeniedIP(t *testing.T) {
 	if !ok {
 		t.Fatalf("add: %q", msg)
 	}
-	if !perIPNotAvailable(ip, true) {
+	if !perIPNotAvailable(clientOf(ip), true) {
 		t.Fatal("the denied IP isn't blocked on the first call")
 	}
 	globalMutex.Lock()
@@ -122,7 +122,7 @@ func TestW_ManualDeniedIP(t *testing.T) {
 	if !ok {
 		t.Fatalf("delete: %q", msg)
 	}
-	if perIPNotAvailable(ip, true) {
+	if perIPNotAvailable(clientOf(ip), true) {
 		t.Fatal("the IP is still blocked after deleting it")
 	}
 }
@@ -139,7 +139,7 @@ func TestP07_IPRefMemory(t *testing.T) {
 	runtime.ReadMemStats(&m0)
 	n := 1_000_000
 	for i := 0; i < n; i++ {
-		perIPNotAvailable(fmt.Sprintf("2001:db8::%x:%x", i>>16, i&0xffff), true)
+		perIPNotAvailable(clientOf(fmt.Sprintf("2001:db8::%x:%x", i>>16, i&0xffff)), true)
 	}
 	time.Sleep(1100 * time.Millisecond)
 	cleanIPReferences()
@@ -162,10 +162,10 @@ func TestC_DeniedIPsFromConfig(t *testing.T) {
 	os.WriteFile(dir+"turbo.config", []byte(cfg), 0600)
 	configFileStamp = configStamp{}
 	updateSettings(false)
-	if !perIPNotAvailable("203.0.113.8", true) {
+	if !perIPNotAvailable(clientOf("203.0.113.8"), true) {
 		t.Error("the active IP of turbo.config isn't blocked")
 	}
-	if perIPNotAvailable("203.0.113.9", true) {
+	if perIPNotAvailable(clientOf("203.0.113.9"), true) {
 		t.Error("the expired IP of turbo.config is blocked")
 	}
 	if !saveDefaultConfig() {

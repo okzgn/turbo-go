@@ -11,7 +11,7 @@ import (
 // token, forms the same string (10.0.0.1 + "5…" versus 10.0.0.15 + "…").
 func TestB6_SessionKeyUnambiguous(t *testing.T) {
 	initForTest(t)
-	handler := serverHandlerFn("")
+	handler := serverHandlerFn(false)
 	token := newSession(t, "10.0.0.1")
 	if len(token) != 64 {
 		t.Fatalf("session token %q", token)

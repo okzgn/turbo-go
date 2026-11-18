@@ -54,7 +54,7 @@ func TestN02_SetMToCopyWithSameDate(t *testing.T) {
 		t.Errorf("GET /x.cgi after setM: %d %q; expected the CGI run", code, body)
 	}
 	globalMutex.RLock()
-	https := siteSSLConfig["localhost"]["S"]
+	https := siteSSLConfig["localhost"].asSection()["S"]
 	globalMutex.RUnlock()
 	if https != 1 {
 		t.Error("HTTPS disabled after setM to the copy")
@@ -145,13 +145,14 @@ func TestN42_SetMWaitsForReload(t *testing.T) {
 	tok := login(t, base)
 	chosen, release := make(chan struct{}), make(chan struct{})
 	var first atomic.Bool // Only the periodic reload waits (sync.Once would also hold setM's)
+	previousHook := beforeSitesScan
 	beforeSitesScan = func() {
 		if first.CompareAndSwap(false, true) {
 			close(chosen)
 			<-release
 		}
 	}
-	t.Cleanup(func() { beforeSitesScan = func() {} })
+	t.Cleanup(func() { beforeSitesScan = previousHook })
 	configFileStamp = configStamp{} // The periodic reload reads A's turbo.config again
 	reloaded := make(chan struct{})
 	go func() { updateSettings(true); close(reloaded) }()

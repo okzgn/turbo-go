@@ -11,12 +11,12 @@ index 2fa5503..e68c409 100644
  
  func checkWriteHeaderCode(code int) {
  	// Issue 22880: require valid WriteHeader status codes.
-@@ -1415,7 +1415,7 @@ func (cw *chunkWriter) writeHeader(p []byte) {
- 					// Body was closed in handler with non-EOF error.
- 					w.closeAfterReply = true
- 				}
--			case bdy.unreadDataSizeLocked() >= maxPostHandlerReadBytes:
-+			case bdy.unreadDataSizeLocked() > maxPostHandlerReadBytes: // turbo:P7: a body read whole (0 unread) keeps the connection (Go: >=)
- 				tooBig = true
- 			default:
- 				discard = true
+@@ -1401,7 +1401,7 @@ func (cw *chunkWriter) writeHeader(p []byte) {
+ 				// Body was closed in handler with non-EOF error.
+ 				w.closeAfterReply = true
+ 			}
+-		case w.reqBody.unreadDataSizeLocked() >= maxPostHandlerReadBytes:
++		case w.reqBody.unreadDataSizeLocked() > maxPostHandlerReadBytes: // turbo:P7: a body read whole (0 unread) keeps the connection (Go: >=)
+ 			tooBig = true
+ 		default:
+ 			discard = true

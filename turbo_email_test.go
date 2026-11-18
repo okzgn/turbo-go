@@ -38,7 +38,7 @@ func TestN19_CertbotEmail(t *testing.T) {
 		}
 		if c.ok {
 			globalMutex.RLock()
-			saved := siteSSLConfig["localhost"]["E"]
+			saved := siteSSLConfig["localhost"].asSection()["E"]
 			globalMutex.RUnlock()
 			if saved != c.email {
 				t.Errorf("cfgE %q saved %q", c.email, saved)
@@ -64,7 +64,7 @@ func TestN19_CertbotEmail(t *testing.T) {
 	}
 	globalMutex.RLock()
 	defer globalMutex.RUnlock()
-	if saved := siteSSLConfig["localhost"]["E"]; saved != "a+b%41@x.com" {
+	if saved := siteSSLConfig["localhost"].asSection()["E"]; saved != "a+b%41@x.com" {
 		t.Errorf("e-mail after saving and reloading: %q", saved)
 	}
 }

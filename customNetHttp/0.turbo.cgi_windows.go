@@ -31,7 +31,9 @@ import (
 	"log/slog"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -86,15 +88,23 @@ func turboCGIPrepare(cmd *exec.Cmd) *turboCGIGroup {
 	return group
 }
 
-// turboJobWarning makes the failure to put a CGI in a Job Object logged once.
-var turboJobWarning sync.Once
+// turboJobWarned is when the failure to put a CGI in a Job Object was last
+// logged (Unix seconds), and turboJobWarningInterval how often it is, at most.
+// Logged only once, a CGI that had ended before it could go in its Job Object,
+// which is no problem, spent the warning of a later failure that was one.
+var turboJobWarned atomic.Int64
 
-// turboJobFailed logs, the first time, that a CGI couldn't go in a Job Object:
-// ended, only the CGI itself is killed, not the processes it started.
+const turboJobWarningInterval = 600
+
+// turboJobFailed logs, at most every turboJobWarningInterval seconds, that a
+// CGI couldn't go in a Job Object: ended, only the CGI itself is killed, not
+// the processes it started.
 func turboJobFailed(step string, err error) {
-	turboJobWarning.Do(func() {
-		slog.Warn("A CGI couldn't go in a Job Object: when it is ended, the processes it started go on (logged once)", "step", step, "error", err)
-	})
+	now := time.Now().Unix()
+	if last := turboJobWarned.Load(); now-last < turboJobWarningInterval || !turboJobWarned.CompareAndSwap(last, now) {
+		return
+	}
+	slog.Warn("A CGI couldn't go in a Job Object (or had already ended): when it is ended, the processes it started go on (logged every 10 minutes at most)", "step", step, "error", err)
 }
 
 // started creates the Job Object and puts the process, already started, in it.
@@ -153,7 +163,10 @@ func (g *turboCGIGroup) release(*exec.Cmd) {
 		return
 	}
 	limits := turboJobLimits{}
-	turboSetInformationJobObject.Call(uintptr(g.job), turboJobObjectExtendedLimitInformation, uintptr(unsafe.Pointer(&limits)), unsafe.Sizeof(limits))
+	if ok, _, callErr := turboSetInformationJobObject.Call(uintptr(g.job), turboJobObjectExtendedLimitInformation, uintptr(unsafe.Pointer(&limits)), unsafe.Sizeof(limits)); ok == 0 {
+		// The limit stays: closing the Job Object ends the processes that the CGI left, which were to go on
+		turboJobFailed("SetInformationJobObject (release)", callErr)
+	}
 	syscall.CloseHandle(g.job)
 	g.job = 0
 }

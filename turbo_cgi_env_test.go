@@ -87,7 +87,7 @@ func TestN90_HTTP2HostFieldDifferentFromAuthority(t *testing.T) {
 	globalMutex.Lock()
 	subdomainContentCheckers["?"](true, map[string]interface{}{"cgi": toolPath("cgiecho")}, false, "localhost", "")
 	globalMutex.Unlock()
-	h := dialH2(t, forkServer(t, true, serverHandlerFn("s")))
+	h := dialH2(t, forkServer(t, true, serverHandlerFn(true)))
 	request := func(host string) string {
 		var b bytes.Buffer
 		fields := []string{":method", "GET", ":scheme", "https", ":path", "/x.cgi", ":authority", "localhost"}

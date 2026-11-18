@@ -65,7 +65,7 @@ func TestP15_RenewalReadsWithoutGlobalLock(t *testing.T) {
 	writeTestCertificate(t, dir+"localhost/", 90*24*time.Hour, "localhost")
 	os.MkdirAll(dir+certificatesDirName+"/localhost", 0700) // Issued by Turbo
 	globalMutex.Lock()
-	siteSSLConfig["localhost"]["E"] = "a@b.co"
+	siteSSLConfig["localhost"].email = "a@b.co"
 	globalMutex.Unlock()
 	base := startServer(t)
 	release := fifoCertificate(t, dir+"localhost/")

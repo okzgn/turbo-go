@@ -208,5 +208,6 @@ func turboHeadersInBuffer(br *bufio.Reader, limit int64) bool {
 	data, _ := br.Peek(br.Buffered())
 	data = bytes.TrimLeft(data, "\r\n")
 	data = data[:min(int64(len(data)), limit)]
-	return bytes.Contains(data, []byte("\r\n\r\n")) || bytes.Contains(data, []byte("\n\n"))
+	// Lines that end in LF and a blank line that ends in CRLF ("\n\r\n") are a header block too (textproto)
+	return bytes.Contains(data, []byte("\r\n\r\n")) || bytes.Contains(data, []byte("\n\n")) || bytes.Contains(data, []byte("\n\r\n"))
 }

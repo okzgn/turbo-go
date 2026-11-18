@@ -14,13 +14,13 @@ El backend de Turbo proporciona una API de estilo **RPC/REST sobre HTTP POST**. 
 ### 1.2. Cabeceras y Seguridad
 * **Método HTTP:** Obligatoriamente `POST` para todas las acciones de la API.
 * **Parámetros:** Los parámetros de las acciones (`s`, `d`, `a`, `b`…) pueden ir en la consulta de la URL o en un cuerpo `application/x-www-form-urlencoded`. La GUI los envía en el cuerpo, así que la contraseña actual (`b`) nunca aparece en la URL que registra `turbo.visits`; los clientes de la API deberían hacer lo mismo. La excepción es `hardUpload` (§9), cuyo sitio y subdominio (`s`, `d`, que no son sensibles) van en la URL, y su contraseña en el cuerpo multipart.
-* **Manejo de Sesión:** Tras un login correcto, el servidor fija la cookie de sesión (`Path=/; HttpOnly; SameSite=Strict`), que el navegador envía por sí solo: `turbo_session` por HTTP, y `__Host-turbo_session` por HTTPS (con `Secure` y sin `Domain`, así que los navegadores solo la aceptan del host del panel y otro subdominio no puede poner una en su lugar). Los clientes de la API pueden enviar en su lugar el token en la cabecera `ok: <token>`. Se prueban todas las cookies de sesión de la petición (puede llegar antes una con el mismo nombre fijada por otro subdominio) y después la cabecera `ok`. El token **no** se acepta como parámetro en la URL. Las dos cookies se quitan de la cabecera `Cookie` que se pasa a los preprocesadores CGI.
+* **Manejo de Sesión:** Tras un login correcto, el servidor fija la cookie de sesión (`Path=/; HttpOnly; SameSite=Strict`), que el navegador envía por sí solo: `turbo_session` por HTTP, y `__Host-turbo_session` por HTTPS (con `Secure` y sin `Domain`, así que los navegadores solo la aceptan del host del panel y otro subdominio no puede poner una en su lugar). La cookie de HTTP, que no lleva `Secure`, no es una sesión en una petición por HTTPS: una sesión abierta por HTTP vuelve a iniciar sesión cuando se llega al panel por HTTPS. Los clientes de la API pueden enviar en su lugar el token en la cabecera `ok: <token>`, que es una sesión por cualquiera de los dos. Se prueban todas las cookies de sesión de la petición (puede llegar antes una con el mismo nombre fijada por otro subdominio) y después la cabecera `ok`. El token **no** se acepta como parámetro en la URL. Las dos cookies se quitan de la cabecera `Cookie` que se pasa a los preprocesadores CGI.
 * **Mismo Origen:** Un `POST` a `/admin:inside:` autenticado con la cookie debe venir del propio origen del panel: el navegador debe enviar `Sec-Fetch-Site: same-origin` (o `none`) o, sin `Sec-Fetch-Site`, una cabecera `Origin` igual a `<esquema>://<Host>`. Si no, el servidor responde `403`. Las peticiones autenticadas con la cabecera `ok` no lo necesitan.
-* **Cabeceras de las Respuestas del Panel:** Las respuestas bajo `/admin:` llevan `X-Frame-Options: DENY`, `Cache-Control: no-store`, `X-Content-Type-Options: nosniff` y una `Content-Security-Policy`: `frame-ancestors 'none'` en las páginas del panel, y en todo lo demás (respuestas de la API, errores con la plantilla de error) una sin scripts, marcos, formularios ni complementos (`default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`). Todo error que Turbo responde con la plantilla de error lleva también esa, en cualquier host, antes o después de leer la petición, así que una plantilla de error nunca ejecuta scripts: con `PA` vacío (lo predeterminado), los sitios comparten el origen del panel. En un host de `PA`, también la lleva toda respuesta fuera de las páginas del panel. Las respuestas JSON (`sites`, `subdomains`, `subdomainData`, el `WAIT` de `cfgC` y `cfgPC`) son `application/json; charset=utf-8`, y los mensajes de texto `text/plain; charset=utf-8`.
+* **Cabeceras de las Respuestas del Panel:** Las respuestas bajo `/admin:` llevan `X-Frame-Options: DENY`, `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` y una `Content-Security-Policy`: en las páginas del panel incrustadas en el binario, una que solo les deja ejecutar su propio script y su propio estilo (por sus hashes) y cargar los archivos del propio panel; en una página propia de `turbo.dev/`, `frame-ancestors 'none'`; y en todo lo demás (respuestas de la API, errores con la plantilla de error) una sin scripts, marcos, formularios ni complementos (`default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`). Todo error que Turbo responde con la plantilla de error lleva también esa, en cualquier host, antes o después de leer la petición, así que una plantilla de error nunca ejecuta scripts: con `PA` vacío (lo predeterminado), los sitios comparten el origen del panel. En un host de `PA`, también la lleva toda respuesta fuera de las páginas del panel. Las respuestas JSON (`sites`, `subdomains`, `subdomainData`, el `WAIT` de `cfgC` y `cfgPC`) son `application/json; charset=utf-8`, y los mensajes de texto `text/plain; charset=utf-8`.
 * **Sesión Ausente:** una petición a `/admin:inside:` sin una sesión válida recibe la misma redirección HTML de siempre (§3.2) y la cabecera `X-Turbo-Login: required`, que es lo que deben mirar los clientes: el contenido de una respuesta válida (una plantilla de error, una cabecera o una reescritura de un sitio) puede contener cualquier texto.
 * **Dónde Responde el Panel:** El ajuste global `PA` (ver `setPA`, §5) puede limitar `/admin:` a una lista de hosts y/o redes CIDR: el `Host` de la petición tiene que ser uno de los hosts (si los hay) y la IP del cliente tiene que estar en una de las redes (si las hay). Si no, `/admin:` responde `404`. Vacío (por defecto) significa sin restricción, y entonces el panel comparte el origen de todos los sitios que sirve Turbo: la configuración recomendada es un host propio para el panel, que no sirva ningún sitio. Con redes y sin host, el panel solo responde cuando el `Host` es una dirección IP o `localhost`, nunca un nombre: una página cuyo nombre resuelve a Turbo (DNS rebinding) llegaría si no al panel desde el navegador de alguien de esas redes, en su propio origen. Se rechaza un host de `PA` que sirva un sitio (§5), y también un sitio, subdominio o alias nuevo que serviría un host de `PA` (`400` con el motivo).
 * **Ciclo de Vida de la Sesión:** Los tokens son asignados a la IP del cliente y expiran tras **600 segundos (10 minutos)** de inactividad, y como mucho **12 horas** después del login, se usen como se usen. Cada petición a `/admin:inside:` del propio origen del panel (o sin `Sec-Fetch-Site`, como las envían los clientes de la API) renueva el temporizador, hasta ese límite; una de otro origen, como un recurso que carga otra página, no. Cambiar el usuario o la contraseña (`setU`, `setP`) cierra todas las sesiones, también la de la petición, y abre una nueva para su cliente: la respuesta fija la cookie nueva y, para una petición cuya sesión llegó en la cabecera `ok` (un cliente de la API), lleva el token nuevo en su cabecera `ok`, que los clientes de la API deben enviar desde entonces; un navegador, cuya sesión llegó en la cookie, lo recibe solo ahí, donde los scripts de sus páginas no pueden leerlo (una copia del token viejo ya no vale nada). Lo mismo hacen `setM`, cuando el `turbo.config` del directorio nuevo trae otras credenciales, y `closeSessions` (§3.3); una recarga de `turbo.config` que las cambia cierra todas las sesiones. Sin una sesión válida, `/admin:inside:` devuelve la redirección HTML a `/admin:` (ver §3.2).
-* **Lo que Basta con la Sesión:** leer el estado (`sites`, `subdomains`, `subdomainData`); añadir y borrar sitios y subdominios, reescrituras, índices, alias e IPs denegadas (salvo `delSite`); y los `cfg<CLAVE>` que no borran un certificado (los de un sitio, y `cfgPC` con `a=1`). Toda otra acción pide además la contraseña actual: `set<CLAVE>`, `addPreprocessor` y `delPreprocessor`, `addMIME` y `delMIME`, `addHeader` y `delHeader` (un tipo MIME o una cabecera pueden hacer que un archivo de un sitio se ejecute como página), `delSite`, `hardUpload`, `cfgC` y `cfgPC` con `a=0`, `addHttpCodeResponse` y `delHttpCodeResponse` (una plantilla es la página de error de todos los sitios), `addCharsReplace` y `delCharsReplace` (un reemplazo cambia lo que leen las acciones) y `closeSessions`.
+* **Lo que Basta con la Sesión:** leer el estado (`sites`, `subdomains`, `subdomainData`); añadir y borrar sitios y subdominios, reescrituras dentro del sitio, índices y alias (salvo `delSite`), y borrar IPs denegadas; y los `cfg<CLAVE>` que ni borran un certificado ni quitan el HTTPS de un sitio (los de un sitio salvo `cfgC` y `cfgS` con `a=0`, y `cfgPC` con `a=1`). Toda otra acción pide además la contraseña actual: `addRewrite` cuando su destino empieza por `http://` o `https://`, `addDenied` y `cfgS` con `a=0` (envían a los visitantes de un sitio a otra dirección, dejan a un cliente sin ningún sitio y quitan el HTTPS de un sitio), `set<CLAVE>`, `addPreprocessor` y `delPreprocessor`, `addMIME` y `delMIME`, `addHeader` y `delHeader` (un tipo MIME o una cabecera pueden hacer que un archivo de un sitio se ejecute como página), `delSite`, `hardUpload`, `cfgC` y `cfgPC` con `a=0`, `addHttpCodeResponse` y `delHttpCodeResponse` (una plantilla es la página de error de todos los sitios), `addCharsReplace` y `delCharsReplace` (un reemplazo cambia lo que leen las acciones) y `closeSessions`.
 
 ---
 
@@ -108,7 +108,8 @@ Devuelve la configuración general, mapas de sitios raíz, IPs denegadas, respue
         "R": "0",
         "W": "0",
         "E": "admin%40site1.com",
-        "A": ""
+        "A": "",
+        "Z": "0"
       }
     },
     "~": {
@@ -132,6 +133,7 @@ Devuelve la configuración general, mapas de sitios raíz, IPs denegadas, respue
       "RT": "5s",
       "RHT": "1s",
       "WT": "10s",
+      "WFT": "0s",
       "IT": "2s",
       "MUB": "1000",
       "MHB": "5000",
@@ -165,7 +167,8 @@ Devuelve un objeto JSON con todos los subdominios que pertenecen a un dominio ra
         "R": "0",
         "W": "1",
         "E": "contact%40example.com",
-        "A": ""
+        "A": "",
+        "Z": "0"
       }
     },
     "api": {
@@ -175,7 +178,8 @@ Devuelve un objeto JSON con todos los subdominios que pertenecen a un dominio ra
         "R": "0",
         "W": "0",
         "E": "api-admin%40example.com",
-        "A": "dns-route53"
+        "A": "dns-route53",
+        "Z": "0"
       }
     },
     "*.dev": {
@@ -185,7 +189,8 @@ Devuelve un objeto JSON con todos los subdominios que pertenecen a un dominio ra
         "R": "0",
         "W": "0",
         "E": "",
-        "A": ""
+        "A": "",
+        "Z": "0"
       }
     }
   }
@@ -224,8 +229,8 @@ Modifica los parámetros globales del servidor y sus límites operativos. Cambia
 
 | Endpoint | Parámetro `a` | Parámetro `b` | Descripción / Validación |
 |---|---|---|---|
-| `setU` | Nuevo Usuario | Contraseña Actual | Cambia el nombre de usuario (1-24 bytes en UTF-8: `ñ` o `é` cuentan 2). Todas las sesiones terminan, y la respuesta trae una nueva (§1.2). |
-| `setP` | Nueva Contraseña | Contraseña Actual | Cambia la contraseña: de 12 a 64 bytes en UTF-8 (`ñ` o `é` cuentan 2); si no, 400 `"The password must have 12 to 64 bytes"`. Una contraseña más corta que ya está en uso (`Admin`, `TURBO_PASSWORD`, `turbo.config`) sigue valiendo. Todas las sesiones terminan, y la respuesta trae una nueva (§1.2). |
+| `setU` | Nuevo Usuario | Contraseña Actual | Cambia el nombre de usuario (1-24 bytes en UTF-8: `ñ` o `é` cuentan 2). Todas las sesiones terminan, y la respuesta trae una nueva (§1.2). Con `TURBO_USER` puesta, 400: se cambia ahí, y se reinicia Turbo. |
+| `setP` | Nueva Contraseña | Contraseña Actual | Cambia la contraseña: de 12 a 64 bytes en UTF-8 (`ñ` o `é` cuentan 2); si no, 400 `"The password must have 12 to 64 bytes"`. Una contraseña más corta que ya está en uso (`Admin`, `TURBO_PASSWORD`, `turbo.config`) sigue valiendo. Todas las sesiones terminan, y la respuesta trae una nueva (§1.2). Con `TURBO_PASSWORD` puesta, 400: se cambia ahí, y se reinicia Turbo. |
 | `setM` | Ruta Directorio | Contraseña Actual | Cambia el directorio base de sitios (debe existir) y recarga la configuración. La ruta puede ser relativa al directorio de trabajo o usar `{TURBO_CURRENT_DIR}`, y se guarda tal como se escribe; el mismo directorio escrito de otra forma es "Sites directory unchanged". Si ese directorio tiene un `turbo.config` que no es JSON válido, responde 400 con dónde está el error. |
 | `setC` | (Ignorado; `overwrite` para confirmar, ver abajo) | Contraseña Actual | Vuelca la configuración RAM actual al disco (`turbo.config`), incluidos el usuario y el hash de la contraseña (nunca la contraseña en claro). |
 | `setPA` | Hosts / redes CIDR | Contraseña Actual | Dónde responde el panel: nombres de host y/o redes CIDR separados por comas (como máximo 32 entradas y 1 024 chars); con los dos tipos, una petición necesita los dos. Vacío o `*` = sin restricción (`*` solo como único valor). Un host que sirve un sitio (directamente, por un wildcard o como alias) se rechaza con 400 `"The panel host <host> serves the site <site>: …"`, y también los comodines de host (`*.example.com`, que nunca coinciden) y un valor que dejaría fuera a la propia petición que lo fija (su host o su IP), con el motivo. Una IP sin `/` es un host, que se compara con la cabecera `Host` (una IPv6 como `[::1]` o `::1`); para limitar la IP del cliente, use `/32` o `/128`. |
@@ -239,7 +244,8 @@ Modifica los parámetros globales del servidor y sus límites operativos. Cambia
 | `setCGP` | Valor entero | Contraseña Actual | Procesos CGI (preprocesadores) que pueden ejecutarse a la vez (1 - 100 000; `0` = automático, el valor por defecto: 4 por CPU, al menos 16). Una petición a un CGI que no encuentra hueco en 2 s recibe `503` con `Retry-After: 2`. La salida de un CGI espera a su cliente en memoria y en archivos temporales, así que el CGI libera su plaza al terminar; como mucho una cuarta parte de las plazas (al menos una; la mitad para un /48 IPv6) puede esperar a respuestas de un mismo cliente (una dirección IPv4 o un /64 IPv6) que pasan de sus límites o de su parte, y una respuesta que tuviera que esperar más allá se corta. |
 | `setRT` | Tiempo (`5s`, `0s`) | Contraseña Actual | Read Timeout total de petición (100 ms - 15 min; `0s` lo desactiva). Como mínimo el doble de `RHT`, salvo que `RHT` sea `0s`. |
 | `setRHT` | Tiempo (`1s`, `0s`) | Contraseña Actual | Read Header Timeout (50 ms - 7.5 min y, si `RT` no es `0s`, como máximo la mitad de `RT`; `0s` usa `RT`). |
-| `setWT` | Tiempo (`10s`, `0s`) | Contraseña Actual | Write Timeout para respuestas (100 ms - 30 min; `0s` lo desactiva). |
+| `setWT` | Tiempo (`10s`, `0s`) | Contraseña Actual | Write Timeout para respuestas, y lo que puede durar un CGI (100 ms - 30 min; `0s` lo desactiva). Un archivo que un cliente tarda más en descargar se corta, salvo que `WFT` le dé más. |
+| `setWFT` | Tiempo (`10m`, `0s`) | Contraseña Actual | Write Timeout para los archivos de los sitios, aparte de `WT` (100 ms - 24 h; `0s`, el valor por defecto, usa `WT`). |
 | `setIT` | Tiempo (`2s`, `0s`) | Contraseña Actual | Idle Timeout para *Keep-Alive* (100 ms - 5 min; `0s` usa `RT`). |
 
 *Notas:*
@@ -264,16 +270,17 @@ El backend maneja las creaciones de carpetas en disco y modificaciones en los ma
 |---|---|---|---|---|
 | `addSite` | Dominio Web | - | - | - |
 | `addSubdomain` | Dominio Web | Subdominio | - | - |
-| `addRewrite` | Dominio Web | Subdominio | URI de origen (ej: `/old`) | Reescritura (`/new`, `http://...`, `https://...`), [palabras clave dinámicas disponibles](https://turbo-server.github.io/#so-2)|
-| `addMIME` | Dominio Web | Subdominio | Extensión (ej: `png`) | Tipo MIME (ej: `image/png`), de 4 a 128 caracteres. También pide la contraseña actual, en `c` |
+| `addRewrite` | Dominio Web | Subdominio | URI de origen (ej: `/old`) | Reescritura (`/new`, `http://...`, `https://...`), [palabras clave dinámicas disponibles](https://turbo-server.github.io/#so-2). Un destino que empieza por `http://` o `https://` pide además la contraseña actual, en `c` |
+| `addMIME` | Dominio Web | Subdominio | Extensión (ej: `png`), sin punto dentro | Tipo MIME (ej: `image/png`), de 4 a 128 caracteres. También pide la contraseña actual, en `c` |
 | `addHeader` | Dominio Web | Subdominio | Nombre Cabecera (de 1 a 48 bytes: letras, dígitos, `-` y `.`) | Valor Cabecera (de 1 a 512 bytes). También pide la contraseña actual, en `c` |
-| `addPreprocessor`| Dominio Web | Subdominio | Extensión (ej: `php`) | Ejecutable CGI (ej: `/usr/bin/php-cgi`). También pide la contraseña actual, en `c` |
+| `addPreprocessor`| Dominio Web | Subdominio | Extensión (ej: `php`), sin punto dentro | Ejecutable CGI (ej: `/usr/bin/php-cgi`). También pide la contraseña actual, en `c` |
 | `addIndex` | Dominio Web | Subdominio | Archivo Índice (`index.html`)| - |
 | `addAlias` | Dominio Web | Subdominio | Dominio Alias | - |
 
 *Notas:*
-* *`addHeader`: una cabecera que solo se diferencia en mayúsculas de una del sitio la sustituye ("Header changed"): saldrían las dos, cualquiera primero.*
-* *`addSite` y `addSubdomain`: los nombres que Turbo usa para sus propias carpetas y archivos en el directorio de sitios (`turbo.dev`, `turbo.panel`, `turbo.certificates`, `turbo.config`, `turbo.visits`, `turbo.denials`) no pueden ser sitios, ni un nombre cuyos ajustes compartirían clave con otro sitio, ni el host de un alias (400 con el motivo), ni un sitio o subdominio que Turbo conserva sin su carpeta (`~` de `sites`), hasta que su carpeta ya no esté y `delSite` lo olvide (400 "… is kept, with its settings…").*
+* *`addHeader`: una cabecera que solo se diferencia en mayúsculas de una del sitio la sustituye ("Header changed"): saldrían las dos, cualquiera primero. Las cabeceras que pone HTTP para la conexión y la longitud de un cuerpo (`Content-Length`, `Transfer-Encoding`, `Connection`, `Keep-Alive`, `Proxy-Connection`, `TE`, `Trailer`, `Upgrade`) se rechazan (400 "Header reserved"); en `turbo.config`, se descartan con un aviso. `delHeader` borra la cabecera escrita con cualquier mayúscula.*
+* *`addSubdomain`: un subdominio no puede llamarse como los archivos de certificado de su sitio (`fullchain.pem`, `privkey.pem`, `fullchain.pem.new`, `privkey.pem.new`), cuyo lugar ocuparía su carpeta. `addAlias`: un alias cuyo host cae bajo el dominio de un sitio (`m.example.com` con el sitio `example.com`) se rechaza (400 "The alias is a site's host"), también cuando ningún subdominio sirve ese host; con un sitio `*`, todo alias se rechaza. `addMIME` y `addPreprocessor`: la extensión es lo que sigue al último punto de un nombre (`php`, no `blade.php`).*
+* *`addSite` y `addSubdomain`: los nombres que Turbo usa para sus propias carpetas y archivos en el directorio de sitios (`turbo.dev`, `turbo.panel`, `turbo.certificates`, `turbo.config`, `turbo.visits`, `turbo.denials`) no pueden ser sitios, ni un nombre cuyos ajustes compartirían clave con otro sitio, ni el host de un alias, ni una dirección IP (`192.168.1.10`), que solo sirve el sitio `*` (400 con el motivo), ni un sitio o subdominio que Turbo conserva sin su carpeta (`~` de `sites`), hasta que su carpeta ya no esté y `delSite` lo olvide (400 "… is kept, with its settings…").*
 * *`addRewrite`: La reescritura debe empezar por `/` (ruta interna), `http://` o `https://`. Los destinos con `http://` o `https://` se responden con una redirección `302`: al destino exacto si tiene ruta o consulta, o al dominio de destino seguido del URI original si es solo un dominio. El origen (`a`) se compara con la ruta pedida ya decodificada (`/a b` coincide con `/a%20b`); un origen que acaba en `/` toma también la carpeta nombrada sin ella (`/privado/` toma `/privado`, que serviría su índice), y en Windows y macOS, cuyos sistemas de archivos no distinguen mayúsculas, una ruta en otras mayúsculas (`/PRIVADO/`), y un destino interno también es una ruta URL: se decodifica y tiene que quedar dentro del sitio (un destino con un segmento `..`, aunque quede dentro, o con `\`, una `/` o `\` codificada, `%00`, caracteres de control, UTF-8 inválido o un segmento que acaba en `.` o en espacio, se responde con 404).*
 * *`addPreprocessor`: La ruta del ejecutable (como máximo 128 caracteres tal como se escribe, sin el prefijo `cgi>`; puede usar `{TURBO_CURRENT_DIR}`, que se guarda tal cual y se sustituye al ejecutarlo) debe existir; el prefijo `cgi>` es opcional y cualquier otro prefijo se rechaza. En `turbo.config`, una entrada que no se puede usar (no es una cadena, extensión incorrecta, ruta demasiado larga o vacía, otro prefijo, ejecutable inexistente) se conserva con un aviso en el log, y su extensión responde 500: los archivos nunca se sirven como texto. El CGI recibe la ruta URL del script (tras la reescritura) en `SCRIPT_NAME`, un `PATH_INFO` vacío, la URI original en `REQUEST_URI`, el archivo en disco en `SCRIPT_FILENAME` y la `@` del sitio en `DOCUMENT_ROOT`. `QUERY_STRING` lleva primero la consulta del cliente y después la de la reescritura, así que una aplicación que lee el último valor de un parámetro repetido (PHP lo hace) obtiene el de la reescritura. Una cabecera que fija el sitio (`addHeader`) gana a la del CGI con el mismo nombre. Las cabeceras sobre la conexión que escriba un CGI (`Transfer-Encoding`, `Connection`, `Keep-Alive`, `Upgrade`…) se descartan, y también un `Content-Length` escrito dos veces y una cabecera cuyo valor tiene caracteres de control (salvo el tabulador): Turbo decide cómo se delimita la respuesta.*
 * *`addRewrite`: el destino empieza por `/`, `http://` o `https://` (el esquema en mayúsculas o minúsculas; se guarda en minúsculas), y un destino `http(s)://` necesita host, escrito o dado por una palabra clave (si al responder la palabra no da nada, 500). Las palabras clave desconocidas (`{X}`) se rechazan. Las palabras se sustituyen por valores de la ruta decodificada de la petición (`{FIRST_REQUEST}`, `{DIR}`, `{FILE}`, `{EXT}`, `{REWRITE}`, `{REWRITE_COMPLEMENT}`) o de su consulta (`{FIRST_QUERY}`), codificados según dónde van: en la ruta, cada segmento, sin tocar `/`; en la consulta, como un valor; en el host, sin poder cambiar la URL. `{REWRITE_COMPLEMENT}` en la ruta toma el resto de la ruta, y la consulta de la petición se añade a la del destino: `/blog/` → `/new/{REWRITE_COMPLEMENT}` convierte `/blog/a/b?x=1` en `/new/a/b?x=1`. Un CGI al que se llega por un destino interno con consulta recibe en `QUERY_STRING` la consulta de la petición sin los parámetros que fija la del destino (por su nombre decodificado; `&` y `;` los separan), y después la del destino: `/x` → `/app.cgi?role=user` da `z=1&role=user` a `/x?role=admin&z=1`.*
@@ -306,6 +313,7 @@ Una IP denegada queda bloqueada hasta la fecha indicada: sus peticiones se respo
 * **`POST /admin:inside:addDenied`**
   * `s`: Dirección IP (IPv4 o IPv6). Una dirección IPv6 deniega su /64 entero, el cliente que cuentan los límites de peticiones (sus direcciones cambian solas). No se aceptan direcciones de loopback (`127.x.x.x`, `::1`, y cualquier otra de `::/64`, que contiene `::1`) ni la dirección desde la que se hace la petición, o en IPv6 una de su /64 (`400` "Current IP": el panel se bloquearía a sí mismo).
   * `d`: Timestamp UNIX de expiración de bloqueo (`0` o una fecha pasada elimina un bloqueo existente).
+  * `b`: la contraseña actual (§1.2).
 * **`POST /admin:inside:delDenied`**
   * `s`: Dirección IP a desbloquear de la lista de IPs denegadas.
 
@@ -341,15 +349,16 @@ Gestiona la habilitación de HTTPS, redirecciones en la capa de aplicación y la
 
 | Endpoint | Parámetro `a` (Acción) | Parámetro `s` (Dominio) | Parámetro `d` (Subdominio) | Parámetros Opcionales |
 |---|---|---|---|---|
-| **`cfgC`** | `"1"` = Ejecutar Certbot<br>`"0"` = Eliminar del disco (pide la contraseña actual en `b`) | Dominio Web | Subdominio o Vacío (`""`) | `z`: E-mail de registro.<br>`y`: Adaptador Certbot (`dns-<proveedor>`, ej: `dns-route53`). |
-| **`cfgS`** | `"1"` = Activar HTTPS<br>`"0"` = Desactivar HTTPS | Dominio Web | Subdominio o Vacío (`""`) | - |
+| **`cfgC`** | `"1"` = Ejecutar Certbot<br>`"0"` = Eliminar del disco (pide la contraseña actual en `b`) | Dominio Web | Subdominio o Vacío (`""`) | `z`: E-mail de registro.<br>`y`: Adaptador Certbot (`dns-<proveedor>`, ej: `dns-route53`).<br>`x`: con `a="0"`, `1` deja además de usar el certificado (§8.1). |
+| **`cfgS`** | `"1"` = Activar HTTPS<br>`"0"` = Desactivar HTTPS (pide la contraseña actual en `b`) | Dominio Web | Subdominio o Vacío (`""`) | - |
 | **`cfgR`** | `"1"` = Activar<br>`"0"` = Desactivar | Dominio Web | Solo vacío (`""`): se configura en la raíz del sitio | Redirige `www.<sitio>` a `<sitio>` (301). Con un subdominio, HTTP 400. |
 | **`cfgW`** | `"1"` = Activar<br>`"0"` = Desactivar | Dominio Web | Solo vacío (`""`): se configura en la raíz del sitio | Redirige `<sitio>` a `www.<sitio>` (301). Con un subdominio, HTTP 400. |
-| **`cfgE`** | E-mail a registrar | Dominio Web | Subdominio o Vacío (`""`) | Modifica silenciosamente el E-mail para futuras renovaciones de Certbot. El valor se guarda tal como llega (un `+` enviado como `%2B` queda `+`). |
+| **`cfgE`** | E-mail a registrar, o vacío para quitarlo | Dominio Web | Subdominio o Vacío (`""`) | Modifica silenciosamente el E-mail para futuras renovaciones de Certbot. Sin e-mail, el certificado se queda y ya no se renueva (`"E-mail removed"`; `"E-mail unchanged"` si no había ninguno). El valor se guarda tal como llega (un `+` enviado como `%2B` queda `+`). |
 | **`cfgA`** | Nombre del Adaptador (`dns-<proveedor>`, o vacío para webroot) | Dominio Web | Subdominio o Vacío (`""`) | Modifica silenciosamente el flag del Adaptador para Certbot. |
+| **`cfgZ`** | `"1"` = Activar<br>`"0"` = Desactivar | Dominio Web | Subdominio o Vacío (`""`) | Archivos precomprimidos, apagado por defecto: una petición que acepta `br` o `gzip` se responde con el `<archivo>.br` o el `<archivo>.gz` que hay junto al archivo que nombra (§8.4). Cada sitio y cada subdominio tiene el suyo. |
 
 ### 8.1. Detalle Operativo: Emisión de Certificados (`cfgC`)
-Certbot solo se ejecuta cuando se pide con `a="1"`, y requiere un e-mail (guardado con `cfgE` o enviado en `z`); sin él, la API responde HTTP 400 `"E-mail required to create the certificate"`. Si el sitio ya tiene un certificado de menos de 75 días, la API responde `"SSL certificate active"` sin ejecutar Certbot. Con `a="0"`, los archivos del certificado se borran tengan la antigüedad que tengan y la API responde `"SSL certificate deleted"`; sin certificado en disco, no se borra nada y la API responde HTTP 400 `"No certificate"`. El e-mail de `cfgE` y el de `z` se comprueban igual: de 5 a 40 bytes, una `@` con algo delante y un dominio con un punto detrás, y sin espacios, `#`, `--` ni un `-` al principio (HTTP 400 `"Invalid e-mail value"` o `"Invalid e-mail length"`).
+Certbot solo se ejecuta cuando se pide con `a="1"`, y requiere un e-mail (guardado con `cfgE` o enviado en `z`); sin él, la API responde HTTP 400 `"E-mail required to create the certificate"`. Si el sitio ya tiene un certificado de menos de 75 días, la API responde `"SSL certificate active"` sin ejecutar Certbot. Con `a="0"`, los archivos del certificado se borran tengan la antigüedad que tengan y la API responde `"SSL certificate deleted"`; sin certificado en disco, no se borra nada y la API responde HTTP 400 `"No certificate"`. El certificado en uso sigue hasta que se instale otro o Turbo se reinicie, para que sustituir un certificado no deje un hueco, salvo que se envíe `x=1`: entonces deja de usarse en el acto (`"SSL certificate deleted, and no longer in use"`; o `"SSL certificate no longer in use"`, para el que un borrado anterior dejó en uso, sin archivos que borrar). El sitio conserva su ajuste de HTTPS, pero no tiene HTTPS, ni se redirige a él, hasta que se instale otro certificado, que se pone en uso solo. Otro valor de `x` que no sea `0` o `1` se rechaza (HTTP 400). El e-mail de `cfgE` y el de `z` se comprueban igual: de 5 a 40 bytes, una `@` con algo delante y un dominio con un punto detrás, y sin espacios, `#`, `--` ni un `-` al principio (HTTP 400 `"Invalid e-mail value"` o `"Invalid e-mail length"`).
 
 La emisión o renovación de certificados no bloquea el servidor. Al enviar `a="1"`, la API delega el trabajo a una Goroutine separada que se encarga de:
 1. Ejecutar el binario de Certbot en modo webroot o mediante el adaptador especificado, con su carpeta de trabajo en `turbo.certificates/<sitio>`.
@@ -366,13 +375,13 @@ Como la operación es asíncrona, el frontend debe realizar peticiones continuas
 * **Respuesta Exitosa (200 OK):** `"SSL certificate active"` (El cliente debe detener el polling).
 * **Respuesta de Error (400 Bad Request):** Devuelve la salida cruda de error de Certbot o del sistema de archivos.
 
-La interfaz lo hace sola: tras un 202 vuelve a preguntar cada 5 segundos, como máximo durante 4 minutos, y muestra el resultado. Cancelar cualquier paso de su diálogo (e-mail, adaptador, confirmación) no envía nada, y vaciar un adaptador que estaba guardado pregunta si se vuelve a webroot (`cfgA` con el valor vacío).
+La interfaz lo hace sola: tras un 202 vuelve a preguntar cada 5 segundos, como máximo durante 11 minutos, y muestra el resultado. Certbot tiene 3 minutos, y 10 con un adaptador DNS. Cancelar cualquier paso de su diálogo (e-mail, adaptador, confirmación) no envía nada, y vaciar un adaptador que estaba guardado pregunta si se vuelve a webroot (`cfgA` con el valor vacío).
 
 ### 8.2. El Certificado Propio del Panel (`cfgPC`)
 `POST /admin:inside:cfgPC` emite o borra el certificado de los hosts propios del panel: los nombres de host de `PA` (las direcciones IP quedan fuera). No lleva `s` ni `d`.
 
 * `a="1"`: ejecuta Certbot como `cfgC`, con un `-d` por cada host de `PA`, en modo webroot (`turbo.panel/webroot` dentro del directorio de sitios; Turbo responde a sus retos, `/.well-known/acme-challenge/<token>`, solo en los hosts de `PA`) o con el adaptador; Certbot trabaja en `turbo.certificates/turbo.panel`, y los archivos acaban en `turbo.panel/`. Las respuestas son las de `cfgC` (202 `WAIT` mientras corre, una emisión a la vez entre sitios y panel; 200 `"Panel certificate active"` cuando está en uso un certificado que cubre todos los hosts de `PA` y caduca en más de 30 días; 400 con el error del último intento, una vez). Sin e-mail: 400 `"E-mail required to create the certificate"`; sin un nombre de host en `PA`: 400.
-* `a="0"`: borra `turbo.panel/fullchain.pem` y `privkey.pem` y deja de usar el certificado. Pide la contraseña actual en `b`, como `cfgC` con `a="0"`, y por HTTPS su respuesta envía `Strict-Transport-Security: max-age=0`, para que los navegadores puedan volver al panel por HTTP; sin los archivos, 400 `"No panel certificate"`.
+* `a="0"`: borra `turbo.panel/fullchain.pem` y `privkey.pem` y deja de usar el certificado. Pide la contraseña actual en `b`, como `cfgC` con `a="0"`, y por HTTPS su respuesta envía `Strict-Transport-Security: max-age=0`, para que los navegadores puedan volver al panel por HTTP; sin los archivos, 400 `"No panel certificate"`. Si no se pueden borrar, 400 `"Error deleting the panel certificate files"`, y el certificado sigue en uso.
 * `z`: el e-mail, que se guarda como `PCE` en `.` de `turbo.config`. `y`: el adaptador DNS (`dns-<proveedor>`), que se guarda como `PCA`; un `y` vacío vuelve a webroot, y sin `y` se mantiene el guardado.
 
 La renovación automática también renueva el certificado del panel cuando caduca en menos de 30 días, y `/admin:inside:sites` da su estado en `.` como `PCC` (con `PCE` y `PCA` si están fijados): `true` (en uso), `"WAIT"` (Certbot en marcha) o `false`. Un certificado colocado a mano en `turbo.panel/` también se usa, pero no se renueva.
@@ -387,6 +396,14 @@ En el handshake TLS, cada nombre recibe el certificado que lo cubre (exactamente
 
 *Nota: Desactivar HTTPS (`a="0"`) purga el certificado de la memoria RAM (impidiendo futuras conexiones TLS para ese host), pero **no elimina** los archivos `.pem` del disco ni cierra el puerto 443 a nivel de red.*
 
+### 8.4. Detalle Operativo: Archivos Precomprimidos (`cfgZ`)
+Turbo no comprime sus respuestas. Un sitio, o un subdominio, con `cfgZ` en `"1"` sirve las copias comprimidas que su despliegue deja junto a cada archivo, con el nombre del archivo más `.br` (Brotli) o `.gz` (gzip): `site.css.br` para `site.css`. En `turbo.config` y en el JSON del panel es `"Z"`, entre los ajustes (`"!"`) del sitio.
+* **Quién recibe una copia:** un `GET` o un `HEAD` cuyo `Accept-Encoding` acepta su codificación: nombrada con un `q` mayor que 0, o sin nombrar cuando `*` lo tiene. Si acepta las dos, la de mayor `q`, y `br` si tienen el mismo. Sin la cabecera, con una que no está escrita como dice HTTP, o cuando la copia no está, se sirve el archivo tal cual.
+* **La respuesta:** `Content-Encoding` (`br` o `gzip`), el `Content-Type` del archivo (el del sitio para su extensión, o el de lo que el archivo contiene), el `Content-Length` de la copia y un `ETag` propio, con el que `If-None-Match` recibe su 304. Toda respuesta del sitio para un archivo, comprimida o no, lleva `Vary: Accept-Encoding`, añadido al `Vary` del sitio si lo pone.
+* **Nunca una copia:** para una petición con `Range` (un rango es del archivo tal cual, y las respuestas con copia no ofrecen rangos); para un archivo que ejecuta un preprocesador; en un sitio cuyos preprocesadores incluyen `br` o `gz`, o cuyas cabeceras ponen `Content-Encoding` o `ETag`; para una URL que termina en `/index.html`; y cuando la copia está vacía, es una carpeta, o es un enlace que lleva fuera del sitio.
+* **No se comparan las fechas:** una copia más antigua que su archivo se sirve igual, porque un despliegue que escribiera cada copia un momento antes que su archivo la dejaría sin usar. Quien cambia un archivo vuelve a generar sus copias, o las borra.
+* Las copias son archivos del sitio como cualquier otro: `site.css.br` también se sirve por su propio nombre, tal cual.
+
 ---
 
 ## 9. API de Gestión Física de Archivos (`hardUpload`)
@@ -399,7 +416,7 @@ Utilizado para sustituir masivamente todos los archivos públicos asociados a un
   * `s`: Dominio principal (ej: `example.com`).
   * `d`: Subdominio (vacío `""` si se trata del dominio raíz).
   * `f`: Array de archivos adjuntos (`File[]`).
-  * `b`: la contraseña actual, solo en el cuerpo multipart (nunca en la URL, que `turbo.visits` registra).
+  * `b`: la contraseña actual, solo en el cuerpo multipart (nunca en la URL, que `turbo.visits` registra), y antes del primer archivo: se comprueba antes de leer los archivos.
 
   `s` y `d` se aceptan tanto en la URL como en el cuerpo *multipart*.
 * **Manejo de Directorios Anidados:** 
@@ -408,7 +425,10 @@ Utilizado para sustituir masivamente todos los archivos públicos asociados a un
   Devuelve la cadena `"Data uploaded"`. Si se descartó algún archivo, la respuesta los enumera: `"Data uploaded. Discarded: <nombre>, <nombre>"`.
 * **Manejo de Errores Específicos:**
   * Si el peso de la subida supera el límite global `MBB` (Max Body Bytes), o lleva más de 10 000 partes (los archivos y el campo `b`), la API corta la lectura y retorna HTTP 413 con el mensaje `"Maximum body size exceeded"`. Un cuerpo *multipart* mal formado recibe HTTP 400 `"Invalid parameters"`. (Los demás formularios multipart admiten como mucho 1 000 partes.) `MBB` acota la memoria que ocupa la subida, que se guarda en memoria: el contenido más unos 600 bytes por archivo (su nombre, cabeceras y entrada), así que un archivo de exactamente `MBB` bytes nunca cabe, y un sitio de muchos archivos pequeños necesita sitio para ellos. Como cada subida sustituye `@` entera, la salida de un 413 es un `MBB` mayor, no subir menos archivos; el panel lo dice.
+  * Si `b` va después de un archivo, HTTP 400 `"The current password (b) must come before the files"`; si falta, o los campos anteriores al primer archivo ocupan más de 64 KiB o están mal formados, HTTP 400 también (`"Missing data: the current password (b), before the files"`; un cuerpo mal formado más adelante sigue recibiendo `"Invalid parameters"`). Una contraseña errónea se responde antes de leer los archivos, y la conexión se cierra.
   * Si se descartan todos los nombres, HTTP 400 `"No valid file; nothing was changed. Discarded: …"`, y `@` queda como estaba.
+  * Si la carpeta del sitio no admite la subida (no se puede crear en ella la carpeta `@.upload-<aleatorio>`), HTTP 500 `"Directory inaccessible"`, que se registra.
+  * Si Turbo se para entre los dos renombrados, el sitio queda sin `@`: en el arranque siguiente, antes de servir, Turbo vuelve a poner la `@.previous-<aleatorio>` si es la única que hay. De una `@.previous-<aleatorio>` junto a una `@` en su sitio solo se avisa.
   * Si no se puede sustituir `@` (en Windows, por ejemplo, mientras un archivo suyo está abierto), HTTP 400 `"The public directory could not be replaced (open files?); nothing was changed"`; un archivo que no se puede escribir da HTTP 500. En los dos casos `@` queda como estaba.
   * Si el sitio se borra durante la subida, HTTP 400 `"Site not found"`, y el sitio no vuelve a aparecer.
   * Si no llega ningún archivo en `f`, HTTP 400 `"No data"`.

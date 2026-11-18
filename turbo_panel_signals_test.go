@@ -21,7 +21,7 @@ func TestI13_PanelResponseHeaders(t *testing.T) {
 		{"/admin:inside:addIndex?s=nobody.test&d=&a=start.html", "text/plain; charset=utf-8"},
 	}
 	for _, c := range cases {
-		rec := apiFrom(serverHandlerFn(""), ip, token, c.path)
+		rec := apiFrom(serverHandlerFn(false), ip, token, c.path)
 		if got := rec.Header().Get("Content-Type"); got != c.contentType {
 			t.Errorf("%s: Content-Type %q; expected %q", c.path, got, c.contentType)
 		}
@@ -32,7 +32,7 @@ func TestI13_PanelResponseHeaders(t *testing.T) {
 			t.Errorf("%s: X-Turbo-Login with a session", c.path)
 		}
 	}
-	rec := apiFrom(serverHandlerFn(""), ip, "other", "/admin:inside:sites")
+	rec := apiFrom(serverHandlerFn(false), ip, "other", "/admin:inside:sites")
 	if rec.Header().Get("X-Turbo-Login") != "required" || !strings.Contains(rec.body.String(), "http-equiv") {
 		t.Errorf("no session: X-Turbo-Login %q, body %q; expected required and the usual redirect", rec.Header().Get("X-Turbo-Login"), rec.body.String())
 	}
@@ -50,7 +50,7 @@ func TestN10_TemplateWithMetaIsData(t *testing.T) {
 	withGlobalLock(func() {
 		adminAddHandlers["#"]("404", `<html><head><meta charset="utf-8"></head><body data-err>{TURBO_RESPONSE_CODE}</body></html>`)
 	})
-	rec := apiFrom(serverHandlerFn(""), ip, token, "/admin:inside:sites")
+	rec := apiFrom(serverHandlerFn(false), ip, token, "/admin:inside:sites")
 	if rec.code != 200 || rec.Header().Get("X-Turbo-Login") != "" || !strings.Contains(rec.body.String(), "<meta charset") {
 		t.Errorf("sites with a <meta> template: %d, X-Turbo-Login %q", rec.code, rec.Header().Get("X-Turbo-Login"))
 	}

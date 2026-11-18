@@ -90,7 +90,7 @@ func migrateConfig(raw map[string]map[string]interface{}, configBytes []byte) (f
 	}
 	if from < 2 {
 		for _, key := range []string{"CIL", "CIS"} {
-			if value, isString := raw["."][key].(string); isString {
+			if value, isValue := configNumberOrString(raw["."][key]); isValue { // Text, or a JSON number ("CIL": 500)
 				if units, err := strconv.ParseInt(value, 10, 64); err == nil { // units of 10 ms
 					raw["."][key] = strconv.FormatInt(units*10, 10)
 				}
@@ -679,7 +679,7 @@ func createDefaultConfig(withSubdomains bool, includeFixedKeys bool, includeCred
 		delimiter = ","
 	}
 
-	return "{" + jsonBuilder.String() + "},\".\":{\"M\":" + jsonString(sitesDirValue.Get()) + ",\"PA\":" + jsonString(panelAccess.Load().setting) + ",\"RT\":\"" + serverTimeLimits.Load().RT.String() + "\",\"RHT\":\"" + serverTimeLimits.Load().RHT.String() + "\",\"WT\":\"" + serverTimeLimits.Load().WT.String() + "\",\"IT\":\"" + serverTimeLimits.Load().IT.String() + "\",\"MUB\":\"" + strconv.FormatInt(maxURILength.Load(), 10) + "\",\"MHB\":\"" + strconv.FormatInt(maxHeaderBytes.Load(), 10) + "\",\"MBB\":\"" + strconv.FormatInt(maxBodySize.Load(), 10) + "\",\"CIL\":\"" + strconv.FormatInt(serverRequestLimits.CIL.Load()/int64(time.Millisecond), 10) + "\",\"CIS\":\"" + strconv.FormatInt(serverRequestLimits.CIS.Load()/int64(time.Millisecond), 10) + "\",\"CII\":\"" + strconv.FormatInt(serverRequestLimits.CII.Load(), 10) + "\",\"CGL\":\"" + strconv.FormatInt(globalRequestLimit.Load(), 10) + "\",\"CGP\":\"" + strconv.FormatInt(cgiProcesses.Load(), 10) + "\"" + panelCertSettingsJSON(!includeCredentials) + credentials + "}}"
+	return "{" + jsonBuilder.String() + "},\".\":{\"M\":" + jsonString(sitesDirValue.Get()) + ",\"PA\":" + jsonString(panelAccess.Load().setting) + ",\"RT\":\"" + serverTimeLimits.Load().RT.String() + "\",\"RHT\":\"" + serverTimeLimits.Load().RHT.String() + "\",\"WT\":\"" + serverTimeLimits.Load().WT.String() + "\",\"WFT\":\"" + time.Duration(fileWriteTimeout.Load()).String() + "\",\"IT\":\"" + serverTimeLimits.Load().IT.String() + "\",\"MUB\":\"" + strconv.FormatInt(maxURILength.Load(), 10) + "\",\"MHB\":\"" + strconv.FormatInt(maxHeaderBytes.Load(), 10) + "\",\"MBB\":\"" + strconv.FormatInt(maxBodySize.Load(), 10) + "\",\"CIL\":\"" + strconv.FormatInt(serverRequestLimits.CIL.Load()/int64(time.Millisecond), 10) + "\",\"CIS\":\"" + strconv.FormatInt(serverRequestLimits.CIS.Load()/int64(time.Millisecond), 10) + "\",\"CII\":\"" + strconv.FormatInt(serverRequestLimits.CII.Load(), 10) + "\",\"CGL\":\"" + strconv.FormatInt(globalRequestLimit.Load(), 10) + "\",\"CGP\":\"" + strconv.FormatInt(cgiProcesses.Load(), 10) + "\"" + panelCertSettingsJSON(!includeCredentials) + credentials + "}}"
 }
 
 // dormantSitesList is the "~" entry of the panel's list of sites: the sites and subdomains whose folder isn't there
@@ -787,45 +787,47 @@ func createSubdomainData(domain string, subdomain string) string {
 
 // createSiteAliasList is the "&" member of a site's JSON: its aliases.
 func createSiteAliasList(siteKey string) string {
+	// Only this site's are sorted: sorting every alias, for each site of a save, cost the square of their number.
+	var aliases []string
+	for aliasName, target := range domainAliases {
+		if target == siteKey {
+			aliases = append(aliases, aliasName)
+		}
+	}
+	sort.Strings(aliases)
 	var jsonBuilder strings.Builder
 	jsonBuilder.WriteString("{")
 	delimiter := ""
-	for _, aliasName := range sortedKeys(domainAliases) {
-		if domainAliases[aliasName] == siteKey {
-			jsonBuilder.WriteString(delimiter + jsonString(aliasName) + ":\"\"")
-			delimiter = ","
-		}
+	for _, aliasName := range aliases {
+		jsonBuilder.WriteString(delimiter + jsonString(aliasName) + ":\"\"")
+		delimiter = ","
 	}
 	jsonBuilder.WriteString("}")
 	return "\"&\":" + jsonBuilder.String()
 }
 
-// createSiteSettingsList is the "!" member of a site's JSON: its settings (S, C, R, W, E, A), each as text.
+// createSiteSettingsList is the "!" member of a site's JSON: its settings, each as text and by its letter, in the
+// order of the letters ("1" or "0" for those that are on or off, and for "C" the failure of Certbot while there is
+// one to answer); none for a site without settings.
 func createSiteSettingsList(siteKey string) string {
-	var jsonBuilder strings.Builder
-	jsonBuilder.WriteString("{")
-	delimiter := ""
 	settings := siteSSLConfig[siteKey]
-	for _, settingName := range sortedKeys(settings) {
-		var encodedValue string
-		switch value := settings[settingName].(type) {
-		case bool:
-			encodedValue = "0"
-			if value {
-				encodedValue = "1"
-			}
-		case int:
-			encodedValue = strconv.Itoa(value)
-		case string:
-			encodedValue = url.QueryEscape(value)
-		default:
-			continue
-		}
-		jsonBuilder.WriteString(delimiter + jsonString(settingName) + ":" + jsonString(encodedValue))
-		delimiter = ","
+	if settings == nil {
+		return "\"!\":{}"
 	}
-	jsonBuilder.WriteString("}")
-	return "\"!\":" + jsonBuilder.String()
+	flag := func(on bool) string {
+		if on {
+			return "1"
+		}
+		return "0"
+	}
+	certificate := flag(settings.certificate.active)
+	if settings.certificate.failed {
+		certificate = url.QueryEscape(settings.certificate.failure)
+	}
+	return "\"!\":{\"A\":" + jsonString(url.QueryEscape(settings.adapter)) + ",\"C\":" + jsonString(certificate) +
+		",\"E\":" + jsonString(url.QueryEscape(settings.email)) + ",\"R\":" + jsonString(flag(settings.wwwToRoot)) +
+		",\"S\":" + jsonString(flag(settings.https)) + ",\"W\":" + jsonString(flag(settings.rootToWWW)) +
+		",\"Z\":" + jsonString(flag(settings.precompressed)) + "}"
 }
 
 // configFileError is a turbo.config that can't be read (data is nil) or isn't valid JSON. It is never applied:
@@ -1142,8 +1144,9 @@ func describeConfigError(path string, data []byte, err error) string {
 }
 
 // configSecretKey matches the key "PH" or "P" in a turbo.config and the colon after it, also when the key is written
-// with escapes ("P").
-var configSecretKey = regexp.MustCompile(`"(?:P|\\u0050)(?:H|\\u0048)?"\s*:\s*`)
+// with escapes ("P") and, as the file may be broken right there (the message then shows that fragment), when
+// its colon is missing or it is written with single quotes or with none.
+var configSecretKey = regexp.MustCompile(`(?:"(?:P|\\u0050)(?:H|\\u0048)?"|'PH?'|\bPH?\b)\s*:?\s*`)
 
 // hideConfigSecrets returns a copy of a turbo.config with the values of "PH" and "P", whatever their type, replaced by
 // asterisks of the same length, so the positions of an error stay the same and the message never shows them: the

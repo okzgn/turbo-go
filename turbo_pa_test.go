@@ -6,7 +6,6 @@ package main
 
 import (
 	"net/url"
-	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -24,7 +23,7 @@ func TestN28_PanelAccessRules(t *testing.T) {
 		req.Host = "panel.test"
 		req.Header.Set(sessionHeaderName, token)
 		rec := &responseRecorder{}
-		serverHandlerFn("")(rec, req)
+		serverHandlerFn(false)(rec, req)
 		return rec
 	}
 	for _, value := range []string{"a.test,*", "*.example.com", "panel.test,10.0.0.0/8", "other.test", "panel.test,10.0.0.0/8,192.0.2.0/24"} {
@@ -72,7 +71,7 @@ func TestN29_EmptyEnvCredentials(t *testing.T) {
 		dir := t.TempDir()
 		cmd := exec.Command(bin)
 		cmd.Dir = dir
-		cmd.Env = append(os.Environ(), "TURBO_DIR="+dir, "TURBO_HTTP_ADDR=127.0.0.1:"+freePort(t), "TURBO_HTTPS_ADDR=127.0.0.1:"+freePort(t), variable)
+		cmd.Env = append(testEnviron(), "TURBO_DIR="+dir, "TURBO_HTTP_ADDR=127.0.0.1:"+freePort(t), "TURBO_HTTPS_ADDR=127.0.0.1:"+freePort(t), variable)
 		var out syncBuffer
 		cmd.Stdout, cmd.Stderr = &out, &out
 		if err := cmd.Start(); err != nil {

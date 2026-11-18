@@ -35,7 +35,7 @@ func TestN33_RewritePlaceholderEncoding(t *testing.T) {
 	} {
 		req := &customNetHttp.Request{RequestURI: c.uri, Header: customNetHttp.Header{}}
 		path, _ := url.PathUnescape(cutAt(c.uri, '?'))
-		got := shortcutWords(req, c.template, "example.com", "*", "example.com", "foo", "", "", c.match, path)
+		got := shortcutWords(req, c.template, siteMatch{siteDomain: "example.com", siteSubdomain: "*", domain: "example.com", subdomain: "foo"}, c.match, path)
 		if got != c.want {
 			t.Errorf("%s with %s → %q; expected %q", c.template, c.uri, got, c.want)
 		}
@@ -99,7 +99,7 @@ func TestN34_RewriteEmptyHostAt500(t *testing.T) {
 func TestN77_RedirectQueryControlChars(t *testing.T) {
 	for _, template := range []string{"S/{REWRITE_COMPLEMENT}", "Hexample.org/b/{REWRITE_COMPLEMENT}"} {
 		req := &customNetHttp.Request{RequestURI: "/a?x=1\r\ny\x7f\t", Header: customNetHttp.Header{}}
-		got := shortcutWords(req, template, "example.com", "*", "example.com", "foo", "", "", "/", "/a")
+		got := shortcutWords(req, template, siteMatch{siteDomain: "example.com", siteSubdomain: "*", domain: "example.com", subdomain: "foo"}, "/", "/a")
 		if strings.ContainsAny(got, "\r\n\x7f\t") || !strings.HasSuffix(got, "?x=1%0D%0Ay%7F%09") {
 			t.Errorf("%s: %q; expected the query x=1%%0D%%0Ay%%7F%%09", template, got)
 		}
@@ -121,7 +121,7 @@ func FuzzRewriteTarget(f *testing.F) {
 			return
 		}
 		req := &customNetHttp.Request{RequestURI: uri, Header: customNetHttp.Header{}}
-		got := shortcutWords(req, template, "example.com", "*", "example.com", "foo", "", "", "/", path)
+		got := shortcutWords(req, template, siteMatch{siteDomain: "example.com", siteSubdomain: "*", domain: "example.com", subdomain: "foo"}, "/", path)
 		if strings.ContainsAny(got, "\r\n") && !strings.ContainsAny(template, "\r\n") {
 			t.Fatalf("CR/LF in %q (template %q, request %q)", got, template, uri)
 		}
@@ -180,8 +180,38 @@ func TestRL_F9_RewriteComplementWithEncodedQuestionMark(t *testing.T) {
 	} {
 		req := &customNetHttp.Request{RequestURI: c.uri, Header: customNetHttp.Header{}}
 		path, _ := url.PathUnescape(cutAt(c.uri, '?'))
-		if got := shortcutWords(req, c.template, "example.com", "*", "example.com", "foo", "", "", c.match, path); got != c.want {
+		if got := shortcutWords(req, c.template, siteMatch{siteDomain: "example.com", siteSubdomain: "*", domain: "example.com", subdomain: "foo"}, c.match, path); got != c.want {
 			t.Errorf("%s with %s → %q; expected %q", c.template, c.uri, got, c.want)
+		}
+	}
+}
+
+// R6 V-09: a "}" before the first placeholder of a target doesn't stop its placeholders from being replaced. The
+// validator, which takes the first "}" after each "{", accepted "/a}b/{REWRITE_COMPLEMENT}"; answering, the first "}"
+// of all was taken, and the target stayed as written.
+func TestR6_V09_BraceBeforeAPlaceholder(t *testing.T) {
+	dir := initForTest(t)
+	os.MkdirAll(dir+"localhost/@/a}b", 0755)
+	os.WriteFile(dir+"localhost/@/a}b/note.txt", []byte("note"), 0644)
+	globalMutex.Lock()
+	ok, msg := subdomainContentCheckers["="](true, map[string]interface{}{"/x/": "/a}b/{REWRITE_COMPLEMENT}"}, false, "localhost", "")
+	globalMutex.Unlock()
+	if !ok {
+		t.Fatalf("rewrite: %q", msg)
+	}
+	base := startServer(t)
+	if code, body, _ := get(base, "/x/note.txt", nil); code != 200 || body != "note" {
+		t.Errorf("GET /x/note.txt: %d %q; expected the file of /a}b/note.txt", code, body)
+	}
+	// Both read a target the same way: what one accepts, the other replaces
+	for _, target := range []string{"/a}b/{DOMAIN}", "/}{DOMAIN}", "/{DOMAIN}}/{DOMAIN}", "/a}{DOMAIN}}b"} {
+		if unknown := unknownPlaceholder(target); unknown != "" {
+			t.Errorf("%q: unknown placeholder %q", target, unknown)
+			continue
+		}
+		request := customNetHttp.Request{RequestURI: "/x", Host: "localhost"}
+		if expanded := shortcutWords(&request, "N"+target, siteMatch{siteDomain: "localhost", domain: "localhost"}, "/x", "/x"); strings.Contains(expanded, "{") {
+			t.Errorf("%q, accepted, is answered as %q: a placeholder was left as written", target, expanded)
 		}
 	}
 }

@@ -87,7 +87,7 @@ func TestN11_DeterministicOrder(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		loadConfig(t, dir, cfg)
 		globalMutex.RLock()
-		r, w := siteSSLConfig["localhost"]["R"], siteSSLConfig["localhost"]["W"]
+		r, w := siteSSLConfig["localhost"].asSection()["R"], siteSSLConfig["localhost"].asSection()["W"]
 		php := preprocessors["localhost"]["php"]
 		order := indexFiles["localhost"]["a.html"] < indexFiles["localhost"]["b.html"]
 		alias := domainAliases["common.test"]
@@ -304,16 +304,16 @@ func TestRL_S9_DeniedIPsReplacedAtOnce(t *testing.T) {
 	withGlobalLock(func() { adminAddHandlers["@"]("203.0.113.5", future) })
 	withGlobalLock(func() {
 		clearFileSettings() // As applySiteConfig does first
-		if deniedUntil("203.0.113.5") == 0 {
+		if deniedUntil(clientOf("203.0.113.5")) == 0 {
 			t.Error("the denied IP in use stopped being denied while the file is applied")
 		}
 		adminAddHandlers["@"]("203.0.113.6", future)
-		if deniedUntil("203.0.113.6") != 0 {
+		if deniedUntil(clientOf("203.0.113.6")) != 0 {
 			t.Error("a denied IP of the file was published before the whole list")
 		}
 		publishLoadedDeniedIPs()
 	})
-	if deniedUntil("203.0.113.5") != 0 || deniedUntil("203.0.113.6") == 0 {
-		t.Errorf("after applying: 203.0.113.5 until %d, 203.0.113.6 until %d; expected only the file's", deniedUntil("203.0.113.5"), deniedUntil("203.0.113.6"))
+	if deniedUntil(clientOf("203.0.113.5")) != 0 || deniedUntil(clientOf("203.0.113.6")) == 0 {
+		t.Errorf("after applying: 203.0.113.5 until %d, 203.0.113.6 until %d; expected only the file's", deniedUntil(clientOf("203.0.113.5")), deniedUntil(clientOf("203.0.113.6")))
 	}
 }

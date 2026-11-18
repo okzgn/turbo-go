@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -119,8 +120,8 @@ func load(url, host string, conc int, d time.Duration) (float64, time.Duration) 
 // #6, #64: without turbo.visits, Turbo must be as fast as with it, or faster.
 // The stdlib reference is logged too.
 func TestP06_Throughput(t *testing.T) {
-	if testing.Short() || raceEnabled {
-		t.Skip("performance measurement: not measured with -short or -race")
+	if testing.Short() || raceEnabled || runtime.NumCPU() < 4 {
+		t.Skip("performance measurement: not measured with -short, -race or fewer than 4 CPUs")
 	}
 	dir := initForTest(t)
 	serverRequestLimits.CII.Store(1 << 40) // high, so as not to measure the limiter

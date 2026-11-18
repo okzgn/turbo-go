@@ -168,8 +168,9 @@ func TestRP3_R107_SwapMeanwhileKeepsTheSite(t *testing.T) {
 	if err := os.Rename(dir+"localhost/@", dir+"localhost/@.away"); err != nil {
 		t.Fatal(err)
 	}
+	previousHook := beforeMissingSitesDeleted
 	beforeMissingSitesDeleted = func() { publicSwaps.Add(1) } // As hardUpload swapping an @ meanwhile
-	t.Cleanup(func() { beforeMissingSitesDeleted = func() {} })
+	t.Cleanup(func() { beforeMissingSitesDeleted = previousHook })
 	checkSites()
 	if active, _, _ := localhostState(); !active {
 		t.Error("a site was deactivated by a look made while an @ was being swapped")

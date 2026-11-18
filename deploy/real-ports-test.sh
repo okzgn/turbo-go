@@ -126,12 +126,12 @@ check "GET /test.CGI runs it" "$(curl -s http://localhost/test.CGI)" "cgi-ran"
 
 echo "== CGI that takes longer than WT"
 check "addPreprocessor slow" "$(curl -s -X POST -H "ok: $TOKEN" --data-urlencode s=localhost --data-urlencode d= --data-urlencode a=slow --data-urlencode c=Admin --data-urlencode "b=$TMPD/slow.sh" 'http://localhost/admin:inside:addPreprocessor')" "Preprocessor.*"
-check "setWT 2s" "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "ok: $TOKEN" -d 'a=2s&b=Admin' 'http://localhost/admin:inside:setWT')" "200"
+check "setWT 2s" "$(curl -s -X POST -H "ok: $TOKEN" -d 'a=2s&b=Admin' 'http://localhost/admin:inside:setWT')" "Response write timeout saved"
 check "GET /wait.slow" "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://localhost/wait.slow)" "504"
 check "addPreprocessor child" "$(curl -s -X POST -H "ok: $TOKEN" --data-urlencode s=localhost --data-urlencode d= --data-urlencode a=child --data-urlencode c=Admin --data-urlencode "b=$TMPD/child.sh" 'http://localhost/admin:inside:addPreprocessor')" "Preprocessor.*"
 # The CGI leaves a process in the background with its output open: the response doesn't wait for it
 check "CGI that leaves a child" "$(curl -s --max-time 5 -w ' %{http_code}' http://localhost/with.child | tr -d '\n')" "with-child 200"
-check "setWT 10s" "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "ok: $TOKEN" -d 'a=10s&b=Admin' 'http://localhost/admin:inside:setWT')" "200"
+check "setWT 10s" "$(curl -s -X POST -H "ok: $TOKEN" -d 'a=10s&b=Admin' 'http://localhost/admin:inside:setWT')" "Response write timeout saved"
 
 echo "== Panel: index and HTTPS"
 check "addIndex" "$(curl -s -X POST -H "ok: $TOKEN" -d 'a=index.html&s=localhost&d=' 'http://localhost/admin:inside:addIndex')" "Index (assigned|unchanged)"

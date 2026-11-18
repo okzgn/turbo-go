@@ -32,7 +32,7 @@ func apiFrom(handler func(customNetHttp.ResponseWriter, *customNetHttp.Request),
 // spent them and blocked the administrator's closeSessions with 429, while the copy went on.
 func TestN09_CurrentPasswordLimited(t *testing.T) {
 	initForTest(t)
-	handler := serverHandlerFn("")
+	handler := serverHandlerFn(false)
 	password := useTestPassword(t) // Logins from 198.51.100.30: the default password signs in only from this machine
 	const ip = "198.51.100.30"
 	token := newSession(t, ip)
@@ -64,7 +64,7 @@ func TestN09_CurrentPasswordLimited(t *testing.T) {
 // without knowing the user.
 func TestN26_LoginTimingWithoutUser(t *testing.T) {
 	initForTest(t)
-	handler := serverHandlerFn("")
+	handler := serverHandlerFn(false)
 	t.Cleanup(func() {
 		loginFailuresMutex.Lock()
 		clear(loginFailuresByIP)
@@ -92,7 +92,7 @@ func TestN26_LoginTimingWithoutUser(t *testing.T) {
 // does not change the password.
 func TestI19_PasswordHashError(t *testing.T) {
 	initForTest(t)
-	handler := serverHandlerFn("")
+	handler := serverHandlerFn(false)
 	token := newSession(t, "198.51.100.32")
 	previous := derivePasswordKey
 	t.Cleanup(func() { derivePasswordKey = previous })
@@ -126,7 +126,7 @@ func TestI19_FIPSOnly(t *testing.T) {
 	dir := t.TempDir()
 	cmd := exec.Command(bin)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "TURBO_DIR="+dir, "TURBO_HTTP_ADDR=127.0.0.1:"+freePort(t), "TURBO_HTTPS_ADDR=127.0.0.1:"+freePort(t), "TURBO_PASSWORD=Admin", "GODEBUG=fips140=only")
+	cmd.Env = append(testEnviron(), "TURBO_DIR="+dir, "TURBO_HTTP_ADDR=127.0.0.1:"+freePort(t), "TURBO_HTTPS_ADDR=127.0.0.1:"+freePort(t), "TURBO_PASSWORD=Admin", "GODEBUG=fips140=only")
 	var out syncBuffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	if err := cmd.Start(); err != nil {

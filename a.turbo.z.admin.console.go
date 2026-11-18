@@ -35,6 +35,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"mime"
+	"mime/multipart"
 	"net"
 	"net/netip"
 	"os"
@@ -315,6 +316,11 @@ func panelSession(request *customNetHttp.Request, clientIP string) (key string, 
 	}
 	for _, cookie := range request.Cookies() {
 		if cookie.Name != sessionCookieName && cookie.Name != sessionCookieNameTLS {
+			continue
+		}
+		// The cookie of HTTP has no Secure: the browser also sends it in the clear, so over TLS it is no session. A
+		// session opened by HTTP, before the panel had its certificate, signs in again by HTTPS.
+		if request.TLS != nil && cookie.Name == sessionCookieName {
 			continue
 		}
 		hasCookie = true
@@ -1196,6 +1202,9 @@ func uploadedFilePath(name string) (string, bool) {
 	if name == "" || len(name) > maxUploadPath || strings.HasPrefix(name, "/") || filepath.VolumeName(name) != "" || strings.IndexByte(name, ':') != -1 {
 		return "", false
 	}
+	if !textAllowed(name, false) { // Control characters or invalid UTF-8: cleanRequestPath would never serve it
+		return "", false
+	}
 	for _, segment := range strings.Split(name, "/") {
 		// Names that Windows treats specially are refused on every system, so the site can be moved.
 		if segment == "" || segment == "." || segment == ".." || len(segment) > maxUploadNameSegment || !pathSegmentAllowed(segment, true) {
@@ -1231,7 +1240,15 @@ var literalActions = map[string]bool{
 
 // actionPasswordParams are, for the actions that need the current password but whose other parameters are read with
 // the character replacements undone (as the session alone allows), the parameter of the password, taken as sent.
-var actionPasswordParams = map[string]string{"addMIME": "c", "addHeader": "c", "delMIME": "b", "delHeader": "b"}
+var actionPasswordParams = map[string]string{"addMIME": "c", "addHeader": "c", "delMIME": "b", "delHeader": "b", "addRewrite": "c", "addDenied": "b"}
+
+// externalRewriteTarget reports whether the target of a rewrite, as addRewrite receives it (its validator undoes the
+// character replacements, as here), sends the visitors of the site to another address: "http://" or "https://", in
+// any case. Callers hold the global lock.
+func externalRewriteTarget(target string) bool {
+	lower := strings.ToLower(replaceURIChars(target))
+	return strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://")
+}
 
 // undoCharReplacements turns the character replacements of §2.1 of the API ("-.-" for ";" and the rest) back
 // into their characters in the parameters of a panel action, once, before the action reads them. The actions of
@@ -1281,8 +1298,47 @@ func formTextProblem(request *customNetHttp.Request, whitespace bool) string {
 	return ""
 }
 
-// addSite creates a site from the panel: its folder with @ and its settings. Callers hold the global lock.
-func addSite(domain string) (bool, string) {
+// addSiteFromPanel creates a site (subdomain "") or a subdomain from the panel, with its folder and @: checked with
+// the global lock, its folder made without it, and checked again and constructed with it. It holds settingsUpdateMutex,
+// as delSite and the reloads do, so no reload looks at the disk between the folder and the site (it would take the
+// folder for a site found on disk, with the defaults); making the folder held every request on a slow disk. A site
+// refused at the second check (an alias of its host added meanwhile) has the folders made for it removed.
+func addSiteFromPanel(domain string, subdomain string) (bool, string) {
+	settingsUpdateMutex.Lock()
+	defer settingsUpdateMutex.Unlock()
+	add := func(folderMade bool) (bool, string) {
+		if subdomain == "" {
+			return addSite(domain, folderMade)
+		}
+		return addSubdomain(domain, subdomain, folderMade)
+	}
+	if applied, message := lockedCheck(func() (bool, string) { return add(false) }); !applied {
+		return false, message
+	}
+	folder := sitesDir.Get() + changeWildcards(domain) + "/"
+	if subdomain != "" {
+		folder += changeWildcards(subdomain) + "/"
+	}
+	_, folderErr := os.Lstat(folder)
+	_, publicErr := os.Lstat(folder + publicDirName)
+	if siteDirMake(folder+publicDirName+"/", 0755) != nil { // #nosec G301 -- public web content of a site, served by Turbo
+		return false, "Error creating"
+	}
+	applied, message := lockedCheck(func() (bool, string) { return add(true) })
+	if !applied {
+		if errors.Is(publicErr, fs.ErrNotExist) {
+			os.Remove(folder + publicDirName) // #nosec G104 -- best effort: empty, made just now
+		}
+		if errors.Is(folderErr, fs.ErrNotExist) {
+			os.Remove(folder) // #nosec G104 -- as above
+		}
+	}
+	return applied, message
+}
+
+// addSite creates a site from the panel, with its settings: checked and undone without folderMade, checked again and
+// kept with it (addSiteFromPanel makes the folder in between). Callers hold the global lock.
+func addSite(domain string, folderMade bool) (bool, string) {
 	if siteExists(domain, "") {
 		return false, "Site already exists."
 	}
@@ -1301,14 +1357,15 @@ func addSite(domain string) (bool, string) {
 			return false, "Matches site: " + matchedSite + "." + subdomain
 		}
 	}
+	_, domainExisted := sitesMap[domain] // With subdomains and no root: they stay when the root is undone
 	constructSiteLocked(domain, "")
 	if panelHost := panelHostServedBy(domain); panelHost != "" { // undone before anything reaches the disk
-		deleteSiteLocked(domain, "")
+		undoSiteCheckLocked(domain, "", domainExisted)
 		return false, "The site would serve the panel host " + panelHost + ": use another host for the panel or for the site"
 	}
-	if os.MkdirAll(sitesDir.Get()+changeWildcards(domain)+"/"+publicDirName+"/", 0755) != nil { // #nosec G301 -- public web content of a site, served by Turbo
-		deleteSiteLocked(domain, "")
-		return false, "Error creating"
+	if !folderMade { // Only checked: its folder is made without the global lock
+		undoSiteCheckLocked(domain, "", domainExisted)
+		return true, ""
 	}
 	return true, "Site added"
 }
@@ -1355,7 +1412,7 @@ func deleteSiteFromPanel(domain string, subdomain string) (deleted bool, message
 		})
 		return true, what + " deleted: Turbo forgets the settings it kept for it (no folder is deleted)", ""
 	}
-	aside := siteDir[:strings.LastIndex(siteDir, "/")+1] + ".turbo-deleted-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	aside := siteDir[:strings.LastIndex(siteDir, "/")+1] + deletedFolderMark + strconv.FormatInt(time.Now().UnixNano(), 36)
 	if err := os.Rename(siteDir, aside); err == nil {
 		moved = aside
 	} else if !errors.Is(err, fs.ErrNotExist) { // Without a folder, there is nothing to delete
@@ -1365,8 +1422,9 @@ func deleteSiteFromPanel(domain string, subdomain string) (deleted bool, message
 	return true, what + " deleted", moved
 }
 
-// addSubdomain creates a subdomain of an existing site from the panel. Callers hold the global lock.
-func addSubdomain(domain string, subdomain string) (bool, string) {
+// addSubdomain creates a subdomain of an existing site from the panel, as addSite does a site. Callers hold the
+// global lock.
+func addSubdomain(domain string, subdomain string, folderMade bool) (bool, string) {
 	if _, exists := sitesMap[domain]; !exists {
 		return false, "Site not found"
 	}
@@ -1388,12 +1446,12 @@ func addSubdomain(domain string, subdomain string) (bool, string) {
 	}
 	constructSiteLocked(domain, subdomain)
 	if panelHost := panelHostServedBy(subdomain + "." + domain); panelHost != "" { // undone before anything reaches the disk
-		deleteSiteLocked(domain, subdomain)
+		undoSiteCheckLocked(domain, subdomain, true)
 		return false, "The subdomain would serve the panel host " + panelHost + ": use another host for the panel or for the subdomain"
 	}
-	if os.MkdirAll(sitesDir.Get()+changeWildcards(domain)+"/"+changeWildcards(subdomain)+"/"+publicDirName+"/", 0755) != nil { // #nosec G301 -- public web content of a site, served by Turbo
-		deleteSiteLocked(domain, subdomain)
-		return false, "Error creating"
+	if !folderMade { // Only checked: its folder is made without the global lock
+		undoSiteCheckLocked(domain, subdomain, true)
+		return true, ""
 	}
 	return true, "Subdomain added"
 }
@@ -1458,6 +1516,167 @@ func currentPasswordOK(responseWriter customNetHttp.ResponseWriter, request *cus
 	return false
 }
 
+// uploadFieldsBeforeFiles is how much of the body of hardUpload may come before its first file: the fields s, d and
+// b, and the start of the first file's part.
+const uploadFieldsBeforeFiles = 64 << 10
+
+// replayedBody is a request body whose first bytes, already read, are read again.
+type replayedBody struct {
+	io.Reader
+	io.Closer
+}
+
+// uploadPasswordFirst checks the current password (b) of a hardUpload whose body is multipart before its files are
+// read: it reads the fields that come before the first file, and puts back what it read, so that the body is read
+// whole afterwards. The whole body, up to MBB, was read into memory before the password was looked at, so with a
+// wrong one a client still made Turbo read up to 100 MB. answered: the answer was given (the password is wrong, or
+// comes after the files, or the fields before them are too long or malformed); checked: the password matched. A body
+// that isn't multipart, or that ends without files, is left to the rest of hardUpload.
+func uploadPasswordFirst(responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request, session string) (checked bool, answered bool) {
+	mediaType, params, err := mime.ParseMediaType(request.Header.Get("Content-Type"))
+	if err != nil || mediaType != "multipart/form-data" || params["boundary"] == "" {
+		return false, false
+	}
+	original := request.Body
+	var consumed bytes.Buffer
+	reader := multipart.NewReader(io.TeeReader(io.LimitReader(original, uploadFieldsBeforeFiles), &consumed), params["boundary"])
+	var password []string
+	for password == nil {
+		part, err := reader.NextPart()
+		if err == io.EOF { // Without files: the rest of hardUpload answers
+			break
+		}
+		if err != nil {
+			badReq(responseWriter, request, msgMissingData+": the current password (b), before the files")
+			return false, true
+		}
+		if part.FileName() != "" {
+			badReq(responseWriter, request, "The current password (b) must come before the files")
+			return false, true
+		}
+		value, err := io.ReadAll(part)
+		if err != nil {
+			badReq(responseWriter, request, msgMissingData+": the current password (b), before the files")
+			return false, true
+		}
+		if part.FormName() == "b" {
+			password = []string{string(value)}
+		}
+	}
+	request.Body = replayedBody{io.MultiReader(bytes.NewReader(consumed.Bytes()), original), original}
+	if password == nil {
+		return false, false
+	}
+	if !dangerousActionPasswordOK(responseWriter, request, session, map[string][]string{"b": password}, "b") {
+		return false, true
+	}
+	return true, false
+}
+
+// The names of what hardUpload and the deletion of a site leave next to a site's folders while they work:
+// "@.upload-…" (the files of an upload, before they take the place of @), "@.previous-…" (the @ they replace, until
+// it is deleted) and ".turbo-deleted-…" (a site or subdomain being deleted).
+const (
+	uploadFolderMark   = ".upload-"
+	previousFolderMark = ".previous-"
+	deletedFolderMark  = ".turbo-deleted-"
+)
+
+// interruptedWorkAge is how old what an operation cut by a stop of Turbo left has to be for cleanInterruptedWork to
+// delete it: another Turbo with the same sites directory could still be in the middle of it.
+const interruptedWorkAge = time.Hour
+
+// cleanInterruptedWork deals, at start, with what an upload, a deletion of a site or a save cut by a stop of Turbo
+// left in the sites directory baseDir (and in the start directory, for turbo.config). A site cut between the two
+// renames of an upload had no @, so it wasn't a site, until it was put back by hand: its @, left aside, is put back
+// if it is the only one there. The folders of an upload or of a deleted site, and the temporary files of a save,
+// older than an hour, are deleted. An @ left aside next to one in place is only warned about: it may be the only
+// copy of something. It reports whether an @ was put back.
+func cleanInterruptedWork(baseDir string, startDir string) bool {
+	remove := func(path string, what string) {
+		if info, err := os.Lstat(path); err != nil || time.Since(info.ModTime()) < interruptedWorkAge {
+			return
+		}
+		if err := os.RemoveAll(path); err != nil {
+			slog.Warn("Can't delete what an interrupted "+what+" left", "path", path, "error", err)
+			return
+		}
+		slog.Info("Deleted what an interrupted "+what+" left", "path", path)
+	}
+	temporaryOf := func(dir string, names ...string) {
+		entries, _ := os.ReadDir(dir)
+		for _, entry := range entries {
+			for _, name := range names {
+				if strings.HasPrefix(entry.Name(), name+".") && strings.HasSuffix(entry.Name(), ".tmp") {
+					remove(dir+entry.Name(), "save")
+				}
+			}
+		}
+	}
+	temporaryOf(baseDir, configFileName)
+	if startDir != baseDir {
+		temporaryOf(startDir, configFileName)
+	}
+	entries, err := os.ReadDir(baseDir)
+	if err != nil {
+		return false
+	}
+	var folders []string // Those of the sites and of their subdomains
+	for _, site := range entries {
+		name := site.Name()
+		switch {
+		case strings.HasPrefix(name, deletedFolderMark):
+			remove(baseDir+name, "deletion of a site")
+		case site.IsDir() && name != certificatesDirName && name != devGUIDirName:
+			folders = append(folders, baseDir+name+"/")
+			subdomains, _ := os.ReadDir(baseDir + name)
+			for _, subdomain := range subdomains {
+				subName := subdomain.Name()
+				switch {
+				case strings.HasPrefix(subName, deletedFolderMark):
+					remove(baseDir+name+"/"+subName, "deletion of a subdomain")
+				case subdomain.IsDir() && subName != publicDirName && !strings.HasPrefix(subName, publicDirName+"."):
+					folders = append(folders, baseDir+name+"/"+subName+"/")
+				}
+			}
+		}
+	}
+	restored := false
+	for _, folder := range folders {
+		temporaryOf(folder, certFileName, keyFileName)
+		contents, _ := os.ReadDir(folder)
+		var previous []string
+		for _, entry := range contents {
+			switch name := entry.Name(); {
+			case strings.HasPrefix(name, publicDirName+uploadFolderMark):
+				remove(folder+name, "upload")
+			case strings.HasPrefix(name, publicDirName+previousFolderMark):
+				previous = append(previous, name)
+			}
+		}
+		if len(previous) == 0 {
+			continue
+		}
+		if _, err := os.Lstat(folder + publicDirName); err == nil {
+			slog.Warn("An upload stopped after replacing @ left the previous one aside: delete it once checked", "folder", folder, "previous", strings.Join(previous, ", "))
+			continue
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if len(previous) > 1 {
+			slog.Warn("A site without @, with several left aside by stopped uploads: none is put back; rename the right one to @", "folder", folder, "previous", strings.Join(previous, ", "))
+			continue
+		}
+		if err := os.Rename(folder+previous[0], folder+publicDirName); err != nil {
+			slog.Error("Can't put back the @ that a stopped upload left aside", "folder", folder, "previous", previous[0], "error", err)
+			continue
+		}
+		slog.Warn("An upload stopped between its two renames left the site without @: the previous one is put back", "folder", folder)
+		restored = true
+	}
+	return restored
+}
+
 // hardUpload replaces the public folder (@) of a site with the uploaded files, all at once: every name is
 // checked first, the files are written to a folder of their own next to @, and that folder takes the place of @
 // with a rename, holding the global lock and only if the site still exists, so a site deleted meanwhile doesn't
@@ -1471,7 +1690,7 @@ func hardUpload(domain string, subdomain string, siteDir string, files []*custom
 	var discarded []string
 	// A file and a folder can't have the same name: the later one is discarded. Where the file system ignores
 	// case, names are compared that way.
-	foldCase := runtime.GOOS == "windows" || runtime.GOOS == "darwin"
+	foldCase := namesFold()
 	filePaths, folderPaths := map[string]bool{}, map[string]bool{}
 	for _, uploadedFile := range files {
 		name := uploadedFile.Filename
@@ -1504,12 +1723,22 @@ func hardUpload(domain string, subdomain string, siteDir string, files []*custom
 		return 400, "No valid file; nothing was changed. Discarded: " + strings.Join(discarded, ", ")
 	}
 
-	stagingDir, err := os.MkdirTemp(siteDir, publicDirName+".upload-")
-	if err != nil {
-		return 400, "Directory inaccessible"
+	stagingDir, err := os.MkdirTemp(siteDir, publicDirName+uploadFolderMark)
+	if err != nil { // A failure of the server, not of the request: it answered 400
+		slog.Error("hardUpload: can't create the folder of the upload", "directory", siteDir, "error", err)
+		return 500, "Directory inaccessible"
 	}
 	stagingDir += "/"
 	defer os.RemoveAll(stagingDir) // #nosec G104 -- after the swap it no longer exists; otherwise, best effort
+	// MkdirTemp makes it 0700, and it becomes @: with the permissions of the @ it replaces (0755 for a new site), whoever
+	// could read the site (a backup, a deployment by its group) still can.
+	publicMode := os.FileMode(0755)
+	if info, statErr := os.Stat(siteDir + publicDirName); statErr == nil && info.IsDir() {
+		publicMode = info.Mode().Perm()
+	}
+	if err = os.Chmod(stagingDir, publicMode); err != nil { // #nosec G302 -- the public folder of a site, as its previous one
+		slog.Warn("hardUpload: can't give the new public directory the permissions of the previous one", "directory", stagingDir, "error", err)
+	}
 	for _, file := range uploads {
 		if err = writeUploadedFile(file.file, stagingDir+file.path); err != nil {
 			slog.Error("hardUpload: can't write the file", "file", file.path, "error", err)
@@ -1519,7 +1748,7 @@ func hardUpload(domain string, subdomain string, siteDir string, files []*custom
 
 	beforeUploadSwap()
 	contentDir := siteDir + publicDirName
-	previousDir := contentDir + ".previous-" + newSessionToken()[:16]
+	previousDir := contentDir + previousFolderMark + newSessionToken()[:16]
 	siteGone := false
 	withGlobalLock(func() {
 		if siteGone = !siteExists(domain, subdomain); siteGone {
@@ -1586,13 +1815,19 @@ func lockedCheck(check func() (bool, string)) (bool, string) {
 	return check()
 }
 
-// lockedCheckLooking is lockedCheck with what look saw of the disk for the validator (diskLook).
+// lockedCheckLooking is lockedCheck with what look saw of the disk for the validator (diskLook). The files that the
+// check decided to delete (removeFiles) are removed here, once the lock is released: if one can't be, what the check
+// changed has gone back, and the answer is that failure.
 func lockedCheckLooking(look *diskLook, check func() (bool, string)) (bool, string) {
-	return lockedCheck(func() (bool, string) {
+	applied, message := lockedCheck(func() (bool, string) {
 		lookedDisk = look
 		defer func() { lookedDisk = nil }()
 		return check()
 	})
+	if failure := look.removeDeferred(); failure != "" {
+		return false, failure
+	}
+	return applied, message
 }
 
 // setSitesDir is setM once the current password matched. The new directory is checked before taking any lock;
@@ -1615,7 +1850,7 @@ func setSitesDir(value string, currentSession string) (bool, string) {
 		return false, "Sites directory can't be read"
 	}
 	if sameDir(resolved, sitesDir.Get()) {
-		return false, "Sites directory unchanged"
+		return false, msgSitesDirUnchanged
 	}
 	// Hops counted from the start directory, as the next start will count them: saving leaves its turbo.config pointing
 	// to this one. In the start directory itself, its turbo.config's "M" isn't followed: going back there stays there.
@@ -1733,6 +1968,16 @@ func consoleActionsAPI(apiPath string, currentSession string, viaCookie bool, re
 				if !currentPasswordOK(responseWriter, request, currentSession, currentPassword) {
 					return true
 				}
+				// A credential that the environment sets comes back at the next start, whatever turbo.config says
+				// (loadCredentials): changed here, the new one worked only until then, and the answer said nothing.
+				if (apiPath == "P" && passwordFromEnv) || (apiPath == "U" && userFromEnv) {
+					variable := "TURBO_PASSWORD"
+					if apiPath == "U" {
+						variable = "TURBO_USER"
+					}
+					badReq(responseWriter, request, variable+" sets it at start: change it there and restart Turbo")
+					return true
+				}
 				if apiPath == "M" { // Nothing of the new directory is read before the password matched
 					credentials := panelUser.Get() + "\x00" + panelPasswordHash.Get()
 					if applied, message := setSitesDir(argumentList[0], currentSession); applied {
@@ -1816,6 +2061,16 @@ func consoleActionsAPI(apiPath string, currentSession string, viaCookie bool, re
 				if (apiPath == "Preprocessor" || apiPath == "MIME" || apiPath == "Header") && !dangerousActionPasswordOK(responseWriter, request, currentSession, request.Form, "c") {
 					return true
 				}
+				// A rewrite to another address sends the visitors of the site away (its "/" to any other site): with the
+				// session alone, a copy of it (or a script of the panel's origin) could do that to every site. A rewrite
+				// inside the site still needs only the session.
+				if apiPath == "Rewrite" {
+					external := false
+					withReadLock(func() { external = externalRewriteTarget(request.Form["b"][0]) })
+					if external && !dangerousActionPasswordOK(responseWriter, request, currentSession, request.Form, "c") {
+						return true
+					}
+				}
 				look := newDiskLook()
 				if apiPath == "Preprocessor" { // The disk is looked at before taking the lock; the path is used as sent (literalActions)
 					if executable, problem := preprocessorCommand(request.Form["b"][0]); problem == "" {
@@ -1885,9 +2140,7 @@ func consoleActionsAPI(apiPath string, currentSession string, viaCookie bool, re
 				badReq(responseWriter, request, msgMissingData)
 				return true
 			}
-			// Checks and creation in one locked section: no map is read without the lock, and nothing changes
-			// between checking and creating.
-			applied, message := lockedCheck(func() (bool, string) { return addSubdomain(request.Form["s"][0], request.Form["d"][0]) })
+			applied, message := addSiteFromPanel(request.Form["s"][0], request.Form["d"][0])
 			if !applied {
 				badReq(responseWriter, request, message)
 				return true
@@ -1900,7 +2153,7 @@ func consoleActionsAPI(apiPath string, currentSession string, viaCookie bool, re
 				badReq(responseWriter, request, msgMissingData)
 				return true
 			}
-			applied, message := lockedCheck(func() (bool, string) { return addSite(request.Form["s"][0]) })
+			applied, message := addSiteFromPanel(request.Form["s"][0], "")
 			if !applied {
 				badReq(responseWriter, request, message)
 				return true
@@ -1912,7 +2165,9 @@ func consoleActionsAPI(apiPath string, currentSession string, viaCookie bool, re
 			_, sourceParamExists := request.Form["s"]
 			_, destinationParamExists := request.Form["d"]
 			if sourceParamExists && destinationParamExists {
-				if apiPath != "Denied" && !dangerousActionPasswordOK(responseWriter, request, currentSession, request.Form, "b") {
+				// Denying an IP too: any but the client's own, for any time (that of a proxy in front, for one), cut the
+				// sites off with the session alone.
+				if !dangerousActionPasswordOK(responseWriter, request, currentSession, request.Form, "b") {
 					return true
 				}
 				kind := "#" // The key of the handler: responses
@@ -2050,26 +2305,86 @@ func consoleActionsAPI(apiPath string, currentSession string, viaCookie bool, re
 				adapter = request.Form["y"][0]
 			}
 			if argumentParamExists && sourceParamExists && destinationParamExists {
-				if (apiPath == "C" || apiPath == "PC") && request.Form["a"][0] == "0" && !dangerousActionPasswordOK(responseWriter, request, currentSession, request.Form, "b") { // Deleting a certificate
+				// Deleting a certificate, and turning a site's HTTPS off (its redirection to HTTPS stops, and its certificate
+				// is no longer in use), need the current password
+				if (apiPath == "C" || apiPath == "PC" || apiPath == "S") && request.Form["a"][0] == "0" && !dangerousActionPasswordOK(responseWriter, request, currentSession, request.Form, "b") {
 					return true
 				}
-				look := newDiskLook() // The certificate files C and S look at, looked at before the lock
-				known := false        // Only the folders of existing sites (PC has no site)
-				if apiPath == "C" || apiPath == "S" {
-					withReadLock(func() { known = siteExists(request.Form["s"][0], request.Form["d"][0]) })
-				}
-				if known {
-					folder := sitesDir.Get() + siteFolder(request.Form["s"][0], request.Form["d"][0])
-					look.siteFiles(folder, apiPath == "S" && request.Form["a"][0] != "0")
-					look.stat(sitesDir.Get() + putSlash(certificatesDirName))
-				}
-				applied, message := lockedCheckLooking(look, func() (bool, string) {
-					if apiPath == "PC" {
-						return panelCertificateAction(request.Form["a"][0], email, adapter, yParamExists)
+				// The files of a certificate and its state change together: no reload looks at them in between (it holds
+				// settingsUpdateMutex too), and what touches the disk does it without the global lock: looked at, read
+				// and made before taking it, and removed once it is released. The mutex is released before the answer.
+				applied, message := func() (applied bool, message string) {
+					if apiPath == "C" || apiPath == "PC" {
+						settingsUpdateMutex.Lock()
+						defer settingsUpdateMutex.Unlock()
 					}
-					return siteSSLSettingCheckers[apiPath](false, request.Form["a"][0], request.Form["s"][0], request.Form["d"][0], email, adapter)
-				})
-				if !applied && strings.Contains(message, `"status":"WAIT"`) { // In progress, not an error
+					look := newDiskLook() // The certificate files C and S look at, looked at before the lock
+					known := false        // Only the folders of existing sites (PC has no site)
+					savedEmail := ""      // The e-mail Certbot would be given: without a valid one, no folder is made for it
+					errorPending := false // An error of the last attempt waits to be answered: Certbot doesn't run this time
+					certbotEmail := func() bool {
+						if email != "" {
+							return certbotEmailProblem(email) == ""
+						}
+						return savedEmail != ""
+					}
+					if apiPath == "C" || apiPath == "S" {
+						withReadLock(func() {
+							if known = siteExists(request.Form["s"][0], request.Form["d"][0]); known {
+								siteKey := request.Form["s"][0]
+								if request.Form["d"][0] != "" {
+									siteKey = request.Form["d"][0] + "." + siteKey
+								}
+								settings := siteSSLConfig[siteKey]
+								if errorPending = settings == nil || settings.certificate.failed; settings != nil {
+									savedEmail = settings.email
+								}
+							}
+						})
+					}
+					certificatesDir := sitesDir.Get() + putSlash(certificatesDirName)
+					if known {
+						folder := sitesDir.Get() + siteFolder(request.Form["s"][0], request.Form["d"][0])
+						look.siteFiles(folder, apiPath == "S" && request.Form["a"][0] != "0")
+						look.stat(certificatesDir)
+						// Made before the lock only when Certbot is going to run, as the validator decides it: with an e-mail,
+						// without a certificate in its time (certificateStaleAfter) and without an error waiting to be answered.
+						// It was made for every "Create SSL", also where the site already had its certificate.
+						chain, key := look.stats[folder+certFileName], look.stats[folder+keyFileName]
+						current := chain.err == nil && !chain.info.IsDir() && key.err == nil && !key.info.IsDir() && time.Since(key.info.ModTime()) <= certificateStaleAfter
+						if apiPath == "C" && request.Form["a"][0] == "1" && certbotEmail() && !current && !errorPending && look.missing(certificatesDir) {
+							look.makeDir(certificatesDir, 0700)
+						}
+					}
+					if apiPath == "PC" {
+						panelDir := sitesDir.Get() + panelCertDirName + "/"
+						look.siteFiles(panelDir, false)
+						if request.Form["a"][0] == "1" {
+							hasHosts := false
+							withReadLock(func() { savedEmail, hasHosts = panelCertEmail, len(panelOwnHosts()) > 0 })
+							look.expiry(panelDir + certFileName)
+							look.stat(certificatesDir)
+							look.stat(panelDir + acmeWebrootDirName)
+							for _, dir := range []string{certificatesDir, panelDir + acmeWebrootDirName} {
+								if hasHosts && certbotEmail() && look.missing(dir) {
+									look.makeDir(dir, 0700)
+								}
+							}
+						}
+					}
+					applied, message = lockedCheckLooking(look, func() (bool, string) {
+						if apiPath == "PC" {
+							return panelCertificateAction(request.Form["a"][0], email, adapter, yParamExists)
+						}
+						arguments := []string{request.Form["a"][0], request.Form["s"][0], request.Form["d"][0], email, adapter}
+						if apiPath == "C" { // x=1, with a=0: the certificate deleted is also taken out of use
+							arguments = append(arguments, request.Form.Get("x"))
+						}
+						return siteSSLSettingCheckers[apiPath](false, arguments...)
+					})
+					return applied, message
+				}()
+				if !applied && isCertificateWait(message) { // In progress, not an error
 					responseWriter.Header().Set(contentTypeHeader, jsonContentType)
 					responseWriter.WriteHeader(202)
 					respond(responseWriter, message)
@@ -2094,6 +2409,11 @@ func consoleActionsAPI(apiPath string, currentSession string, viaCookie bool, re
 	default:
 		switch apiPath {
 		case "hardUpload":
+			// The current password goes in the body, before the files, and is checked before they are read.
+			passwordChecked, answered := uploadPasswordFirst(responseWriter, request, currentSession)
+			if answered {
+				return true
+			}
 			// s and d may come in the URL or in the multipart body, which is read only into memory and up to MBB.
 			// A whole site is uploaded at once: up to 10 000 files, each with two headers.
 			request = customNetHttp.TurboWithFormLimits(request, 10000, 20000)
@@ -2110,7 +2430,7 @@ func consoleActionsAPI(apiPath string, currentSession string, viaCookie bool, re
 				badReq(responseWriter, request, msgMissingData)
 				return true
 			}
-			if !dangerousActionPasswordOK(responseWriter, request, currentSession, request.PostForm, "b") { // Only in the body: the URL is logged
+			if !passwordChecked && !dangerousActionPasswordOK(responseWriter, request, currentSession, request.PostForm, "b") { // Only in the body: the URL is logged
 				return true
 			}
 			if problem := formTextProblem(request, false); problem != "" {
@@ -2121,11 +2441,7 @@ func consoleActionsAPI(apiPath string, currentSession string, viaCookie bool, re
 			withReadLock(func() { exists = siteExists(request.Form["s"][0], request.Form["d"][0]) })
 
 			if !exists {
-				if request.Form["d"][0] != "" {
-					badReq(responseWriter, request, "Subdomain not found")
-				} else {
-					badReq(responseWriter, request, "Site not found")
-				}
+				badReq(responseWriter, request, missingSiteMessage(request.Form["d"][0]))
 				return true
 			}
 

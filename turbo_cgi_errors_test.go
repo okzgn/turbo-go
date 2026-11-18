@@ -60,7 +60,7 @@ func TestN44_CGITimeout504HTTP2(t *testing.T) {
 		t.Fatal(msg)
 	}
 	cfg := selfSignedTLS(t)
-	srv := &customNetHttp.Server{Handler: customNetHttp.HandlerFunc(serverHandlerFn("s")), TLSConfig: cfg, ConnState: connHandler}
+	srv := &customNetHttp.Server{Handler: customNetHttp.HandlerFunc(serverHandlerFn(true)), TLSConfig: cfg, ConnState: connHandler}
 	l, err := tls.Listen("tcp", "127.0.0.1:0", cfg)
 	if err != nil {
 		t.Fatal(err)

@@ -4,8 +4,10 @@ package main
 // Each target only checks that the function doesn't panic.
 
 import (
+	"net"
 	"net/netip"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -24,7 +26,7 @@ func initFuzz(f *testing.F) {
 }
 
 func FuzzHost(f *testing.F) {
-	for _, s := range []string{"localhost", "a.b.c", "*.x.com", "[::1]:80", ".", "a..b", "x:80", "", "X&a=1.example.com", "Example.COM.", "xn--a.example.com", "a_b.example.com"} {
+	for _, s := range []string{"localhost", "a.b.c", "*.x.com", "[::1]:80", ".", "a..b", "x:80", "", "X&a=1.example.com", "Example.COM.", "xn--a.example.com", "a_b.example.com", "x:65535", "x:99999"} {
 		f.Add(s)
 	}
 	initFuzz(f)
@@ -39,6 +41,14 @@ func FuzzHost(f *testing.F) {
 			}
 		}
 		hostOk(h, true)
+		// A Host accepted for a request has a port that exists, if it has one (R6 V-12c)
+		if canonical, ok := canonicalHost(h); ok {
+			if _, port, err := net.SplitHostPort(canonical); err == nil {
+				if number, err := strconv.Atoi(port); err != nil || number > 65535 {
+					t.Fatalf("canonicalHost(%q) = %q: a port that no host has", h, canonical)
+				}
+			}
+		}
 	})
 }
 
@@ -79,7 +89,7 @@ func FuzzShortcutWords(f *testing.F) {
 			return
 		}
 		req := &customNetHttp.Request{RequestURI: uri, Header: customNetHttp.Header{}}
-		shortcutWords(req, target, "example.com", "*", "foo.example.com", "foo", "", "", "/", "/")
+		shortcutWords(req, target, siteMatch{siteDomain: "example.com", siteSubdomain: "*", domain: "foo.example.com", subdomain: "foo"}, "/", "/")
 	})
 }
 
@@ -122,5 +132,84 @@ func FuzzAdminHandlers(f *testing.F) {
 		defer globalMutex.Unlock()
 		add(key, value)
 		adminDeleteHandlers[kind](key)
+	})
+}
+
+// R6 D-09: the name of a Host, without its port, is in lower case.
+func FuzzRequestHostName(f *testing.F) {
+	for _, s := range []string{"localhost", "Example.COM.:80", "[::1]:443", "[::1]", "a:b:c", "", "[", "x]:80", "A..", "[FE80::1%25eth0]:80"} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, h string) {
+		if name := requestHostName(h); name != strings.ToLower(name) {
+			t.Fatalf("requestHostName(%q) = %q: not in lower case", h, name)
+		}
+	})
+}
+
+// R6 D-09: a query without the parameters of another keeps what it doesn't drop, as it was, and drops all of them.
+func FuzzWithoutParametersOf(f *testing.F) {
+	for _, s := range [][2]string{{"a=1&b=2", "b=3"}, {"a=1;b=2&a=3", "a"}, {"%61=1&a=2", "a=0"}, {"", "a"}, {"a=1", ""}, {"&&;", "&"}} {
+		f.Add(s[0], s[1])
+	}
+	f.Fuzz(func(t *testing.T, query, other string) {
+		kept := withoutParametersOf(query, other)
+		if other == "" && kept != query || len(kept) > len(query) {
+			t.Fatalf("withoutParametersOf(%q, %q) = %q", query, other, kept)
+		}
+		names := map[string]bool{}
+		for _, parameter := range strings.FieldsFunc(other, func(r rune) bool { return r == '&' || r == ';' }) {
+			names[queryParameterName(parameter)] = true
+		}
+		for _, parameter := range strings.FieldsFunc(kept, func(r rune) bool { return r == '&' || r == ';' }) {
+			if names[queryParameterName(parameter)] {
+				t.Fatalf("withoutParametersOf(%q, %q) = %q keeps %q", query, other, kept, parameter)
+			}
+		}
+	})
+}
+
+// R6 D-09: an accepted "PA" is read again as it was saved.
+func FuzzParsePanelAccess(f *testing.F) {
+	for _, s := range []string{"", "*", "panel.test", "panel.test, 10.0.0.0/8", "[::1],127.0.0.1", "a,,b", "*.x", "x/99", "PANEL.test"} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, setting string) {
+		list, problem := parsePanelAccess(setting)
+		if list == nil {
+			if problem == "" {
+				t.Fatalf("parsePanelAccess(%q) refused without a reason", setting)
+			}
+			return
+		}
+		again, problem := parsePanelAccess(list.setting)
+		if again == nil || again.setting != list.setting {
+			t.Fatalf("parsePanelAccess(%q) saved %q, which reads as %v (%q)", setting, list.setting, again, problem)
+		}
+	})
+}
+
+// R6 D-09: an address of TURBO_HTTP_ADDR that is accepted is a host and a port from 1 to 65535, and reads the same.
+func FuzzListenAddress(f *testing.F) {
+	for _, s := range []string{"80", ":8080", "127.0.0.1:8080", "[::1]:443", "0", "65536", "a:b:c", "[::1]", "host:"} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, value string) {
+		if value == "" || strings.ContainsRune(value, 0) {
+			return
+		}
+		t.Setenv("TURBO_FUZZ_ADDR", value)
+		address, err := listenAddress("TURBO_FUZZ_ADDR", ":1")
+		if err != nil {
+			return
+		}
+		_, port, splitErr := net.SplitHostPort(address)
+		if number, convErr := strconv.Atoi(port); splitErr != nil || convErr != nil || number < 1 || number > 65535 {
+			t.Fatalf("listenAddress(%q) = %q", value, address)
+		}
+		t.Setenv("TURBO_FUZZ_ADDR", address)
+		if again, err := listenAddress("TURBO_FUZZ_ADDR", ":1"); err != nil || again != address {
+			t.Fatalf("listenAddress(%q) = %q, which reads as %q (%v)", value, address, again, err)
+		}
 	})
 }

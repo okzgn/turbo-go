@@ -57,8 +57,16 @@ func turboCGIWaitExit(cmd *exec.Cmd) {
 	for {
 		// #nosec G103 -- waitid writes a siginfo_t into info, which outlives the call
 		_, _, errno := syscall.Syscall6(syscall.SYS_WAITID, turboPidType, uintptr(cmd.Process.Pid), uintptr(unsafe.Pointer(&info[0])), turboWExited|turboWNoWait, 0, 0)
-		if errno != syscall.EINTR {
-			return // Ended, or it can't be waited for this way: release's cmd.Wait says why
+		switch errno {
+		case 0:
+			return // Ended: a zombie until release reaps it
+		case syscall.EINTR:
+		default:
+			// It can't be waited for this way (a seccomp filter without waitid, SIGCHLD ignored): taken for ended, a
+			// CGI still running had its answer cut once it went quiet, and its group was no longer killed. As
+			// outside Linux: wait until it ends, reaping it.
+			cmd.Wait()
+			return
 		}
 	}
 }

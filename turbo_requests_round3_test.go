@@ -157,7 +157,7 @@ func TestRP3_S8_LimiterLevels(t *testing.T) {
 	previousClock := monotonicNow
 	monotonicNow = func() int64 { return clock }
 	t.Cleanup(func() { monotonicNow = previousClock })
-	refused := func(ip string) bool { return perIPNotAvailable(ip, true) }
+	refused := func(ip string) bool { return perIPNotAvailable(clientOf(ip), true) }
 	for i := 1; i <= 16; i++ {
 		if refused("198.51.100." + strconv.Itoa(i)) {
 			t.Fatalf("client %d refused", i)
@@ -171,7 +171,7 @@ func TestRP3_S8_LimiterLevels(t *testing.T) {
 	if !refused("203.0.113.6") || !refused("203.0.113.7") {
 		t.Error("the sixth new client of a /24 with CII 5: expected 429")
 	}
-	if blocked, _ := ipBlocked("203.0.113.6"); blocked {
+	if blocked, _ := ipBlocked(clientOf("203.0.113.6")); blocked {
 		t.Error("a client of a shared entry would have its connections closed")
 	}
 	if refused("198.51.100.1") {
@@ -221,7 +221,7 @@ func TestRP3_O5_UnlimitedTimeoutsWarned(t *testing.T) {
 	}
 	const ip = "192.0.2.85"
 	token := newSession(t, ip)
-	if rec := apiFrom(serverHandlerFn(""), ip, token, "/admin:inside:setWT?"+url.Values{"a": {"0"}, "b": {"Admin"}}.Encode()); rec.code != 200 {
+	if rec := apiFrom(serverHandlerFn(false), ip, token, "/admin:inside:setWT?"+url.Values{"a": {"0"}, "b": {"Admin"}}.Encode()); rec.code != 200 {
 		t.Fatalf("setWT 0: %d %q", rec.code, rec.body.String())
 	}
 	if !strings.Contains(logs.String(), "without a limit") || !strings.Contains(logs.String(), "WT") {

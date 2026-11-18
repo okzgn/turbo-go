@@ -32,8 +32,9 @@
 # CGI can modify the sites, turbo.config and the certificates, and read
 # Turbo's environment (the credentials of /etc/turbo/credentials included).
 # The panel's interface, customized in turbo.dev/, is read-only for the
-# service. If a site is not trusted, give it another server, or a user of its
-# own behind a proxy.
+# service; a CGI that rewrites turbo.config could still lead "M" to another
+# directory, with a turbo.dev of its own. If a site is not trusted, give it
+# another server, or a user of its own behind a proxy.
 #
 # Hardening: what a CGI that has been taken over can do on the rest of the
 # host is limited too. It sees no other home folder than /home/server

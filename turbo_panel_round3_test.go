@@ -33,7 +33,7 @@ func TestRP3_V13_LoopbackSlash64NeverDenied(t *testing.T) {
 	tok := login(t, base)
 	future := strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)
 	for _, ip := range []string{"::2", "::7f00:1", "0:0:0:0:0:0:0:3"} {
-		if code, body, _ := post(base, "/admin:inside:addDenied?s="+ip+"&d="+future, tok); code != 400 {
+		if code, body, _ := post(base, "/admin:inside:addDenied?s="+ip+"&d="+future+"&b=Admin", tok); code != 400 || strings.Contains(body, "password") {
 			t.Errorf("addDenied %s: %d %q; expected 400 (its /64 holds ::1)", ip, code, body)
 		}
 	}
@@ -41,10 +41,10 @@ func TestRP3_V13_LoopbackSlash64NeverDenied(t *testing.T) {
 	until := time.Now().Add(time.Hour).Unix()
 	publishDeniedIPs(map[string]int64{"::2": until, "2001:db8::5": until})
 	t.Cleanup(func() { publishDeniedIPs(map[string]int64{}) })
-	if deniedUntil("::1") != 0 {
+	if deniedUntil(clientOf("::1")) != 0 {
 		t.Error("a denied ::2 denies ::1 through its /64")
 	}
-	if deniedUntil("2001:db8::6") == 0 {
+	if deniedUntil(clientOf("2001:db8::6")) == 0 {
 		t.Error("a denied 2001:db8::5 no longer denies its /64")
 	}
 }
@@ -66,7 +66,7 @@ func TestRP3_V16_RenewedTokenOnlyToAPIClients(t *testing.T) {
 		t.Error("a browser didn't get its new session in the cookie")
 	}
 	// An API client, whose session comes in the header, gets it there.
-	rec = loginFrom(serverHandlerFn(""), ip, "Turbo", "Another-password-1")
+	rec = loginFrom(serverHandlerFn(false), ip, "Turbo", "Another-password-1")
 	client := strings.TrimPrefix(rec.body.String(), "ok")
 	rec = panelFrom("POST", "/admin:inside:setP?a=Third-password-1&b=Another-password-1", ip, map[string]string{sessionHeaderName: client})
 	if rec.code != 200 || rec.header.Get(sessionHeaderName) == "" {
@@ -115,7 +115,7 @@ func loginToHost(ip string, host string, user string, password string, headers m
 		req.Header.Set(name, value)
 	}
 	rec := &responseRecorder{}
-	serverHandlerFn("")(rec, req)
+	serverHandlerFn(false)(rec, req)
 	return rec
 }
 
@@ -327,7 +327,7 @@ func TestRP3_V14_SetPasswordCostsOnePBKDF2(t *testing.T) {
 	setP := func(password, current string) *responseRecorder {
 		done := make(chan *responseRecorder, 1)
 		go func() {
-			done <- apiFrom(serverHandlerFn(""), ip, token, "/admin:inside:setP?"+url.Values{"a": {password}, "b": {current}}.Encode())
+			done <- apiFrom(serverHandlerFn(false), ip, token, "/admin:inside:setP?"+url.Values{"a": {password}, "b": {current}}.Encode())
 		}()
 		select {
 		case rec := <-done:
@@ -413,7 +413,7 @@ func TestRP3_M02_MIMEAndHeadersNeedPassword(t *testing.T) {
 			if c.password != "" {
 				values.Set(action.param, c.password)
 			}
-			rec := apiFrom(serverHandlerFn(""), ip, token, "/admin:inside:"+action.name+"?"+values.Encode())
+			rec := apiFrom(serverHandlerFn(false), ip, token, "/admin:inside:"+action.name+"?"+values.Encode())
 			if rec.code != c.code || !strings.Contains(rec.body.String(), c.body) {
 				t.Errorf("%s with the password %q: %d %q; expected %d %q", action.name, c.password, rec.code, rec.body.String(), c.code, c.body)
 			}
@@ -425,13 +425,13 @@ func TestRP3_M02_MIMEAndHeadersNeedPassword(t *testing.T) {
 	// The password is taken as sent, also with a replacement token ("-.-"); the other values still go through them.
 	token := newSession(t, ip)
 	const password = "abcd-.-efghij"
-	if rec := apiFrom(serverHandlerFn(""), ip, token, "/admin:inside:setP?"+url.Values{"a": {password}, "b": {"Admin"}}.Encode()); rec.code != 200 {
+	if rec := apiFrom(serverHandlerFn(false), ip, token, "/admin:inside:setP?"+url.Values{"a": {password}, "b": {"Admin"}}.Encode()); rec.code != 200 {
 		t.Fatalf("setP: %d %q", rec.code, rec.body.String())
 	} else {
 		token = rec.Header().Get(sessionHeaderName)
 	}
 	for _, action := range []string{"addMIME?a=xyz&b=text/plain&c=", "addHeader?a=X-Test&b=1-.-2&c=", "delMIME?a=xyz&b=", "delHeader?a=X-Test&b="} {
-		if rec := apiFrom(serverHandlerFn(""), ip, token, "/admin:inside:"+action+url.QueryEscape(password)+"&s=localhost&d="); rec.code != 200 {
+		if rec := apiFrom(serverHandlerFn(false), ip, token, "/admin:inside:"+action+url.QueryEscape(password)+"&s=localhost&d="); rec.code != 200 {
 			t.Errorf("%s with a password that has a token: %d %q; expected 200", strings.SplitN(action, "?", 2)[0], rec.code, rec.body.String())
 		}
 		if strings.HasPrefix(action, "addHeader") {

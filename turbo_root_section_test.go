@@ -38,7 +38,7 @@ func checkRootServed(t *testing.T, when string) {
 		t.Errorf("%s: GET / -> %d %q %v; expected 200 hello", when, code, body, err)
 	}
 	globalMutex.RLock()
-	certificate, https := siteSSLConfig["localhost"]["C"], siteSSLConfig["localhost"]["S"]
+	certificate, https := siteSSLConfig["localhost"].asSection()["C"], siteSSLConfig["localhost"].asSection()["S"]
 	globalMutex.RUnlock()
 	if certificate != true || https != 0 {
 		t.Errorf("%s: C = %v and S = %v; expected true (its certificate is there) and 0", when, certificate, https)
@@ -165,7 +165,7 @@ func TestRP3_RootWithoutSectionNotLookedAtUnderLock(t *testing.T) {
 		t.Errorf("looked at under the global lock: %s; expected nothing", strings.Join(underLock, ", "))
 	}
 	globalMutex.RLock()
-	certificate := siteSSLConfig["localhost"]["C"]
+	certificate := siteSSLConfig["localhost"].asSection()["C"]
 	_, index := indexFiles["localhost"]["index.html"]
 	globalMutex.RUnlock()
 	if certificate != true || !index {

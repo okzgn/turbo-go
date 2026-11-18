@@ -52,9 +52,10 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"io"
 	"os"
-	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -240,9 +241,19 @@ func run(dir, output string, nPatches int, check, update, allowDowngrade bool, l
 			return fmt.Errorf("%s doesn't keep the gofmt format after the patches", name)
 		}
 	}
+	if err := checkTypes(dir, generated); err != nil {
+		return err
+	}
+	vendored, err := vendoredVersions(goroot)
+	if err != nil {
+		return err
+	}
 
 	if check {
 		if err := checkOwn(dir); err != nil {
+			return err
+		}
+		if err := checkNotice(dir, version, vendored); err != nil {
 			return err
 		}
 		return compareWith(dir, generated, log)
@@ -267,6 +278,9 @@ func run(dir, output string, nPatches int, check, update, allowDowngrade bool, l
 	}
 	if update {
 		if err := os.WriteFile(filepath.Join(dir, "UPSTREAM"), []byte(version+"\n"), 0o644); err != nil {
+			return err
+		}
+		if err := updateNotice(dir, version, vendored); err != nil {
 			return err
 		}
 		if err := os.WriteFile(sourcesManifest, []byte(manifestOf(goSources)), 0o644); err != nil {
@@ -473,6 +487,7 @@ type sourcePackage struct {
 func generate(goroot, dir, version string, goSources map[string][]byte) (map[string]string, error) {
 	fset := token.NewFileSet()
 	imp := importer.ForCompiler(fset, "source", nil)
+	sourceImporter = imp
 	var packages []*sourcePackage
 	merged := map[string]*sourcePackage{}
 
@@ -890,7 +905,12 @@ func applyPatch(files map[string]string, text string) error {
 		i += 2
 		// A patch changes the generated files in place: never one of Turbo's own files (0.*), which don't come
 		// from the patches, and it doesn't rename them (it copied the file under another name and kept the old one).
+		// Their names have no folders (git diff --relative=customNetHttp): only the last part of a path was taken,
+		// so "x/server.go" changed "server.go".
 		for _, n := range []string{oldName, newName} {
+			if strings.ContainsAny(n, `/\`) {
+				return fmt.Errorf("%s: a patch names the files of customNetHttp without folders (git diff --relative=customNetHttp)", n)
+			}
 			if strings.HasPrefix(n, "0.") {
 				return fmt.Errorf("%s: a patch doesn't change Turbo's own files (0.*)", n)
 			}
@@ -925,9 +945,17 @@ func applyPatch(files map[string]string, text string) error {
 			}
 			i++
 			// Exactly the lines the header counts: a removed line that starts with "-- " is content, not the
-			// header of another file.
+			// header of another file. "\ No newline at end of file" says that the line before it is the last one of
+			// a file, without a line break: of the original (after a removed line), of the result (after an added
+			// one), or of both (after a context line). It was skipped, and the result kept the ending of the original.
 			var before, after []string
 			context := 0
+			var previous byte // ' ', '-' or '+': the kind of the line before
+			oldWithoutNewline, newWithoutNewline := false, false
+			noNewline := func() {
+				oldWithoutNewline = oldWithoutNewline || previous == ' ' || previous == '-'
+				newWithoutNewline = newWithoutNewline || previous == ' ' || previous == '+'
+			}
 			for len(before) < oldCount || len(after) < newCount {
 				if i >= len(lines) || (i == len(lines)-1 && lines[i] == "") {
 					return fmt.Errorf("%s: hunk %s ends before its %d and %d lines", name, header, oldCount, newCount)
@@ -936,6 +964,7 @@ func applyPatch(files map[string]string, text string) error {
 				i++
 				switch {
 				case l == `\ No newline at end of file`:
+					noNewline()
 				case l == "" || l[0] == ' ':
 					c := ""
 					if l != "" {
@@ -943,10 +972,13 @@ func applyPatch(files map[string]string, text string) error {
 					}
 					before, after = append(before, c), append(after, c)
 					context++
+					previous = ' '
 				case l[0] == '-':
 					before = append(before, l[1:])
+					previous = '-'
 				case l[0] == '+':
 					after = append(after, l[1:])
+					previous = '+'
 				default:
 					return fmt.Errorf("%s: unexpected line %q", name, l)
 				}
@@ -955,9 +987,12 @@ func applyPatch(files map[string]string, text string) error {
 				return fmt.Errorf("%s: hunk %s doesn't have the lines its header says", name, header)
 			}
 			for i < len(lines) && lines[i] == `\ No newline at end of file` {
+				noNewline()
 				i++
 			}
-			if context == 0 && len(content) > 0 { // Placed by line number alone, it would never be checked (-U0)
+			// Placed by line number alone, it would never be checked (-U0); a deletion of the whole file compares
+			// every line
+			if context == 0 && len(content) > 0 && !(newName == "" && len(before) == len(content)) {
 				return fmt.Errorf("%s: hunk %s has no context lines", name, header)
 			}
 			want := oldStart - 1 + shift
@@ -971,10 +1006,27 @@ func applyPatch(files map[string]string, text string) error {
 			if len(before) > 0 && occurrences(content, before) > 1 { // Never a guess between two places (H14)
 				return fmt.Errorf("%s: hunk %s matches in more than one place", name, header)
 			}
+			// The ending of the file: a hunk that reaches the last line of the original has to say as much about its
+			// line break as the original has, and the result ends as the hunk says.
+			atEnd := oldName == "" || len(before) > 0 && pos+len(before) == len(content)
+			if oldWithoutNewline && !(atEnd && noFinalNewline) {
+				return fmt.Errorf("%s: hunk %s says that the file ends without a line break, and it doesn't", name, header)
+			}
+			if atEnd && oldName != "" && noFinalNewline && !oldWithoutNewline {
+				return fmt.Errorf("%s: hunk %s ends the file with a line break, and it has none", name, header)
+			}
+			if atEnd {
+				noFinalNewline = newWithoutNewline
+			}
 			content = append(content[:pos], append(append([]string(nil), after...), content[pos+len(before):]...)...)
 			shift = pos - (oldStart - 1) + len(after) - len(before)
 		}
 		if newName == "" {
+			// N-10a: a deletion removes the whole file in its hunks: one that only covered part of it deleted the rest
+			// unchecked
+			if len(content) > 1 || len(content) == 1 && content[0] != "" {
+				return fmt.Errorf("%s: the patch deletes it, and its hunks don't remove all of it", name)
+			}
 			delete(files, name)
 			continue
 		}
@@ -1152,5 +1204,124 @@ func diffPath(s string) string {
 	if strings.HasPrefix(s, "a/") || strings.HasPrefix(s, "b/") {
 		s = s[2:]
 	}
-	return path.Base(s)
+	return s
+}
+
+// sourceImporter is the importer that read Go's packages from their sources to merge them (generate): the type
+// check of the result takes them from it, without reading them again.
+var sourceImporter types.Importer
+
+// checkTypes type-checks customNetHttp as the patches leave it, with Turbo's own files, for the system the tool runs
+// on: format.Source only checks the syntax, so a patch that broke a type was only found when building.
+func checkTypes(dir string, generated map[string]string) error {
+	files := map[string]string{}
+	for name, content := range generated {
+		files[name] = content
+	}
+	own, err := readOwn(dir)
+	if err != nil {
+		return err
+	}
+	for name, content := range own {
+		files[name] = normalize(string(content))
+	}
+	context := build.Default
+	context.OpenFile = func(p string) (io.ReadCloser, error) { // The files as they are generated, not as they are on disk
+		if content, ok := files[filepath.Base(p)]; ok {
+			return io.NopCloser(strings.NewReader(content)), nil
+		}
+		return nil, os.ErrNotExist
+	}
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	fset := token.NewFileSet()
+	var parsed []*ast.File
+	for _, name := range names {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		if match, err := context.MatchFile(dir, name); err != nil || !match {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, files[name], 0)
+		if err != nil {
+			return fmt.Errorf("%s: %v", name, err)
+		}
+		parsed = append(parsed, f)
+	}
+	imp := sourceImporter
+	if imp == nil {
+		imp = importer.ForCompiler(fset, "source", nil)
+	}
+	conf := types.Config{Importer: imp}
+	if _, err := conf.Check("customNetHttp", fset, parsed, nil); err != nil {
+		return fmt.Errorf("customNetHttp doesn't type-check after the patches: %v", err)
+	}
+	return nil
+}
+
+// vendoredVersions are the versions of golang.org/x/net and golang.org/x/text that the Go release in goroot vendors
+// (src/vendor/modules.txt), by module path.
+func vendoredVersions(goroot string) (map[string]string, error) {
+	data, err := os.ReadFile(filepath.Join(goroot, "src", "vendor", "modules.txt"))
+	if err != nil {
+		return nil, err
+	}
+	versions := map[string]string{}
+	for _, line := range strings.Split(normalize(string(data)), "\n") {
+		if fields := strings.Fields(line); len(fields) == 3 && fields[0] == "#" && (fields[1] == "golang.org/x/net" || fields[1] == "golang.org/x/text") {
+			versions[fields[1]] = fields[2]
+		}
+	}
+	if versions["golang.org/x/net"] == "" || versions["golang.org/x/text"] == "" {
+		return nil, fmt.Errorf("%s doesn't name the versions of golang.org/x/net and golang.org/x/text", filepath.Join(goroot, "src", "vendor", "modules.txt"))
+	}
+	return versions, nil
+}
+
+// noticeVersions finds in NOTICE the Go release and the versions of golang.org/x/net and golang.org/x/text that it
+// names, written across lines.
+var noticeVersions = regexp.MustCompile(`\((go[0-9][^:\s]*):\s+golang\.org/x/net\s+(\S+)\s+and\s+golang\.org/x/text\s+(\S+),`)
+
+// checkNotice reports whether NOTICE names the Go release of UPSTREAM and the versions of golang.org/x/net and
+// golang.org/x/text that it vendors. They were written by hand, and nothing checked them.
+func checkNotice(dir string, version string, vendored map[string]string) error {
+	notice, err := os.ReadFile(filepath.Join(dir, "NOTICE"))
+	if err != nil {
+		return err
+	}
+	found := noticeVersions.FindSubmatch(notice)
+	if found == nil {
+		return errors.New("NOTICE doesn't name the Go release and the versions of golang.org/x/net and golang.org/x/text")
+	}
+	if want := []string{version, vendored["golang.org/x/net"], vendored["golang.org/x/text"]}; string(found[1]) != want[0] || string(found[2]) != want[1] || string(found[3]) != want[2] {
+		return fmt.Errorf("NOTICE names %s, golang.org/x/net %s and golang.org/x/text %s; it must name %s, %s and %s (-update writes them)", found[1], found[2], found[3], want[0], want[1], want[2])
+	}
+	return nil
+}
+
+// updateNotice writes in NOTICE the Go release and the versions of golang.org/x/net and golang.org/x/text that it
+// vendors, where it names them, keeping its lines.
+func updateNotice(dir string, version string, vendored map[string]string) error {
+	path := filepath.Join(dir, "NOTICE")
+	notice, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	at := noticeVersions.FindSubmatchIndex(notice)
+	if at == nil {
+		return errors.New("NOTICE doesn't name the Go release and the versions of golang.org/x/net and golang.org/x/text")
+	}
+	var updated []byte
+	updated = append(updated, notice[:at[2]]...)
+	updated = append(updated, version...)
+	updated = append(updated, notice[at[3]:at[4]]...)
+	updated = append(updated, vendored["golang.org/x/net"]...)
+	updated = append(updated, notice[at[5]:at[6]]...)
+	updated = append(updated, vendored["golang.org/x/text"]...)
+	updated = append(updated, notice[at[7]:]...)
+	return os.WriteFile(path, updated, 0o644)
 }

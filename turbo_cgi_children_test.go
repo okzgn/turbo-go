@@ -86,7 +86,7 @@ func TestN12_CGIClientGoneKillsChild(t *testing.T) {
 	defer cancel()
 	req, _ := http.NewRequestWithContext(ctx, "GET", base+"/x.cgi?"+url.Values{"child": {"3000"}, "childmark": {mark}, "sleep": {"3000"}, "mark": {parentMark}}.Encode(), nil)
 	req.Host = "localhost"
-	if res, err := http.DefaultClient.Do(req); err == nil {
+	if res, err := (&http.Client{Timeout: clientTimeout()}).Do(req); err == nil {
 		res.Body.Close()
 	}
 	if markAppears(mark, 5*time.Second) || markAppears(parentMark, 0) {

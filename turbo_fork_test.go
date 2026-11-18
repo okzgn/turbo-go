@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -236,4 +237,25 @@ func TestT04_HTTP2IdleTimeoutEnabledLater(t *testing.T) {
 	fetch("third request")
 	time.Sleep(time.Second) // The timer created on the fly closes the idle connection
 	fetch("after the idle close")
+}
+
+// R6 R-9: Turbo doesn't link Go's own net/http next to customNetHttp: its limits and its patches would be missing from
+// whatever used it, and nothing said so. The tests do use it, as clients; this looks at the program's packages.
+func TestR6_NoRealNetHTTP(t *testing.T) {
+	if testing.Short() {
+		t.Skip("runs go list")
+	}
+	listed, err := exec.Command("go", "list", "-deps", ".").Output()
+	if err != nil {
+		t.Fatalf("go list -deps: %v", err)
+	}
+	packages := strings.Fields(string(listed))
+	if len(packages) < 50 {
+		t.Fatalf("go list -deps listed %d packages: not the program's", len(packages))
+	}
+	for _, name := range packages {
+		if name == "net/http" || name == "net/http/cgi" {
+			t.Errorf("the program links Go's own %s, besides customNetHttp", name)
+		}
+	}
 }

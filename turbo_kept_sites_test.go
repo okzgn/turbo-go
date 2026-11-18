@@ -245,13 +245,14 @@ func TestRP2_V12_DelSiteWaitsForReload(t *testing.T) {
 	updateSettings(true)
 	scanned, release := make(chan struct{}), make(chan struct{})
 	var first atomic.Bool
+	previousHook := beforeSitesScan
 	beforeSitesScan = func() {
 		if first.CompareAndSwap(false, true) {
 			close(scanned)
 			<-release
 		}
 	}
-	t.Cleanup(func() { beforeSitesScan = func() {} })
+	t.Cleanup(func() { beforeSitesScan = previousHook })
 	reloaded := make(chan struct{})
 	go func() { updateSettings(true); close(reloaded) }()
 	<-scanned // The reload has seen other.test on the disk

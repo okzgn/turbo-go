@@ -30,7 +30,7 @@ func (w *blockingWriter) Write(b []byte) (int, error) {
 // rest of the server waiting behind a pending Lock.
 func TestB3_PanelWritesWithoutLock(t *testing.T) {
 	initForTest(t)
-	handler := serverHandlerFn("")
+	handler := serverHandlerFn(false)
 	token := newSession(t, "192.0.2.10")
 	for _, path := range []string{"/admin:inside:sites", "/admin:inside:subdomains?s=localhost", "/admin:inside:subdomainData?s=localhost&d="} {
 		req := newPanelRequest(path, "192.0.2.10:40000")

@@ -41,7 +41,7 @@ func TestRP3_R509_ReReadingPlainPasswordKeepsSessions(t *testing.T) {
 	loadConfig(t, dir, config)
 	var hash string
 	withReadLock(func() { hash = panelPasswordHash.Get() })
-	rec := loginFrom(serverHandlerFn(""), "192.0.2.60", "Operator", "plain-password-1")
+	rec := loginFrom(serverHandlerFn(false), "192.0.2.60", "Operator", "plain-password-1")
 	if rec.code != 200 {
 		t.Fatalf("login with the password of the file: %d %q", rec.code, rec.body.String())
 	}
@@ -125,7 +125,7 @@ func TestRP3_R509_EmailWithPlus(t *testing.T) {
 	email := func() interface{} {
 		globalMutex.RLock()
 		defer globalMutex.RUnlock()
-		return siteSSLConfig["localhost"]["E"]
+		return siteSSLConfig["localhost"].asSection()["E"]
 	}
 	if got := email(); got != "admin+certs@example.com" {
 		t.Errorf("E written with +: %q; expected admin+certs@example.com", got)

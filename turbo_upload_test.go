@@ -117,11 +117,12 @@ func TestN24_HardUploadSiteDeletedMeanwhile(t *testing.T) {
 	dir := initForTest(t)
 	base := startServer(t)
 	tok := login(t, base)
+	previousHook := beforeUploadSwap
 	beforeUploadSwap = func() {
 		os.RemoveAll(dir + "localhost/")
 		deleteSite("localhost", "")
 	}
-	t.Cleanup(func() { beforeUploadSwap = func() {} })
+	t.Cleanup(func() { beforeUploadSwap = previousHook })
 	code, body := hardUploadFiles(t, base, tok, [][2]string{{"site/index.html", "new"}})
 	if code == 200 {
 		t.Errorf("upload to a deleted site: %d %q", code, body)
@@ -365,8 +366,9 @@ func TestN93_SiteBackBeforeDeactivationStays(t *testing.T) {
 	if err := os.Rename(dir+"localhost/@", dir+"localhost/@.away"); err != nil {
 		t.Fatal(err)
 	}
+	previousHook := beforeMissingSitesDeleted
 	beforeMissingSitesDeleted = func() { os.Rename(dir+"localhost/@.away", dir+"localhost/@") }
-	t.Cleanup(func() { beforeMissingSitesDeleted = func() {} })
+	t.Cleanup(func() { beforeMissingSitesDeleted = previousHook })
 	checkSites()
 	globalMutex.RLock()
 	exists := siteExists("localhost", "")

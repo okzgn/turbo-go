@@ -22,12 +22,12 @@ func TestN03_SaveDoesNotReload(t *testing.T) {
 	tok := login(t, base)
 	steps := []string{
 		"/admin:inside:cfgS?a=1&s=localhost&d=",
-		"/admin:inside:addDenied?s=203.0.113.9&d=" + strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10),
+		"/admin:inside:addDenied?s=203.0.113.9&d=" + strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10) + "&b=Admin",
 		"/admin:inside:setC?a=&b=Admin",
 		"/admin:inside:setP?a=NewPassword1&b=Admin",
 		"/admin:inside:setPA?a=127.0.0.0/8&b=NewPassword1",
 		"/admin:inside:setCII?a=50&b=NewPassword1",
-		"/admin:inside:cfgS?a=0&s=localhost&d=",
+		"/admin:inside:cfgS?a=0&s=localhost&d=&b=NewPassword1",
 		"/admin:inside:delDenied?s=203.0.113.9",
 	}
 	for _, step := range steps {

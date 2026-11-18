@@ -40,7 +40,6 @@ import (
 	"os/exec"
 	pathpkg "path"
 	"regexp"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -56,16 +55,49 @@ import (
 // the same key in the limiter, the denied IPs and the sessions however its address is written. Anything
 // else is returned without the port.
 func ipAddr(address string) string {
-	if addrPort, err := netip.ParseAddrPort(address); err == nil {
-		return addrPort.Addr().Unmap().WithZone("").String()
-	}
-	if addr, err := netip.ParseAddr(strings.TrimSuffix(strings.TrimPrefix(address, "["), "]")); err == nil {
-		return addr.Unmap().WithZone("").String()
+	if ip, isIP := parsedIP(address); isIP {
+		return ip.String()
 	}
 	if hostName, _, err := net.SplitHostPort(address); err == nil {
 		return hostName
 	}
 	return address
+}
+
+// parsedIP reads the IP of a "host:port" address, or of an IP alone: an IPv4 also when it comes inside IPv6, and
+// without zone.
+func parsedIP(address string) (netip.Addr, bool) {
+	if addrPort, err := netip.ParseAddrPort(address); err == nil {
+		return addrPort.Addr().Unmap().WithZone(""), true
+	}
+	if addr, err := netip.ParseAddr(strings.TrimSuffix(strings.TrimPrefix(address, "["), "]")); err == nil {
+		return addr.Unmap().WithZone(""), true
+	}
+	return netip.Addr{}, false
+}
+
+// clientAddress is the client of a request as its limits know it: its IP, as ipAddr gives it, and its key in the
+// per-IP limiter (limiterKey).
+type clientAddress struct {
+	ip  string
+	key string
+}
+
+// clientOf returns the client of a "host:port" address, or of an IP alone: ipAddr of it and limiterKey of that, with
+// the address read once. Each request asks for both.
+func clientOf(address string) clientAddress {
+	parsed, isIP := parsedIP(address)
+	if !isIP {
+		ip := ipAddr(address) // A host, or anything else: no real connection has one
+		return clientAddress{ip, limiterKey(ip)}
+	}
+	ip := parsed.String()
+	if parsed.Is4() {
+		return clientAddress{ip, ip}
+	}
+	prefix, _ := parsed.Prefix(64)
+	var text [48]byte // More than the longest /64 takes
+	return clientAddress{ip, string(prefix.AppendTo(text[:0]))}
 }
 
 func cutAt(input string, delimiter byte) string {
@@ -133,7 +165,8 @@ func requestHostName(hostHeader string) string {
 // brackets and in its canonical form, and ":" with the port when there is one (an empty port, which RFC 3986 allows,
 // is dropped). It reports false for what isn't a host: brackets that don't hold an IPv6 address at the start, or
 // text after "]" other than ":port"; an IPv6 address with a zone; more than one ":" outside brackets; a port that
-// isn't 1 to 5 digits; no name; a name that, without its final dot, still ends in ".". It served some of those as
+// isn't 1 to 5 digits, or is above 65535; no name; a name that, without its final dot, still ends in ".". It served
+// some of those as
 // another host (the name before a "]"), and a zone carried any text into the HTTP_HOST and SERVER_NAME of a CGI of
 // the site "*". An empty Host (HTTP/1.0) is left as it is.
 func canonicalHost(hostHeader string) (string, bool) {
@@ -173,6 +206,9 @@ func canonicalHost(hostHeader string) (string, bool) {
 		return name, true
 	}
 	if len(port) > 5 || !onlyDigits(port) { // Another ":" falls here too
+		return "", false
+	}
+	if number, _ := strconv.Atoi(port); number > 65535 { // No port has it: "localhost:99999" was served
 		return "", false
 	}
 	return name + ":" + port, true
@@ -340,7 +376,8 @@ func extChars(extension string) bool {
 	if extension == "" { // "." alone isn't an extension
 		return false
 	}
-	if extension[0] == '-' || extension[len(extension)-1] == '.' || extension[len(extension)-1] == '-' || strings.Contains(extension, "..") || strings.Contains(extension, "--") {
+	// A dot inside ("blade.php", "tar.gz") matches no file: the extension of a name is what follows its last dot (ext)
+	if extension[0] == '-' || extension[len(extension)-1] == '-' || strings.IndexByte(extension, '.') != -1 || strings.Contains(extension, "--") {
 		return false
 	}
 	for i := 0; i < len(extension); i++ {
@@ -473,7 +510,7 @@ func cleanRequestPath(raw string) (string, bool) {
 		return "", false
 	}
 	for _, segment := range strings.Split(decoded[1:], "/") {
-		if segment == ".." || !pathSegmentAllowed(segment, runtime.GOOS == "windows") {
+		if segment == ".." || !pathSegmentAllowed(segment, windowsNamesApply()) {
 			return "", false
 		}
 	}
@@ -826,16 +863,25 @@ type panelCertificateLook struct {
 // lookAtPanelCertificate looks at the panel's certificate files, and loads them unless their stamp is
 // knownStamp. It doesn't need the global lock.
 func lookAtPanelCertificate(baseDir string, knownStamp string) panelCertificateLook {
+	return lookAtPanelCertificateWith(baseDir, knownStamp, siteDirStat, func(dir string) (*tls.Certificate, error) {
+		cert, err := certificatePairLoad(dir+certFileName, dir+keyFileName)
+		return &cert, err
+	})
+}
+
+// lookAtPanelCertificateWith is lookAtPanelCertificate with stat and load: diskStat and diskCertificate, with the
+// global lock, take what the look of its holder read before taking it.
+func lookAtPanelCertificateWith(baseDir string, knownStamp string, stat func(string) (os.FileInfo, error), load func(string) (*tls.Certificate, error)) panelCertificateLook {
 	dir := baseDir + panelCertDirName + "/"
 	var look panelCertificateLook
 	for _, name := range []string{certFileName, keyFileName} {
-		if info, err := siteDirStat(dir + name); err == nil {
+		if info, err := stat(dir + name); err == nil {
 			look.stamp += strconv.FormatInt(info.ModTime().UnixNano(), 10) + "/" + strconv.FormatInt(info.Size(), 10) + ";"
 		}
 	}
 	if look.stamp != knownStamp && look.stamp != "" {
-		cert, err := tls.LoadX509KeyPair(dir+certFileName, dir+keyFileName)
-		look.loaded, look.cert, look.err = true, &cert, err
+		look.cert, look.err = load(dir)
+		look.loaded = true
 	}
 	return look
 }
@@ -857,15 +903,25 @@ func applyPanelCertificate(baseDir string, look panelCertificateLook) {
 	if stamp != "" && !look.loaded { // The stamp in use changed after the look: read them now
 		look = lookAtPanelCertificate(baseDir, "")
 	}
+	if stamp != "" && look.err != nil {
+		// A pair that can't be loaded (a renewal half copied, a key that can't be read yet) changes nothing: the
+		// certificate in use, if any, stays, as a site's does (it was dropped, and the panel left without HTTPS), and
+		// the files are read again at every look until they can be loaded (unloadableStampMark). Warned once.
+		if unloadable := unloadableStampMark + stamp; panelCertificateStamp != unloadable {
+			panelCertificateStamp = unloadable
+			if panelCertificate != nil {
+				slog.Warn("The panel's certificate files changed and can't be loaded: the certificate in use stays", "folder", dir, "error", look.err)
+			} else {
+				slog.Warn("Panel certificate invalid or incomplete: not used", "folder", dir, "error", look.err)
+			}
+		}
+		return
+	}
 	panelCertificateStamp = stamp
 	var cert *tls.Certificate
 	if stamp != "" {
-		if look.err != nil {
-			slog.Warn("Panel certificate invalid or incomplete: not used", "folder", dir, "error", look.err)
-		} else {
-			cert = look.cert
-			slog.Info("Panel certificate in use", "names", strings.Join(certificateNames(cert), ","))
-		}
+		cert = look.cert
+		slog.Info("Panel certificate in use", "names", strings.Join(certificateNames(cert), ","))
 	} else if panelCertificate != nil {
 		slog.Info("Panel certificate removed", "folder", dir)
 	}
@@ -939,7 +995,7 @@ func loadPendingCertificates() {
 		}
 	})
 	for siteKey, siteDir := range pending {
-		cert, err := tls.LoadX509KeyPair(siteDir+certFileName, siteDir+keyFileName)
+		cert, err := certificatePairLoad(siteDir+certFileName, siteDir+keyFileName)
 		if err != nil {
 			continue
 		}
@@ -959,6 +1015,10 @@ func loadPendingCertificates() {
 // siteCertificateStamps are the dates and sizes of the certificate files of each site whose certificate is in use,
 // when refreshSiteCertificates last looked at them (none until it does, after each load). Guarded by globalMutex.
 var siteCertificateStamps = make(map[string]string)
+
+// unloadableStampMark starts the stamp kept for certificate files that couldn't be loaded: it is never the stamp of
+// the files themselves, so the next look reads them again.
+const unloadableStampMark = "unloadable:"
 
 // certificateFilesStamp is the dates and sizes of the certificate files (fullchain.pem and privkey.pem) of a folder,
 // "" without them.
@@ -996,16 +1056,22 @@ func refreshSiteCertificates() {
 		if stamp == site.stamp || stamp == "" { // Without its files, the one in use stays
 			continue
 		}
-		cert, err := tls.LoadX509KeyPair(site.folder+certFileName, site.folder+keyFileName)
+		cert, err := certificatePairLoad(site.folder+certFileName, site.folder+keyFileName)
 		withGlobalLock(func() {
 			if siteCertificates[siteKey] != site.cert || siteCertificateStamps[siteKey] != site.stamp || !httpsEnabled(siteKey) {
 				return // It changed meanwhile: the next look sees it
 			}
 			switch {
 			case err != nil:
-				if site.stamp != "" {
+				// Not kept as the stamp of files that were read: they are read again at every look until they can be
+				// loaded, as what makes them readable (the owner or the permissions of a key copied by a renewal
+				// hook) changes neither their date nor their size. Warned once for each state of the files.
+				unloadable := unloadableStampMark + stamp
+				if site.stamp != "" && site.stamp != unloadable {
 					slog.Warn("The certificate files of a site changed and can't be loaded: the certificate in use stays", "site", siteKey, "error", err)
 				}
+				siteCertificateStamps[siteKey] = unloadable
+				return
 			case !sameCertificate(&cert, site.cert): // site.stamp "" is the first look after a load: the files may be newer
 				setSiteCertificate(siteKey, &cert)
 				slog.Info("The certificate of a site changed on disk: the new one is in use", "site", siteKey, "names", strings.Join(certificateNames(&cert), ","))
@@ -1022,6 +1088,18 @@ func refreshSiteCertificates() {
 type diskLook struct {
 	stats        map[string]lookedStat
 	certificates map[string]lookedCertificate // By site folder
+	made         map[string]error             // Folders made before taking the lock (makeDir)
+	expiries     map[string]lookedExpiry      // Expiry dates of certificate files, read before taking the lock
+	// Files that the lock's holder decided to delete: they are removed once the lock is released (removeDeferred). If
+	// one can't be, undo puts back, with the lock, what the holder changed, and failure is the answer.
+	removals []string
+	undo     func()
+	failure  string
+}
+
+type lookedExpiry struct {
+	expiry time.Time
+	err    error
 }
 
 type lookedStat struct {
@@ -1038,7 +1116,50 @@ type lookedCertificate struct {
 var lookedDisk *diskLook
 
 func newDiskLook() *diskLook {
-	return &diskLook{stats: map[string]lookedStat{}, certificates: map[string]lookedCertificate{}}
+	return &diskLook{stats: map[string]lookedStat{}, certificates: map[string]lookedCertificate{}, made: map[string]error{}, expiries: map[string]lookedExpiry{}}
+}
+
+// missing reports whether a path looked at isn't a folder (it doesn't exist, or can't be looked at).
+func (look *diskLook) missing(path string) bool {
+	looked, done := look.stats[path]
+	return !done || looked.err != nil || !looked.info.IsDir()
+}
+
+// makeDir makes a folder, and its parents, before taking the lock. Callers don't hold the global lock.
+func (look *diskLook) makeDir(path string, mode os.FileMode) {
+	if _, done := look.made[path]; !done {
+		look.made[path] = siteDirMake(path, mode)
+	}
+}
+
+// expiry reads the expiry date of a certificate file before taking the lock. Callers don't hold the global lock.
+func (look *diskLook) expiry(path string) {
+	if _, done := look.expiries[path]; !done {
+		expiry, err := certificateExpiry(path)
+		look.expiries[path] = lookedExpiry{expiry, err}
+	}
+}
+
+// removeDeferred removes the files that the lock's holder decided to delete, once the lock is released, and reports
+// the answer if one of them can't be removed (with undo already run). One that is already gone counts as removed.
+// lockedCheckLooking and withDiskLook call it when they release the lock: no caller of theirs has to remember.
+// Callers don't hold the global lock.
+func (look *diskLook) removeDeferred() string {
+	if look == nil {
+		return ""
+	}
+	removals := look.removals
+	look.removals = nil
+	for _, path := range removals {
+		if err := siteFileRemove(path); err != nil && !os.IsNotExist(err) {
+			slog.Error("A certificate file can't be deleted: nothing changes", "file", path, "error", err)
+			if look.undo != nil {
+				withGlobalLock(look.undo)
+			}
+			return look.failure
+		}
+	}
+	return ""
 }
 
 // stat looks at a path. Callers don't hold the global lock.
@@ -1052,7 +1173,7 @@ func (look *diskLook) stat(path string) {
 // certificate looks at a site folder's certificate files and loads them. Callers don't hold the global lock.
 func (look *diskLook) certificate(siteDir string) {
 	if _, done := look.certificates[siteDir]; !done {
-		cert, err := tls.LoadX509KeyPair(siteDir+certFileName, siteDir+keyFileName)
+		cert, err := certificatePairLoad(siteDir+certFileName, siteDir+keyFileName)
 		look.certificates[siteDir] = lookedCertificate{&cert, err}
 	}
 }
@@ -1109,17 +1230,64 @@ func diskCertificate(siteDir string) (*tls.Certificate, error) {
 			return looked.cert, looked.err
 		}
 	}
-	cert, err := tls.LoadX509KeyPair(siteDir+certFileName, siteDir+keyFileName)
+	cert, err := certificatePairLoad(siteDir+certFileName, siteDir+keyFileName)
 	return &cert, err
 }
 
-// withDiskLook runs f holding the global lock, with look for the validators it calls.
+// diskMakeDir makes a folder, and its parents, or takes what the look of the lock's holder did. Callers hold the
+// global lock.
+func diskMakeDir(path string, mode os.FileMode) error {
+	if lookedDisk != nil {
+		if err, done := lookedDisk.made[path]; done {
+			return err
+		}
+		// There already, as the look saw: making it again would look at the disk with the lock held
+		if looked, done := lookedDisk.stats[path]; done && looked.err == nil && looked.info.IsDir() {
+			return nil
+		}
+	}
+	return siteDirMake(path, mode)
+}
+
+// diskCertificateExpiry reads the expiry date of a certificate file, or takes it from the look of the lock's holder.
+// Callers hold the global lock.
+func diskCertificateExpiry(path string) (time.Time, error) {
+	if lookedDisk != nil {
+		if looked, done := lookedDisk.expiries[path]; done {
+			return looked.expiry, looked.err
+		}
+	}
+	return certificateExpiry(path)
+}
+
+// removeFiles deletes files for the holder of the global lock: with a look, once the lock is released (by
+// lockedCheckLooking or withDiskLook, with removeDeferred), and if one can't be removed, undo puts back what the
+// holder changed, and failure is the answer;
+// without one, at once, and the error is returned before anything changes. Files already gone count as removed.
+// Callers hold the global lock.
+func removeFiles(failure string, undo func(), paths ...string) error {
+	if lookedDisk != nil {
+		lookedDisk.removals = append(lookedDisk.removals, paths...)
+		lookedDisk.failure, lookedDisk.undo = failure, undo
+		return nil
+	}
+	for _, path := range paths {
+		if err := siteFileRemove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+// withDiskLook runs f holding the global lock, with look for the validators it calls. What they decided to delete,
+// if anything (none of its callers deletes today), is removed once the lock is released.
 func withDiskLook(look *diskLook, f func()) {
 	withGlobalLock(func() {
 		lookedDisk = look
 		defer func() { lookedDisk = nil }()
 		f()
 	})
+	look.removeDeferred()
 }
 
 // siteFolder is the folder of a site or subdomain in the sites directory, as the validators of C and S name it.
@@ -1155,7 +1323,7 @@ func renewCertificates() {
 					siteDir += changeWildcards(subdomain) + "/"
 					lineageDir = certificatesDir + changeWildcards(domain) + "/archive/" + siteKey
 				}
-				if email, _ := siteSSLConfig[siteKey]["E"].(string); email != "" {
+				if settingsOf(siteKey).email != "" {
 					candidates = append(candidates, renewal{siteKey, certificatesDir + changeWildcards(siteKey), siteDir, lineageDir}) // certDir as in the "C" validator
 				}
 			}
@@ -1195,7 +1363,7 @@ func dirExists(path string) bool {
 
 // certificateExpiry returns when the first certificate of a PEM file expires.
 func certificateExpiry(path string) (time.Time, error) {
-	data, err := os.ReadFile(path) // #nosec G304 -- certificate file of a site, path under the sites directory chosen by the administrator (TURBO_DIR or M)
+	data, err := certificateFileRead(path) // #nosec G304 -- certificate file of a site, path under the sites directory chosen by the administrator (TURBO_DIR or M)
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -1218,8 +1386,8 @@ func servingSite(hostname string) string {
 	if subdomain != "" {
 		fullHost = subdomain + "." + domain
 	}
-	if target, isAlias := domainAliases[fullHost]; isAlias {
-		valid, wildcardDomain, subdomain, domain = host(target)
+	if target, isAlias := domainAliases[fullHost]; isAlias { // A site key ("*.example.com"), not a Host: as resolveRequest takes it
+		valid, wildcardDomain, subdomain, domain = hostExist(target)
 	}
 	if !valid {
 		return ""
@@ -1249,8 +1417,11 @@ func hostWithoutPort(request *customNetHttp.Request) string {
 // certificate covers that host. An alias without a certificate keeps being served by HTTP under its own name.
 // Callers hold the global read lock.
 func httpsRedirect(siteKey string, responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request) bool {
+	if !httpsEnabled(siteKey) || !httpsListening.Load() { // Never to an HTTPS that isn't open
+		return false // Before reading the Host: most sites served by HTTP have no HTTPS to go to
+	}
 	hostname := hostWithoutPort(request)
-	if !httpsEnabled(siteKey) || certificateFor(hostname) == nil || !httpsListening.Load() { // Never to an HTTPS that isn't open
+	if certificateFor(hostname) == nil {
 		return false
 	}
 	customNetHttp.Redirect(responseWriter, request, "https://"+hostname+httpsPortSuffix()+request.RequestURI, 301)
@@ -1341,22 +1512,37 @@ func panelCertificateAction(action string, email string, adapter string, setAdap
 	}
 	panelDir := sitesDir.Get() + panelCertDirName + "/"
 	if action == "0" {
-		removedCert := os.Remove(panelDir+certFileName) == nil
-		removedKey := os.Remove(panelDir+keyFileName) == nil
+		_, certErr := diskStat(panelDir + certFileName)
+		_, keyErr := diskStat(panelDir + keyFileName)
+		if certErr != nil && keyErr != nil {
+			panelCertStatus = false
+			panelCertificate, panelCertificateStamp = nil, ""
+			publishCertificates()
+			return false, "No panel certificate"
+		}
+		// Removed once the lock is released (removeFiles). One that couldn't be was counted as removed if the other
+		// was, and the certificate was taken out of use anyway: now it stays, and the answer says so.
+		previous, previousStamp, previousStatus := panelCertificate, panelCertificateStamp, panelCertStatus
+		undo := func() {
+			if panelCertificate == nil {
+				panelCertificate, panelCertificateStamp, panelCertStatus = previous, previousStamp, previousStatus
+				publishCertificates()
+			}
+		}
+		if removeFiles("Error deleting the panel certificate files", undo, panelDir+certFileName, panelDir+keyFileName) != nil {
+			return false, "Error deleting the panel certificate files"
+		}
 		panelCertStatus = false
 		panelCertificate, panelCertificateStamp = nil, ""
 		publishCertificates()
-		if !removedCert && !removedKey {
-			return false, "No panel certificate"
-		}
 		return true, "Panel certificate deleted"
 	}
 	if currentCertDomain == panelCertDirName {
-		return false, "{\"message\":\"Please wait, certificate being processed\",\"status\":\"WAIT\"}"
+		return false, certificateWait("Please wait, certificate being processed")
 	}
 	hosts := panelOwnHosts()
 	if panelCertificate != nil && panelCertificateCovers(hosts) {
-		if expiry, err := certificateExpiry(panelDir + certFileName); err == nil && time.Until(expiry) > certificateRenewBefore {
+		if expiry, err := diskCertificateExpiry(panelDir + certFileName); err == nil && time.Until(expiry) > certificateRenewBefore {
 			panelCertStatus = true
 			return true, "Panel certificate active"
 		}
@@ -1372,15 +1558,15 @@ func panelCertificateAction(action string, email string, adapter string, setAdap
 		return false, "E-mail required to create the certificate"
 	}
 	certificatesDir := sitesDir.Get() + putSlash(certificatesDirName)
-	if os.MkdirAll(certificatesDir, 0700) != nil || os.MkdirAll(panelDir+acmeWebrootDirName, 0700) != nil {
+	if diskMakeDir(certificatesDir, 0700) != nil || diskMakeDir(panelDir+acmeWebrootDirName, 0700) != nil {
 		return false, "Error creating the certificates directory"
 	}
 	panelCertStatus = false
 	obtainPanelCertificate(certificatesDir+panelCertDirName, panelDir)
 	if currentCertDomain != panelCertDirName {
-		return false, "{\"message\":\"Please wait, certificate busy on " + currentCertDomain + "\",\"status\":\"WAIT\"}"
+		return false, certificateWait("Please wait, certificate busy on " + currentCertDomain)
 	}
-	return false, "{\"message\":\"Please wait, certificate in process\",\"status\":\"WAIT\"}"
+	return false, certificateWait("Please wait, certificate in process")
 }
 
 // panelCertificateCovers reports whether the panel's certificate covers every one of hosts. Callers hold the
@@ -1449,16 +1635,15 @@ type certbotJob struct {
 // obtainCertificate starts a Certbot attempt for the site domain. Callers hold the global lock.
 func obtainCertificate(domain string, certDir string, siteDir string) {
 	startCertbot(domain, func() (certbotJob, bool) {
-		if _, siteFound := siteSSLConfig[domain]; !siteFound {
+		settings, siteFound := siteSSLConfig[domain]
+		if !siteFound {
 			slog.Warn("Certificate issuance interrupted: the site was deleted", "site", domain)
 			return certbotJob{}, false
 		}
-		adapter, _ := siteSSLConfig[domain]["A"].(string)
-		email, _ := siteSSLConfig[domain]["E"].(string)
-		return certbotJob{names: []string{domain}, email: email, adapter: adapter, webroot: siteDir + publicDirName, certDir: certDir, destDir: siteDir}, true
+		return certbotJob{names: []string{domain}, email: settings.email, adapter: settings.adapter, webroot: siteDir + publicDirName, certDir: certDir, destDir: siteDir}, true
 	}, func(status interface{}) {
-		if _, siteFound := siteSSLConfig[domain]; siteFound {
-			siteSSLConfig[domain]["C"] = status
+		if settings, siteFound := siteSSLConfig[domain]; siteFound {
+			settings.certificate = certificateStateOf(status)
 		}
 		if status != true {
 			return
@@ -1487,8 +1672,8 @@ func obtainPanelCertificate(certDir string, panelDir string) {
 		if status != true {
 			return
 		}
-		panelCertificateStamp = "" // Read the new files now
-		loadPanelCertificate(sitesDir.Get())
+		panelCertificateStamp = "" // The new files: read before taking the lock (startCertbot)
+		applyPanelCertificate(sitesDir.Get(), lookAtPanelCertificateWith(sitesDir.Get(), "", diskStat, diskCertificate))
 		slog.Info("Panel certificate issued", "hosts", strings.Join(panelOwnHosts(), ","))
 	})
 }
@@ -1501,8 +1686,6 @@ func startCertbot(key string, prepare func() (certbotJob, bool), finish func(sta
 	if currentCertDomain == "" {
 		currentCertDomain = key
 		go func() {
-			timeoutCtx, cancelFn := context.WithTimeout(context.Background(), 3*time.Minute)
-			defer cancelFn()
 			var job certbotJob
 			var wanted bool
 			withGlobalLock(func() {
@@ -1513,8 +1696,15 @@ func startCertbot(key string, prepare func() (certbotJob, bool), finish func(sta
 			if !wanted {
 				return
 			}
+			timeoutCtx, cancelFn := context.WithTimeout(context.Background(), certbotTimeLimitFor(job))
+			defer cancelFn()
 			status := runCertbot(timeoutCtx, job)
-			withGlobalLock(func() {
+			var issued *diskLook // The files just installed, read before taking the lock that puts them in use
+			if status == true {
+				issued = newDiskLook()
+				issued.siteFiles(job.destDir, true)
+			}
+			withDiskLook(issued, func() {
 				currentCertDomain = ""
 				finish(status)
 			})
@@ -1531,6 +1721,22 @@ func startCertbot(key string, prepare func() (certbotJob, bool), finish func(sta
 			startCertbot(key, prepare, finish)
 		})
 	})
+}
+
+// certbotTimeLimit is how long a Certbot attempt may take, and certbotDNSTimeLimit how long with a DNS adapter,
+// which waits for its records to propagate: with the 3 minutes of the others, an issuance for several hosts could
+// run out of time before Let's Encrypt saw them. Variables so that tests can shorten them.
+var (
+	certbotTimeLimit    = 3 * time.Minute
+	certbotDNSTimeLimit = 10 * time.Minute
+)
+
+// certbotTimeLimitFor is how long the Certbot attempt of job may take.
+func certbotTimeLimitFor(job certbotJob) time.Duration {
+	if job.adapter != "" {
+		return certbotDNSTimeLimit
+	}
+	return certbotTimeLimit
 }
 
 // certbotWaitDelay is how long the output of Certbot is waited for once it has ended, or been killed when its time
@@ -1659,6 +1865,26 @@ func runCertbot(timeoutCtx context.Context, job certbotJob) interface{} {
 // renameFile is os.Rename, a variable so that tests can make one fail.
 var renameFile = os.Rename
 
+// moveFile moves a file with renameFile and, where a rename can't (the folder of the site is in another volume than
+// Certbot's: a mount point, or a link to another disk), copies it there (written whole next to its place, 0600, and
+// then renamed: writeFileAtomic) and removes the original. Every new certificate was lost there, each attempt issuing
+// another one.
+func moveFile(from string, to string) error {
+	renameErr := renameFile(from, to)
+	if renameErr == nil {
+		return nil
+	}
+	data, err := os.ReadFile(from) // #nosec G304 -- a file that Certbot just wrote in Turbo's certificates directory
+	if err != nil {
+		return renameErr
+	}
+	if err = writeFileAtomic(to, data); err != nil {
+		return renameErr
+	}
+	os.Remove(from) // #nosec G104 -- its copy is in place; Certbot's folder is emptied before the next attempt
+	return nil
+}
+
 // installCertificate puts a new certificate, its chain and its key from Certbot's archive, in place of the
 // fullchain.pem and privkey.pem of dir: next to them first (".new"), loaded as a pair, and then over them, the key
 // first and the chain after it; if the chain can't follow, the previous key comes back. It was two renames, and when
@@ -1671,10 +1897,10 @@ func installCertificate(chainPath string, keyPath string, dir string) interface{
 		os.Remove(newChain) // #nosec G104 -- best effort: what failed is what the caller reports
 		os.Remove(newKey)   // #nosec G104 -- as above
 	}
-	if renameFile(chainPath, newChain) != nil {
+	if moveFile(chainPath, newChain) != nil {
 		return "'Fullchain' can't be moved when obtaining it"
 	}
-	if renameFile(keyPath, newKey) != nil {
+	if moveFile(keyPath, newKey) != nil {
 		discard()
 		return "'Privkey' can't be moved when obtaining it"
 	}

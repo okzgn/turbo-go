@@ -27,7 +27,7 @@ func panelFrom(method, path, ip string, headers map[string]string) *responseReco
 		req.Header.Set(name, value)
 	}
 	rec := &responseRecorder{}
-	serverHandlerFn("")(rec, req)
+	serverHandlerFn(false)(rec, req)
 	return rec
 }
 
@@ -80,10 +80,11 @@ func TestN25_SignoutDuringRequest(t *testing.T) {
 	initForTest(t)
 	const ip = "198.51.100.62"
 	token := newSession(t, ip)
+	previousHook := beforeSessionRenewal
 	beforeSessionRenewal = func() {
 		withGlobalLock(func() { delete(signedInTokens, sessionKey(ip, token)) })
 	}
-	t.Cleanup(func() { beforeSessionRenewal = func() {} })
+	t.Cleanup(func() { beforeSessionRenewal = previousHook })
 	panelFrom("GET", "/admin:inside:", ip, map[string]string{"ok": token})
 	if _, found := sessionExpiry(ip, token); found {
 		t.Error("the renewal created a closed session again")
@@ -139,7 +140,7 @@ func TestI16_PasswordChangeClosesOtherSessions(t *testing.T) {
 	for _, change := range []string{"/admin:inside:setP?a=NewPassword1&b=Admin", "/admin:inside:setU?a=Other&b=NewPassword1"} {
 		mine := newSession(t, "198.51.100.65")
 		other := newSession(t, "198.51.100.66")
-		rec := apiFrom(serverHandlerFn(""), "198.51.100.65", mine, change)
+		rec := apiFrom(serverHandlerFn(false), "198.51.100.65", mine, change)
 		if rec.code != 200 {
 			t.Fatalf("%s: %d %q", change, rec.code, rec.body.String())
 		}
@@ -226,14 +227,14 @@ func TestRP_M08_CloseEverySession(t *testing.T) {
 		code  int
 		body  string
 	}{{"", 400, "the current password (b)"}, {"?b=WrongPassword", 400, "Wrong current password"}} {
-		if rec := apiFrom(serverHandlerFn(""), "198.51.100.76", mine, "/admin:inside:closeSessions"+c.query); rec.code != c.code || !strings.Contains(rec.body.String(), c.body) {
+		if rec := apiFrom(serverHandlerFn(false), "198.51.100.76", mine, "/admin:inside:closeSessions"+c.query); rec.code != c.code || !strings.Contains(rec.body.String(), c.body) {
 			t.Errorf("closeSessions%s: %d %q; expected %d %q", c.query, rec.code, rec.body.String(), c.code, c.body)
 		}
 	}
 	if _, found := sessionExpiry("198.51.100.77", other); !found {
 		t.Fatal("closeSessions without the password closed a session")
 	}
-	rec := apiFrom(serverHandlerFn(""), "198.51.100.76", mine, "/admin:inside:closeSessions?b=Admin")
+	rec := apiFrom(serverHandlerFn(false), "198.51.100.76", mine, "/admin:inside:closeSessions?b=Admin")
 	if rec.code != 200 {
 		t.Fatalf("closeSessions: %d %q", rec.code, rec.body.String())
 	}
@@ -263,7 +264,7 @@ func TestRP_M08_SessionMaxLifetime(t *testing.T) {
 		t.Fatalf("deadline of a new session: %d s from now; expected %d", deadline-now, sessionMaxLifetime)
 	}
 	withGlobalLock(func() { sessionDeadlines[key] = now + 3 }) // Its login was almost sessionMaxLifetime ago
-	if rec := apiFrom(serverHandlerFn(""), ip, token, "/admin:inside:sites"); rec.code != 200 || !strings.HasPrefix(rec.body.String(), "{") {
+	if rec := apiFrom(serverHandlerFn(false), ip, token, "/admin:inside:sites"); rec.code != 200 || !strings.HasPrefix(rec.body.String(), "{") {
 		t.Fatalf("sites: %d %.80q", rec.code, rec.body.String())
 	}
 	if expiry, _ := sessionExpiry(ip, token); expiry > now+3 {

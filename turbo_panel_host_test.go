@@ -321,3 +321,33 @@ func TestRP_M02_ErrorTemplatesWithoutScriptsOnAnyHost(t *testing.T) {
 		}
 	}
 }
+
+// R6 V-02: a host that an alias of a wildcard subdomain serves is a host that serves a site: it can't be the
+// panel's. The target of an alias is a site key ("*.example.com"), which servingSite read as a Host and refused.
+func TestR6_V02_PanelHostServedThroughAWildcardAlias(t *testing.T) {
+	dir := initForTest(t)
+	os.MkdirAll(dir+"example.com/@", 0755)
+	os.MkdirAll(dir+"example.com/#/@", 0755)
+	os.WriteFile(dir+"example.com/#/@/index.html", []byte("wildcard"), 0644)
+	updateSettings(false)
+	globalMutex.Lock()
+	ok, msg := subdomainContentCheckers["&"](true, map[string]interface{}{"panel.test": false}, false, "example.com", "*")
+	globalMutex.Unlock()
+	if !ok {
+		t.Fatalf("alias: %q", msg)
+	}
+	base := startServer(t)
+	if res, body, err := rawGet(base, "panel.test", "/"); err != nil || res.StatusCode != 200 || body != "wildcard" {
+		t.Fatalf("GET panel.test/: %v %q; expected the content of the wildcard subdomain", err, body)
+	}
+	var site string
+	withReadLock(func() { site = servingSite("panel.test") })
+	if site != "*.example.com" {
+		t.Errorf("servingSite(panel.test) = %q; expected *.example.com", site)
+	}
+	tok := login(t, base)
+	code, body := postHost(t, base, "panel.test", "/admin:inside:setPA?"+url.Values{"a": {"panel.test"}, "b": {"Admin"}}.Encode(), tok)
+	if code != 400 || !strings.Contains(body, "serves the site") {
+		t.Errorf("setPA panel.test: %d %q; expected 400 with the site it serves", code, body)
+	}
+}

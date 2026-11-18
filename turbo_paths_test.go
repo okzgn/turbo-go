@@ -230,12 +230,10 @@ func FuzzServePath(f *testing.F) {
 // refused as a coincidence.
 func TestN97_SubdomainServesOnlyItsHost(t *testing.T) {
 	dir := initForTest(t)
-	globalMutex.Lock()
-	ok, msg := addSite("example.test")
+	ok, msg := addSiteFromPanel("example.test", "")
 	if ok {
-		ok, msg = addSubdomain("example.test", "api")
+		ok, msg = addSiteFromPanel("example.test", "api")
 	}
-	globalMutex.Unlock()
 	if !ok {
 		t.Fatal(msg)
 	}
@@ -254,9 +252,7 @@ func TestN97_SubdomainServesOnlyItsHost(t *testing.T) {
 	if code, body := status("x.api.example.test"); code != 404 {
 		t.Errorf("x.api.example.test without a wildcard: %d %q; expected 404", code, body)
 	}
-	globalMutex.Lock()
-	ok, msg = addSubdomain("example.test", "*.api")
-	globalMutex.Unlock()
+	ok, msg = addSiteFromPanel("example.test", "*.api")
 	if !ok {
 		t.Fatal(msg)
 	}

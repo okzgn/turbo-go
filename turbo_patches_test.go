@@ -17,6 +17,7 @@ import (
 	"net/textproto"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1301,5 +1302,43 @@ func TestRL_F2_HeaderLimitAfterPOSTEmptyLines(t *testing.T) {
 	}
 	if len(codes) != 2 || codes[0] != 200 || codes[1] != 431 {
 		t.Errorf("POST, empty lines and a GET with 3000 bytes of headers, MHB = 600: %v; expected [200 431]", codes)
+	}
+}
+
+// R6 N-02 (P7): a handler that wraps the request's body (MaxBytesReader) and closes it with data left unread, before
+// it answers, loses the connection: what is left of the body is never read as the next request. With P7 nothing of
+// an unread body is drained, so before Go 1.26.11, which follows the body the server gave the handler whatever the
+// handler puts in Request.Body, a single unread byte was enough for a second request hidden in the body to be served.
+func TestR6_N02_WrappedBodyClosedEarlyClosesConnection(t *testing.T) {
+	for _, wrap := range []bool{false, true} {
+		var mutex sync.Mutex
+		var seen []string
+		addr := forkServer(t, false, func(w customNetHttp.ResponseWriter, r *customNetHttp.Request) {
+			mutex.Lock()
+			seen = append(seen, r.Method+" "+r.URL.Path)
+			mutex.Unlock()
+			if r.Method == "POST" {
+				if wrap {
+					r.Body = customNetHttp.MaxBytesReader(w, r.Body, 1<<20)
+				}
+				r.Body.Close()
+			}
+			io.WriteString(w, "ok")
+		})
+		hidden := "GET /hidden HTTP/1.1\r\nHost: x\r\n\r\n"
+		conn, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.WriteString(conn, "POST /first HTTP/1.1\r\nHost: x\r\nContent-Length: "+strconv.Itoa(len(hidden))+"\r\n\r\n"+hidden)
+		conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		data, _ := io.ReadAll(conn)
+		conn.Close()
+		mutex.Lock()
+		requests := append([]string(nil), seen...)
+		mutex.Unlock()
+		if responses := strings.Count(string(data), "HTTP/1.1 200"); responses != 1 || len(requests) != 1 {
+			t.Errorf("wrapped=%v: %d responses, requests %q; expected only POST /first", wrap, responses, requests)
+		}
 	}
 }

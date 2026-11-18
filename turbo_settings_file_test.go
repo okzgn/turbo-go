@@ -77,9 +77,7 @@ func TestI18_NotAnObject(t *testing.T) {
 // without a warning; a value that would do something there is still discarded with one.
 func TestN85_SubdomainRedirectDefaultsLoadQuietly(t *testing.T) {
 	dir := initForTest(t)
-	globalMutex.Lock()
-	ok, msg := addSubdomain("localhost", "sub")
-	globalMutex.Unlock()
+	ok, msg := addSiteFromPanel("localhost", "sub")
 	if !ok {
 		t.Fatal(msg)
 	}

@@ -61,7 +61,7 @@ func waitNextSecond() {
 // second are all served: there is no global limit.
 func TestA5_NoGlobalLimitByDefault(t *testing.T) {
 	initForTest(t)
-	handler := serverHandlerFn("")
+	handler := serverHandlerFn(false)
 	waitNextSecond()
 	for i := 0; i < 300; i++ {
 		if rec := serveFrom(handler, "10.1."+strconv.Itoa(i/250)+"."+strconv.Itoa(i%250+1)); rec.code != 200 {
@@ -84,7 +84,7 @@ func TestA5_GlobalLimitCGL(t *testing.T) {
 	if !ok {
 		t.Fatalf("setCGL 50: %q", msg)
 	}
-	handler := serverHandlerFn("")
+	handler := serverHandlerFn(false)
 	waitNextSecond()
 	served, limited := 0, 0
 	for i := 0; i < 120; i++ {

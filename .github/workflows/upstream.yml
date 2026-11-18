@@ -1,7 +1,9 @@
-# The Go that customNetHttp is made from (customNetHttp/UPSTREAM) against Go's releases: a newer Go 1.26.x
-# brings fixes of net/http, which the fork only gets by being regenerated from it (customNetHttp/PATCHES.md). It
-# runs on every push and pull request, every week and by hand; every week and by hand it also looks for new
-# vulnerabilities of the code as it is (govulncheck), which a week without pushes wouldn't see.
+# The Go that customNetHttp is made from (customNetHttp/UPSTREAM) against Go's releases: a newer Go of its series
+# brings fixes of net/http, which the fork only gets by being regenerated from it (customNetHttp/PATCHES.md), and a
+# series that Go no longer supports gets none. It runs on every push and pull request, every week and by hand; every
+# week and by hand it also looks for new vulnerabilities (govulncheck), which a week without pushes wouldn't see: of
+# Turbo's code as it is and, as govulncheck goes by package path and doesn't see the copies in customNetHttp, of the
+# packages of Go that customNetHttp is made from, with the Go of UPSTREAM.
 name: Upstream Go
 
 on:
@@ -25,7 +27,7 @@ jobs:
           persist-credentials: false
       - name: Compare UPSTREAM with go.dev/dl
         run: |
-          pinned="$(sed -n '1p' customNetHttp/UPSTREAM | tr -d '\r')"   # go1.26.10
+          pinned="$(sed -n '1p' customNetHttp/UPSTREAM | tr -d '\r')"   # go1.26.11
           series="${pinned%.*}"                                           # go1.26
           latest="$(curl -fsS --retry 3 'https://go.dev/dl/?mode=json&include=all' |
             jq -r --arg series "$series." '[.[] | select(.stable) | .version | select(startswith($series)) | ltrimstr($series) | tonumber] | max // empty')"
@@ -36,6 +38,24 @@ jobs:
             echo "$series.$latest is out and customNetHttp is $pinned: regenerate it (customNetHttp/PATCHES.md, \"Updating Go\")"; exit 1
           fi
           echo "customNetHttp is $pinned, the latest $series release"
+      - name: The series of UPSTREAM still gets fixes
+        # Go fixes its two latest series: once UPSTREAM's is older, the step above stays green with nothing left to
+        # come for it, and the fork has to move to a supported one.
+        run: |
+          pinned="$(sed -n '1p' customNetHttp/UPSTREAM | tr -d '\r')"
+          curl -fsS --retry 3 'https://go.dev/dl/?mode=json&include=all' > releases.json
+          python3 - "$pinned" releases.json <<'EOF'
+          import json, re, sys
+          pinned, releases = sys.argv[1], json.load(open(sys.argv[2]))
+          def series(version):
+              return tuple(int(number) for number in re.match(r"go(\d+)\.(\d+)", version).groups())
+          stable = sorted({series(r["version"]) for r in releases if r.get("stable") and re.match(r"go\d+\.\d+", r["version"])})
+          supported = stable[-2:]
+          names = ", ".join("go%d.%d" % s for s in supported)
+          if series(pinned) not in supported:
+              sys.exit('%s is of a series that Go no longer fixes (it fixes %s): move customNetHttp to one of them (customNetHttp/PATCHES.md, "Updating to another Go version")' % (pinned, names))
+          print("%s is of a series that Go still fixes (%s)" % (pinned, names))
+          EOF
 
   govulncheck:
     name: Vulnerabilities of the code as it is
@@ -56,3 +76,31 @@ jobs:
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
           govulncheck ./...
+      - name: govulncheck of the Go packages that customNetHttp is made from
+        # A program that uses the originals as Turbo uses its copies (the server of net/http with TLS and HTTP/2,
+        # net/http/cgi and mime/multipart), with the Go of UPSTREAM: what govulncheck finds in them, the fork has.
+        run: |
+          dir="$(mktemp -d)"
+          cd "$dir"
+          go mod init upstreamcheck
+          cat > main.go <<'EOF'
+          package main
+
+          import (
+          	"mime/multipart"
+          	"net/http"
+          	"net/http/cgi"
+          )
+
+          func main() {
+          	http.Handle("/cgi", &cgi.Handler{Path: "/usr/bin/php-cgi"})
+          	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+          		_ = r.ParseMultipartForm(1 << 20)
+          		var form *multipart.Form = r.MultipartForm
+          		_ = form
+          		http.ServeFile(w, r, "index.html")
+          	})
+          	_ = http.ListenAndServeTLS(":443", "fullchain.pem", "privkey.pem", nil)
+          }
+          EOF
+          govulncheck -scan package ./...

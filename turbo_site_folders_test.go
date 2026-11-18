@@ -251,3 +251,22 @@ func TestRP_M05_SitesListsThoseWithoutFolder(t *testing.T) {
 		t.Errorf("localhost deleted: kept %v, active %v; expected it gone from sites", kept, active)
 	}
 }
+
+// R6 O-4: a site folder is a site's when its public folder can be listed, which is asked without listing it whole:
+// an empty one, and one with many entries, are; a file called @, and a missing one, aren't.
+func TestR6_O4_PublicFolderReadable(t *testing.T) {
+	dir := t.TempDir() + "/"
+	os.MkdirAll(dir+"empty/@", 0755)
+	os.MkdirAll(dir+"many/@", 0755)
+	for i := 0; i < 50; i++ {
+		os.WriteFile(dir+"many/@/"+string(rune('a'+i%26))+string(rune('a'+i/26))+".txt", nil, 0644)
+	}
+	os.MkdirAll(dir+"file", 0755)
+	os.WriteFile(dir+"file/@", nil, 0644)
+	os.MkdirAll(dir+"none", 0755)
+	for folder, readable := range map[string]bool{"empty": true, "many": true, "file": false, "none": false, "missing": false} {
+		if publicFolderReadable(dir+folder) != readable {
+			t.Errorf("publicFolderReadable(%s) = %v; expected %v", folder, !readable, readable)
+		}
+	}
+}

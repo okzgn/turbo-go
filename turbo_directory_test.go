@@ -75,7 +75,7 @@ func startTurbo(t *testing.T, workDir string, env ...string) *turboProcess {
 	addr := "127.0.0.1:" + freePort(t)
 	p := &turboProcess{cmd: exec.Command(turboBinary(t)), base: "http://" + addr, out: &syncBuffer{}, done: make(chan error, 1)}
 	p.cmd.Dir = workDir
-	p.cmd.Env = append(append(os.Environ(), "TURBO_HTTP_ADDR="+addr, "TURBO_HTTPS_ADDR=127.0.0.1:"+freePort(t)), env...)
+	p.cmd.Env = append(append(testEnviron(), "TURBO_HTTP_ADDR="+addr, "TURBO_HTTPS_ADDR=127.0.0.1:"+freePort(t)), env...)
 	p.cmd.Stdout, p.cmd.Stderr = p.out, p.out
 	if err := p.cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -89,7 +89,7 @@ func startTurbo(t *testing.T, workDir string, env ...string) *turboProcess {
 			return p
 		default:
 		}
-		if res, err := http.Get(p.base + "/"); err == nil {
+		if res, err := (&http.Client{Timeout: time.Second}).Get(p.base + "/"); err == nil {
 			res.Body.Close()
 			return p
 		}
@@ -283,7 +283,7 @@ func TestN01_PointerBacksUpStartConfig(t *testing.T) {
 	loadConfig(t, dir, `{"^":{"v":"2"},".":{"CII":"77"}}`)
 	original, _ := os.ReadFile(dir + "turbo.config")
 	other := filepath.ToSlash(t.TempDir()) + "/"
-	if ok, msg := defaultSettingValidators["."]["M"](other, "Admin"); !ok {
+	if ok, msg := setSitesDir(other, ""); !ok {
 		t.Fatalf("M: %s", msg)
 	}
 	if !saveDefaultConfig() { // It takes the locks itself (T20)

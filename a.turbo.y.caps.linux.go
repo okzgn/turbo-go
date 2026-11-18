@@ -56,18 +56,22 @@ const linuxCapabilityVersion3 = 0x20080522
 // Turbo keeps it in its effective set, enough to open :443 later. Capabilities are per thread, hence
 // AllThreadsSyscall, which a binary built with cgo can't use: then it is only logged.
 func clearInheritedCapabilities() {
-	_, _, errno := syscall.AllThreadsSyscall(syscall.SYS_PRCTL, prCapAmbient, prCapAmbientClearAll, 0)
-	if errno == 0 {
-		errno = clearInheritableCapabilities()
+	// Each set on its own: where the ambient one can't be cleared (a kernel without it, before 4.3, or a seccomp
+	// filter without that prctl), the inheritable one was left as it was too.
+	_, _, ambientErrno := syscall.AllThreadsSyscall(syscall.SYS_PRCTL, prCapAmbient, prCapAmbientClearAll, 0)
+	inheritableErrno := clearInheritableCapabilities()
+	for _, step := range []struct {
+		set   string
+		errno syscall.Errno
+	}{{"ambient", ambientErrno}, {"inheritable", inheritableErrno}} {
+		switch {
+		case step.errno == 0:
+		case errors.Is(step.errno, syscall.ENOTSUP):
+			slog.Warn("Can't clear the capabilities the CGIs inherit (binary built with cgo): the CGIs inherit Turbo's", "set", step.set)
+		default:
+			slog.Warn("Can't clear the capabilities the CGIs inherit: the CGIs inherit Turbo's", "set", step.set, "error", step.errno)
+		}
 	}
-	if errno == 0 {
-		return
-	}
-	if errors.Is(errno, syscall.ENOTSUP) {
-		slog.Warn("Can't clear the capabilities the CGIs inherit (binary built with cgo): the CGIs inherit Turbo's")
-		return
-	}
-	slog.Warn("Can't clear the capabilities the CGIs inherit: the CGIs inherit Turbo's", "error", errno)
 }
 
 // clearInheritableCapabilities empties the inheritable set of every thread, keeping the effective and permitted

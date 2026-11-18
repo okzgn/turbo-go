@@ -15,7 +15,7 @@ func TestC1_RedirectPorts(t *testing.T) {
 	previous := httpsAddr
 	t.Cleanup(func() { httpsAddr = previous })
 	globalMutex.Lock()
-	siteSSLConfig["localhost"]["S"] = 1 // HTTPS on, with a certificate that covers localhost
+	siteSSLConfig["localhost"].https = true // HTTPS on, with a certificate that covers localhost
 	certificatesByName.Store(&map[string]*tls.Certificate{"localhost": {}})
 	globalMutex.Unlock()
 	httpsListening.Store(true) // As if Turbo's HTTPS were open: nothing is redirected to one that isn't
@@ -26,7 +26,7 @@ func TestC1_RedirectPorts(t *testing.T) {
 		req.RequestURI = "/x?y=1"
 		req.RemoteAddr = "192.0.2.20:40000"
 		rec := &responseRecorder{}
-		serverHandlerFn("")(rec, req)
+		serverHandlerFn(false)(rec, req)
 		return rec.Header().Get("Location")
 	}
 	for addr, want := range map[string]string{
@@ -41,8 +41,8 @@ func TestC1_RedirectPorts(t *testing.T) {
 	}
 
 	globalMutex.Lock()
-	siteSSLConfig["localhost"]["S"] = 0
-	siteSSLConfig["localhost"]["W"] = true
+	siteSSLConfig["localhost"].https = false
+	siteSSLConfig["localhost"].rootToWWW = true
 	globalMutex.Unlock()
 	if got := location("localhost:8080"); got != "http://www.localhost:8080/x?y=1" {
 		t.Errorf("W with Host localhost:8080: Location %q; expected http://www.localhost:8080/x?y=1", got)

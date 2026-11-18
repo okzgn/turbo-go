@@ -228,7 +228,7 @@ func TestC_SitesDirPersisted(t *testing.T) {
 	start := initForTest(t)
 	other := filepath.ToSlash(t.TempDir()) + "/"
 	os.MkdirAll(other+"other.test/@", 0755)
-	if ok, msg := defaultSettingValidators["."]["M"](other, "Admin"); !ok {
+	if ok, msg := setSitesDir(other, ""); !ok {
 		t.Fatalf("setM: %q", msg)
 	}
 	resetSettings()
@@ -689,11 +689,11 @@ func TestW_DenyCurrentIP(t *testing.T) {
 	base := startServer(t)
 	tok := login(t, base)
 	future := strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)
-	code, body, err := post(base, "/admin:inside:addDenied?s=127.0.0.1&d="+future, tok)
+	code, body, err := post(base, "/admin:inside:addDenied?s=127.0.0.1&d="+future+"&b=Admin", tok)
 	if err != nil || code != 400 || body != "Current IP" {
 		t.Fatalf("addDenied of the current IP: %d %q %v; expected 400 \"Current IP\"", code, body, err)
 	}
-	if code, body, _ := post(base, "/admin:inside:addDenied?s=203.0.113.5&d="+future, tok); code != 200 {
+	if code, body, _ := post(base, "/admin:inside:addDenied?s=203.0.113.5&d="+future+"&b=Admin", tok); code != 200 {
 		t.Fatalf("addDenied of another IP: %d %q", code, body)
 	}
 	for _, c := range []struct {

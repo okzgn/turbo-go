@@ -48,8 +48,9 @@ func TestRP3_V8_FollowAppliesWhatWasChecked(t *testing.T) {
 	if err := os.WriteFile(dir+configFileName, []byte(`{"^":{"v":"2"},".":{"M":"`+target+`"}}`), 0600); err != nil {
 		t.Fatal(err)
 	}
+	previousHook := beforeFollowing
 	beforeFollowing = func(string) { os.WriteFile(target+configFileName, []byte(`{"^":`), 0600) } // An editor halfway
-	t.Cleanup(func() { beforeFollowing = func(string) {} })
+	t.Cleanup(func() { beforeFollowing = previousHook })
 	if err := reloadChanged(); err == nil {
 		t.Error("a reload whose target broke after the check applied it")
 	}
@@ -79,6 +80,7 @@ func TestRP3_V8_NoMomentWithoutSites(t *testing.T) {
 		t.Fatal(err)
 	}
 	var answers []string
+	previousHook := beforeSitesScan
 	beforeSitesScan = func() { // Every time a reload is about to apply: the sites in use are still served
 		code, body, err := get(base, "/", nil)
 		if err != nil {
@@ -89,7 +91,7 @@ func TestRP3_V8_NoMomentWithoutSites(t *testing.T) {
 			answers = append(answers, strings.TrimSpace(body))
 		}
 	}
-	t.Cleanup(func() { beforeSitesScan = func() {} })
+	t.Cleanup(func() { beforeSitesScan = previousHook })
 	if err := reloadChanged(); err != nil {
 		t.Fatal(err)
 	}

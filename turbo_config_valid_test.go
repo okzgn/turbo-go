@@ -313,7 +313,7 @@ func TestA3_StartWithInvalidConfig(t *testing.T) {
 	port := freePort(t)
 	cmd := exec.Command(bin)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "TURBO_DIR="+dir, "TURBO_HTTP_ADDR=127.0.0.1:"+port, "TURBO_HTTPS_ADDR=127.0.0.1:"+freePort(t))
+	cmd.Env = append(testEnviron(), "TURBO_DIR="+dir, "TURBO_HTTP_ADDR=127.0.0.1:"+port, "TURBO_HTTPS_ADDR=127.0.0.1:"+freePort(t))
 	done := make(chan error, 1)
 	var out strings.Builder
 	cmd.Stdout, cmd.Stderr = &out, &out
@@ -725,7 +725,7 @@ func TestRL_F5_ListEntriesOfTheFile(t *testing.T) {
 	logs := captureLog(t)
 	future := strconv.FormatInt(time.Now().Add(time.Hour).Unix(), 10)
 	loadConfig(t, dir, `{"^":{"v":"2"},"@":{"203.0.113.5":`+future+`,"203.0.113.6":true,"not-an-ip":"`+future+`"}}`)
-	if deniedUntil("203.0.113.5") == 0 {
+	if deniedUntil(clientOf("203.0.113.5")) == 0 {
 		t.Error("a denied IP with its date as a JSON integer isn't denied")
 	}
 	for _, expected := range []string{"wrong type", "turbo.config denied IP discarded"} {

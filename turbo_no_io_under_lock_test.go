@@ -43,7 +43,7 @@ func TestN30_SlowDiskDoesNotHoldRequests(t *testing.T) {
 	start := time.Now()
 	req, _ := http.NewRequest("GET", base+"/", nil)
 	req.Host = "localhost"
-	res, err := http.DefaultClient.Do(req)
+	res, err := (&http.Client{Timeout: clientTimeout()}).Do(req)
 	elapsed := time.Since(start)
 	if err == nil {
 		res.Body.Close()
@@ -117,7 +117,7 @@ func requestWhileLockWaits(t *testing.T, base string, action func()) time.Durati
 	start := time.Now()
 	req, _ := http.NewRequest("GET", base+"/", nil)
 	req.Host = "localhost"
-	res, err := http.DefaultClient.Do(req)
+	res, err := (&http.Client{Timeout: clientTimeout()}).Do(req)
 	elapsed := time.Since(start)
 	if err == nil {
 		res.Body.Close()
@@ -190,7 +190,7 @@ func TestN87_RedirectWrittenWithoutGlobalLock(t *testing.T) {
 	if res, _, err := rawGet(plain, "example.com", "/"); err != nil || res.StatusCode != 301 {
 		t.Fatalf("example.com doesn't redirect: %v %v", res, err)
 	}
-	h := dialH2(t, forkServer(t, true, serverHandlerFn("s")))
+	h := dialH2(t, forkServer(t, true, serverHandlerFn(true)))
 	h.frame(4, 0, 0, []byte{0, 4, 0, 0, 0, 0}) // SETTINGS_INITIAL_WINDOW_SIZE = 0: the response body never leaves
 	var block bytes.Buffer
 	for _, field := range [][2]string{{":method", "GET"}, {":scheme", "https"}, {":path", "/?" + strings.Repeat("&", 900)}, {":authority", "example.com"}} {

@@ -126,7 +126,7 @@ func TestC_SitesDirPointerBackup(t *testing.T) {
 	loadConfig(t, start, original)
 	other := t.TempDir() + "/"
 	os.MkdirAll(other+"other.test/@", 0755)
-	if ok, msg := defaultSettingValidators["."]["M"](other, "Admin"); !ok {
+	if ok, msg := setSitesDir(other, ""); !ok {
 		t.Fatalf("setM: %q", msg)
 	}
 	resetSettings()

@@ -35,7 +35,7 @@ func TestP10_AdapterValidator(t *testing.T) {
 		if ok, msg := siteSSLSettingCheckers["A"](false, v, "localhost", ""); ok {
 			t.Errorf("cfgA %q -> %q; expected rejected", v, msg)
 		}
-		if ok, msg := siteSSLSettingCheckers["C"](false, "1", "localhost", "", "admin@example.com", v); ok || siteSSLConfig["localhost"]["A"] == v {
+		if ok, msg := siteSSLSettingCheckers["C"](false, "1", "localhost", "", "admin@example.com", v); ok || siteSSLConfig["localhost"].asSection()["A"] == v {
 			t.Errorf("cfgC y=%q -> %v %q; expected rejected", v, ok, msg)
 		}
 	}
@@ -63,7 +63,7 @@ func TestW_SSL_DeleteWithoutFiles(t *testing.T) {
 	waitIdle()
 	os.WriteFile(logf, nil, 0644)
 	globalMutex.Lock()
-	siteSSLConfig["localhost"]["C"] = false // The normal state of a site without a certificate
+	siteSSLConfig["localhost"].certificate = certificateState{} // The normal state of a site without a certificate
 	ok, msg := siteSSLSettingCheckers["C"](false, "0", "localhost", "", "", "")
 	globalMutex.Unlock()
 	time.Sleep(1 * time.Second)
@@ -83,7 +83,7 @@ func TestW_SSL_EmailRequired(t *testing.T) {
 	waitIdle()
 	os.WriteFile(logf, nil, 0644)
 	globalMutex.Lock()
-	siteSSLConfig["localhost"]["C"] = false
+	siteSSLConfig["localhost"].certificate = certificateState{}
 	ok, msg := siteSSLSettingCheckers["C"](false, "1", "localhost", "", "", "")
 	globalMutex.Unlock()
 	waitIdle()
@@ -139,7 +139,7 @@ func TestW_SSL_TLSFlow(t *testing.T) {
 	}
 	globalMutex.Unlock()
 
-	srv := &customNetHttp.Server{Handler: customNetHttp.HandlerFunc(serverHandlerFn("s")), TLSConfig: tlsConfig, ConnState: connHandler}
+	srv := &customNetHttp.Server{Handler: customNetHttp.HandlerFunc(serverHandlerFn(true)), TLSConfig: tlsConfig, ConnState: connHandler}
 	l, err := tls.Listen("tcp", "127.0.0.1:0", tlsConfig)
 	if err != nil {
 		t.Fatal(err)
@@ -276,7 +276,7 @@ func TestW_SSL_WildcardAndLegacyS(t *testing.T) {
 	resetSettings()
 	loadConfig(t, dir, `{"w.test":{"":{"!":{"S":"3"}}}}`)
 	globalMutex.RLock()
-	s := siteSSLConfig["w.test"]["S"]
+	s := siteSSLConfig["w.test"].asSection()["S"]
 	globalMutex.RUnlock()
 	if s != 1 {
 		t.Fatalf("loaded S = %v; expected 1", s)
@@ -462,7 +462,7 @@ func TestRP_M04_HTTPSKeptUntilCertificateLoads(t *testing.T) {
 	t.Cleanup(func() { httpsListening.Store(false) })
 	loadConfig(t, dir, `{"^":{"v":"2"},"w.test":{"":{"!":{"S":"1"},"-":{"index.html":"1"}}}}`)
 	globalMutex.RLock()
-	enabled := siteSSLConfig["w.test"]["S"]
+	enabled := siteSSLConfig["w.test"].asSection()["S"]
 	globalMutex.RUnlock()
 	if enabled != 1 || certificateFor("w.test") != nil {
 		t.Fatalf("S of the file without the certificate files: %v, certificate %v; expected 1, kept, without a certificate", enabled, certificateFor("w.test") != nil)

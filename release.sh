@@ -20,6 +20,9 @@
 #   (go version -m), and with govulncheck before writing SHA256SUMS: if it finds a
 #   vulnerability, there is no SHA256SUMS. Without govulncheck it stops, unless
 #   TURBO_RELEASE_WITHOUT_GOVULNCHECK=1 says so on purpose.
+# - With TURBO_RELEASE_SIGNING_KEY (the file of the publisher's SSH private key), it signs SHA256SUMS with
+#   ssh-keygen -Y sign: SHA256SUMS.sig, checked with the public key that SECURITY.md publishes. Without it, the
+#   release goes unsigned, with a warning.
 # - If anything fails, dist/<version> is removed: nothing half done is left to publish.
 set -euo pipefail
 
@@ -137,5 +140,21 @@ else
 	exit 1
 fi
 
+# The licenses go with the binaries: Turbo's, those of the code of Go in customNetHttp (with its patents grant and
+# its notice) and that of the panel's font.
+cp LICENSE "$OUT/LICENSE"
+cp LICENSE.Karla.txt "$OUT/LICENSE.Karla.txt"
+cp customNetHttp/LICENCE "$OUT/LICENCE.customNetHttp"
+cp customNetHttp/PATENTS "$OUT/PATENTS.customNetHttp"
+cp customNetHttp/NOTICE "$OUT/NOTICE.customNetHttp"
+
 (cd "$OUT" && sha256sum turbo-* > SHA256SUMS)
 cat "$OUT/SHA256SUMS"
+# The sums signed by the publisher: whoever could change the binaries where they are published could change their
+# sums too, not this signature.
+if [ -n "${TURBO_RELEASE_SIGNING_KEY:-}" ]; then
+	ssh-keygen -Y sign -f "$TURBO_RELEASE_SIGNING_KEY" -n file "$OUT/SHA256SUMS"
+	echo "Signed: $OUT/SHA256SUMS.sig"
+else
+	echo "Warning: SHA256SUMS is not signed (TURBO_RELEASE_SIGNING_KEY is not set)." >&2
+fi

@@ -1,0 +1,56 @@
+diff --git a/1.net.http.server.go b/1.net.http.server.go
+index 7e8118b..a0b4005 100644
+--- a/1.net.http.server.go
++++ b/1.net.http.server.go
+@@ -1004,7 +1004,7 @@ func (c *conn) readRequest(ctx context.Context) (w *response, err error) {
+ 	}
+ 	req, err := readRequest(c.bufr)
+ 	if err != nil {
+-		if c.r.hitReadLimit() {
++		if err != errTurboURITooLong && c.r.hitReadLimit() { // turbo:P14: a URI over MUB is 414 however much of the request was read with it
+ 			return nil, errTooLarge
+ 		}
+ 		return nil, err
+diff --git a/a.server.cgi.host.go b/a.server.cgi.host.go
+index 5fec7aa..b922ae7 100644
+--- a/a.server.cgi.host.go
++++ b/a.server.cgi.host.go
+@@ -258,6 +258,9 @@ func (h *CgiHandler) ServeHTTP(rw ResponseWriter, req *Request) {
+ 	stdoutWrite.Close()
+ 	if err != nil {
+ 		stdoutRead.stop()
++		if ctx.Err() == context.Canceled { // turbo:P14: the client went away before the CGI started: no one to answer, and no error of the CGI
++			panic(ErrAbortHandler)
++		}
+ 		internalError(err)
+ 		return
+ 	}
+@@ -270,6 +273,7 @@ func (h *CgiHandler) ServeHTTP(rw ResponseWriter, req *Request) {
+ 	defer func() {
+ 		if !served {
+ 			group.kill()
++			cmd.Process.Kill() // turbo:P14: also where it has no group to kill (Windows, without its Job Object): the error doesn't wait for the CGI
+ 		}
+ 		stdoutRead.stop()
+ 		<-finished
+@@ -293,8 +297,8 @@ func (h *CgiHandler) ServeHTTP(rw ResponseWriter, req *Request) {
+ 			break
+ 		}
+ 		if err != nil {
+-			if ctx.Err() == context.DeadlineExceeded {
+-				break // The 504 below
++			if ctx.Err() != nil {
++				break // The 504 below, or (turbo:P14) the client that went away
+ 			}
+ 			internalError(fmt.Errorf("cgi: error reading headers: %v", err))
+ 			return
+@@ -337,6 +341,9 @@ func (h *CgiHandler) ServeHTTP(rw ResponseWriter, req *Request) {
+ 		Error(rw, "", StatusGatewayTimeout)
+ 		return
+ 	}
++	if ctx.Err() != nil { // turbo:P14: the client went away before the headers of the CGI, which was ended: no one to answer, and no error of the CGI
++		panic(ErrAbortHandler)
++	}
+ 	if headerLines == 0 || !sawBlankLine {
+ 		internalError(fmt.Errorf("cgi: no headers"))
+ 		return

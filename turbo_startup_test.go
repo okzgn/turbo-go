@@ -67,7 +67,7 @@ func TestI03_GracefulShutdown(t *testing.T) {
 	addr := "127.0.0.1:" + freePort(t)
 	cmd := exec.Command(bin)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "TURBO_DIR="+dir+"/", "TURBO_HTTP_ADDR="+addr, "TURBO_HTTPS_ADDR=127.0.0.1:"+freePort(t))
+	cmd.Env = append(testEnviron(), "TURBO_DIR="+dir+"/", "TURBO_HTTP_ADDR="+addr, "TURBO_HTTPS_ADDR=127.0.0.1:"+freePort(t))
 	var out syncBuffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	if err := cmd.Start(); err != nil {

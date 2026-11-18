@@ -34,7 +34,7 @@ func TestN14_CGIWithoutAmbientCapabilities(t *testing.T) {
 	addr := "127.0.0.1:" + freePort(t)
 	cmd := exec.Command(setpriv, "--inh-caps=+net_bind_service", "--ambient-caps=+net_bind_service", bin)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "TURBO_HTTP_ADDR="+addr, "TURBO_HTTPS_ADDR=127.0.0.1:"+freePort(t))
+	cmd.Env = append(testEnviron(), "TURBO_HTTP_ADDR="+addr, "TURBO_HTTPS_ADDR=127.0.0.1:"+freePort(t))
 	var out syncBuffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	if err := cmd.Start(); err != nil {
@@ -48,7 +48,7 @@ func TestN14_CGIWithoutAmbientCapabilities(t *testing.T) {
 	for start := time.Now(); time.Since(start) < 15*time.Second; time.Sleep(100 * time.Millisecond) {
 		req, _ := http.NewRequest("GET", "http://"+addr+"/x.cgi?procstatus=1", nil)
 		req.Host = "localhost"
-		res, err := http.DefaultClient.Do(req)
+		res, err := (&http.Client{Timeout: clientTimeout()}).Do(req)
 		if err != nil {
 			continue
 		}
@@ -83,7 +83,7 @@ func TestN84_CGIWithoutInheritableCapabilities(t *testing.T) {
 	addr := "127.0.0.1:" + freePort(t)
 	cmd := exec.Command(setpriv, "--inh-caps=+net_bind_service", "--ambient-caps=+net_bind_service", bin)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "TURBO_HTTP_ADDR="+addr, "TURBO_HTTPS_ADDR=127.0.0.1:"+freePort(t))
+	cmd.Env = append(testEnviron(), "TURBO_HTTP_ADDR="+addr, "TURBO_HTTPS_ADDR=127.0.0.1:"+freePort(t))
 	var out syncBuffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	if err := cmd.Start(); err != nil {
@@ -97,7 +97,7 @@ func TestN84_CGIWithoutInheritableCapabilities(t *testing.T) {
 	for start := time.Now(); time.Since(start) < 15*time.Second && body == ""; time.Sleep(100 * time.Millisecond) {
 		req, _ := http.NewRequest("GET", "http://"+addr+"/x.cgi?procstatus=1", nil)
 		req.Host = "localhost"
-		if res, err := http.DefaultClient.Do(req); err == nil {
+		if res, err := (&http.Client{Timeout: clientTimeout()}).Do(req); err == nil {
 			b, _ := io.ReadAll(res.Body)
 			res.Body.Close()
 			body = string(b)

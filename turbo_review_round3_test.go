@@ -127,7 +127,7 @@ func TestRP3_Review_SessionChecksInFlight(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			codes <- apiFrom(serverHandlerFn(""), ip, token, "/admin:inside:closeSessions?b=wrong"+strconv.Itoa(i)).code
+			codes <- apiFrom(serverHandlerFn(false), ip, token, "/admin:inside:closeSessions?b=wrong"+strconv.Itoa(i)).code
 		}()
 	}
 	wg.Wait()

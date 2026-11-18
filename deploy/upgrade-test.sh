@@ -89,8 +89,20 @@ sign_in() { # password; sets TOKEN and PASSWORD
 	PASSWORD="$1"
 }
 
-panel() { # action, parameters (urlencoded): prints the response and the code
-	curl -s -H "ok: $TOKEN" -w ' %{http_code}' --data "$2" "http://localhost/admin:inside:$1"
+panel() { # action, parameters (urlencoded): prints the response and the code, or "no session" for the login page
+	local response
+	response="$(curl -s -D "$TMPD/panel-headers" -H "ok: $TOKEN" -w ' %{http_code}' --data "$2" "http://localhost/admin:inside:$1")"
+	if grep -qi '^x-turbo-login:' "$TMPD/panel-headers"; then # Without a valid session the answer is the login page, also with 200
+		echo "no session"
+	else
+		echo "$response"
+	fi
+}
+
+setup() { # action, parameters: a step of the preparation; an answer other than 200 is shown (some versions answer "unchanged")
+	local response
+	response="$(panel "$1" "$2")"
+	[[ "$response" =~ \ 200$ ]] || echo "  note  $1 $2: $response"
 }
 
 # What is served, one line per request: code, the headers that matter and body.
@@ -118,34 +130,40 @@ chmod +x "$TMPD/cgi.sh"
 echo "== Previous version: configuration from the panel"
 start_turbo "$OLD_BIN" old || exit 1
 sign_in Admin || { echo "  FAIL  login with Turbo/Admin in the previous version"; exit 1; }
-panel addSite "s=a.test" >/dev/null
-panel addSite "s=s.test" >/dev/null
-panel addSubdomain "s=a.test&d=sub" >/dev/null
-panel addAlias "s=a.test&d=&a=alias.test" >/dev/null
-panel addRewrite "s=a.test&d=&a=/old&b=/new.html" >/dev/null
-panel addHeader "s=a.test&d=&a=X-Test&b=yes&c=Admin" >/dev/null # The password: since v2.4.2 (ignored before)
-panel addMIME "s=a.test&d=&a=dat&b=text/x-dat&c=Admin" >/dev/null
-panel addIndex "s=a.test&d=&a=start.html" >/dev/null
-panel addPreprocessor "s=a.test&d=&a=cgi&b=$TMPD/cgi.sh&c=Admin" >/dev/null
-panel addDenied "s=203.0.113.7&d=4102444800" >/dev/null
-panel addCharsReplace "s=!&d=-x-" >/dev/null
-panel addHttpCodeResponse "s=404&d=Not+here+{TURBO_RESPONSE_CODE}" >/dev/null
+# The current password goes with the actions that need it in some version (a parameter that an earlier one ignores):
+# addHeader, addMIME and addPreprocessor since v2.4.2, addCharsReplace and addHttpCodeResponse since v2.4.1, and
+# addDenied since v2.4.3.
+setup addSite "s=a.test"
+setup addSite "s=s.test"
+setup addSubdomain "s=a.test&d=sub"
+setup addAlias "s=a.test&d=&a=alias.test"
+setup addRewrite "s=a.test&d=&a=/old&b=/new.html"
+setup addHeader "s=a.test&d=&a=X-Test&b=yes&c=Admin"
+setup addMIME "s=a.test&d=&a=dat&b=text/x-dat&c=Admin"
+setup addIndex "s=a.test&d=&a=start.html"
+setup addPreprocessor "s=a.test&d=&a=cgi&b=$TMPD/cgi.sh&c=Admin"
+setup addDenied "s=203.0.113.7&d=4102444800&b=Admin"
+setup addCharsReplace "s=!&d=-x-&b=Admin"
+setup addHttpCodeResponse "s=404&d=Not+here+{TURBO_RESPONSE_CODE}&b=Admin"
 echo "start-a" >"$RUN/a.test/@/start.html"
 echo "new-a" >"$RUN/a.test/@/new.html"
 echo "data" >"$RUN/a.test/@/x.dat"
 echo "x" >"$RUN/a.test/@/x.cgi"
 echo "secure" >"$RUN/s.test/@/index.html"
-panel addIndex "s=s.test&d=&a=index.html" >/dev/null
+setup addIndex "s=s.test&d=&a=index.html"
 mkdir -p "$RUN/a.test/sub/@" && echo "sub-a" >"$RUN/a.test/sub/@/index.html"
 openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=s.test -addext subjectAltName=DNS:s.test \
 	-keyout "$RUN/s.test/privkey.pem" -out "$RUN/s.test/fullchain.pem" >/dev/null 2>&1
-panel cfgS "s=s.test&d=&a=1" >/dev/null
-check "setP" "$(panel setP "a=Secret2&b=Admin")" ".* 200"
-sign_in Secret2 || echo "  (the new password doesn't work in the previous version)"
+setup cfgS "s=s.test&d=&a=1"
+# 14 bytes: since v2.4.1 a new password has 12 to 64
+check "setP" "$(panel setP "a=Secret-pass-2x&b=Admin")" ".* 200"
+sign_in Secret-pass-2x || echo "  (the new password doesn't work in the previous version)"
 check "setC (save)" "$(panel setC "a=&b=$PASSWORD")" ".* 200"
 served >"$TMPD/before.txt"
 cat "$TMPD/before.txt"
 cp "$RUN/turbo.config" "$TMPD/old-config"
+check "character replacement saved by the previous version" "$(grep -c -- '-x-' "$RUN/turbo.config")" "[1-9][0-9]*"
+check "error template saved by the previous version" "$(grep -c 'Not here' "$RUN/turbo.config")" "[1-9][0-9]*"
 SCHEMA1=$(grep -q '"\^"' "$RUN/turbo.config" && echo no || echo yes)
 SAVES_HASH=$(grep -q '"PH"' "$RUN/turbo.config" && echo yes || echo no)
 echo "  turbo.config of the previous version: schema 1 = $SCHEMA1, password saved = $SAVES_HASH"
@@ -163,7 +181,7 @@ served >"$TMPD/after.txt"
 check "serves the same" "$(diff "$TMPD/before.txt" "$TMPD/after.txt" >"$TMPD/differences.txt" && echo same || echo different)" "same"
 [ -s "$TMPD/differences.txt" ] && cat "$TMPD/differences.txt"
 if [ "$SAVES_HASH" = yes ]; then
-	sign_in Secret2 && r=yes || r=no # Outside $(...), which would lose the TOKEN
+	sign_in Secret-pass-2x && r=yes || r=no # Outside $(...), which would lose the TOKEN
 	check "login with the saved password" "$r" "yes"
 else
 	sign_in Admin && r=yes || r=no
