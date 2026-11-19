@@ -19,10 +19,11 @@
 # default ones (Turbo/Admin), not even before the first login. Without it, the
 # default password signs in only from this machine (an SSH tunnel to port 80
 # works), without a proxy in front. Those variables
-# override turbo.config at every start: to change them, edit the file and
-# restart (a change from the panel lasts until the next start). Or, after the
-# first login, change the user and the password from the panel, save the
-# configuration and delete the file: from then on turbo.config rules.
+# override turbo.config at every start, and while they are set the panel can't
+# change the user or the password: edit the file and restart. To manage them
+# from the panel, remove them from the file and restart: those saved in
+# turbo.config apply (each "Save configuration" stores the ones in use), or the
+# default ones if it was never saved.
 #
 # Turbo runs without privileges: CAP_NET_BIND_SERVICE lets it open ports 80
 # and 443, and Turbo removes it from what the programs it runs inherit. The

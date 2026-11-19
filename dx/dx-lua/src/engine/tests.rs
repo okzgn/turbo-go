@@ -289,10 +289,10 @@ fn print_joins_only_what_it_writes() {
     let large = Value::String(lua.create_string("x".repeat(1 << 20)).unwrap());
     // 200 times a text of 1 MiB: 200 MiB joined, before, of which 64 KiB at most were written
     let args = MultiValue::from_vec(vec![large; 200]);
-    let (line, total) = print_line(&args, 100);
+    let (line, total) = print_line(&lua, &args, 100).unwrap();
     assert_eq!((line.len(), total), (101, 200 * (1 << 20) + 199), "the line is cut, its length counted whole");
     let short = MultiValue::from_vec(vec![Value::Nil, Value::Boolean(true), Value::Number(1.5)]);
-    assert_eq!(print_line(&short, 100), (b"nil\ttrue\t1.5".to_vec(), 12));
+    assert_eq!(print_line(&lua, &short, 100).unwrap(), (b"nil\ttrue\t1.5".to_vec(), 12));
 }
 
 #[test]
@@ -621,4 +621,107 @@ fn a_script_replaced_by_another_file_is_read_again() {
     std::fs::File::options().write(true).open(&other).unwrap().set_modified(date).unwrap();
     std::fs::rename(&other, &path).unwrap();
     assert_eq!(site.run_with(&mut engine, &Capabilities::none(), "same.lua", &[], b"").unwrap().body, b"two");
+}
+
+/// A number in the answer, and in what print writes, is written as Lua writes it (tostring): one with decimals was
+/// refused as "not a text or a number", and print wrote 1e300 with its 301 digits (review of v2.5.0, DX-4).
+#[test]
+fn numbers_are_written_as_lua_writes_them() {
+    let site = Site::new();
+    site.script("header.lua", r#"return { headers = { ["X-Ratio"] = 1.5, ["X-List"] = { 2, 0.25 } }, body = "ok" }"#)
+        .script("number.lua", "return { body = tonumber(REQUEST.params.n) }")
+        .script("nan.lua", "return { body = 0/0 }")
+        .script("inf.lua", "return { body = { 1/0, -1/0 } }")
+        .script("print.lua", "print(1e300, 2^53, 1/3, 42, -0.5, 1/0, true, nil) print(0/0) return 'printed'");
+    let response = site.run("header.lua", &[], b"").unwrap();
+    assert_eq!(header(&response, "X-Ratio"), vec![&b"1.5"[..]]);
+    assert_eq!(header(&response, "X-List"), vec![&b"2"[..], &b"0.25"[..]]);
+    let body = |n: &str| {
+        let response = site.run("number.lua", &[("QUERY_STRING", &format!("n={n}"))], b"").unwrap();
+        String::from_utf8(response.body).unwrap()
+    };
+    for (n, text) in [
+        ("2.5", "2.5"),
+        ("12", "12"),
+        ("-7", "-7"),
+        ("1e300", "1e+300"),
+        ("9007199254740992", "9.007199254741e+15"), // 2^53
+        ("100000000000000", "1e+14"),
+        ("99999999999999", "99999999999999"),
+        ("0.1", "0.1"),
+        ("1e-7", "1e-07"),
+    ] {
+        assert_eq!(body(n), text, "{n}");
+    }
+    let nan = site.body("nan.lua");
+    assert!(nan == "nan" || nan == "-nan", "{nan}");
+    assert!(site.run("inf.lua", &[], b"").unwrap_err().contains("isn't a text or a number"), "a table isn't a number");
+    let mut engine = LuaEngine::new(Config { print_line: keep_line, ..Config::default() });
+    PRINTED.with(|lines| lines.borrow_mut().clear());
+    assert_eq!(site.run_with(&mut engine, &Capabilities::none(), "print.lua", &[], b"").unwrap().body, b"printed");
+    let lines = PRINTED.with(|lines| lines.borrow().clone());
+    let start = "[dx-lua] example.test/print.lua: ";
+    assert_eq!(lines[0], format!("{start}1e+300	9.007199254741e+15	0.33333333333333	42	-0.5	inf	true	nil"));
+    assert!(lines[1] == format!("{start}nan") || lines[1] == format!("{start}-nan"), "{}", lines[1]);
+}
+
+/// A capability for the tests that panics.
+struct Panics;
+
+impl Capability for Panics {
+    fn name(&self) -> &'static str {
+        "panics"
+    }
+    fn functions(&self) -> &'static [&'static str] {
+        &["now"]
+    }
+    fn call(&mut self, _: usize, _: &Call, args: &[DxValue]) -> Result<DxValue, CapError> {
+        Ok(args[3].clone()) // Out of range: a panic
+    }
+}
+
+/// A panic of Rust inside what a script calls isn't an error that the script catches: it reaches Rust, where it ends
+/// the worker. pcall caught it, and the script went on with the text of the panic (review of v2.5.0, DX-2).
+#[test]
+fn a_panic_isnt_caught_by_a_script() {
+    let site = Site::new();
+    site.script(
+        "panic.lua",
+        r#"local ok, e = pcall(turbox.panics.now)
+        local ok2, e2 = xpcall(turbox.panics.now, function(e) return e end)
+        return "caught: " .. tostring(e) .. tostring(e2)"#,
+    );
+    let capabilities = Capabilities::none().with(Panics);
+    for timeout in ["0", "30000"] {
+        // With a time, pcall and xpcall are the wrapped ones (PRELUDE)
+        let extra = [("DX_GRANTS", "panics"), ("DX_TIMEOUT_MS", timeout)];
+        let run = std::panic::AssertUnwindSafe(|| {
+            site.run_with(&mut LuaEngine::new(Config::default()), &capabilities, "panic.lua", &extra, b"")
+        });
+        let panic = std::panic::catch_unwind(run).expect_err("the script went on after a panic");
+        let text = panic.downcast_ref::<String>().cloned().unwrap_or_default();
+        assert!(text.contains("index out of bounds"), "{text}");
+    }
+}
+
+/// A pipe with the name of a script isn't a file: answered 404 at once. Opened as a file is, the worker waited for
+/// someone to write to it (review of v2.5.0, DX-5).
+#[cfg(unix)]
+#[test]
+fn a_pipe_isnt_opened_as_a_script() {
+    let site = Site::new();
+    let made = std::process::Command::new("mkfifo").arg(site.www().join("pipe.lua")).status();
+    if !made.map(|status| status.success()).unwrap_or(false) {
+        return; // Without mkfifo, or where the folder of the tests can't have a pipe
+    }
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let pairs = site.pairs("pipe.lua", &[]);
+    std::thread::spawn(move || {
+        let request = Request::new(pairs, Vec::new());
+        let mut response = Response::new();
+        let result = LuaEngine::new(Config::default()).handle(&request, &Granted::none(&request), &mut response);
+        let _ = sender.send(result.map(|_| response));
+    });
+    let answer = receiver.recv_timeout(Duration::from_secs(10)).expect("the worker waits for the pipe");
+    assert_eq!(answer.unwrap(), Response::empty(404));
 }

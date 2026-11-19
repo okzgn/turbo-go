@@ -58,6 +58,9 @@ type checker struct {
 	cookies     bool
 	patternCost int // The instructions of the patterns of matches, in all
 	labelsAt    int // Where the last Labels placed in the host of a redirection is, for the errors
+	// A text of the expression may leave a "." and one label alone after Labels, to the end of the host
+	// ("SUBDOMAIN + '.com'"): allowed, and worth a warning of the caller (Program.LabelsBeforeOneLabel)
+	labelsOneLabel bool
 }
 
 func (c *checker) errorAt(pos int, message string) *Error { return errorAt(c.source, pos, message) }
@@ -274,7 +277,7 @@ func (c *checker) headerParts(n *node) *Error {
 		return nil
 	case opQuoted:
 		if c.options.NoQuoted {
-			return c.errorAt(n.pos, "quoted can't be used in this header: its grammar doesn't keep a quoted text together, and a \";\" or a space inside would still end the value; use token, urlencode or oneOf")
+			return c.errorAt(n.pos, "quoted can't be used in this header: what reads it doesn't keep a quoted text as one value (a \";\" or a space inside still ends it, or the quotes are dropped); use token, urlencode or oneOf")
 		}
 		return nil
 	case opConcat:
@@ -464,6 +467,9 @@ func (c *checker) advance(n *node, in position, text string) (position, *Error) 
 		host := text // What of the text is still the host
 		if end := strings.IndexAny(host, "/?#"); end != -1 {
 			host = host[:end]
+		}
+		if in&afterLabels != 0 && len(host) > 1 && host[0] == '.' && strings.IndexByte(host[1:], '.') == -1 {
+			c.labelsOneLabel = true
 		}
 		switch {
 		case in&afterLabels != 0 && (host == "" || host[0] != '.'):

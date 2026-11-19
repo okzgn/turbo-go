@@ -21,6 +21,8 @@ func (r sameRequest) Cookie(string) string     { return r.b }
 func (r sameRequest) HTTPS() bool              { return r.https }
 
 var fuzzSeeds = []string{
+	`'https://' + SUBDOMAIN + '.example.org'`, // The example of the API: labels that the client may choose start the host
+	`'https://' + SUBDOMAIN + '.' + FIRST_DOMAIN + '/home'`,
 	`'no-cache'`,
 	`EXT in ['js', 'css'] ? 'public, max-age=31536000' : 'no-cache'`,
 	`oneOf(HEADER('Origin'), ['https://a.example', 'https://b.example'])`,
@@ -109,7 +111,9 @@ func FuzzEvaluate(f *testing.F) {
 				t.Fatalf("%q gave an empty part: %+v", source, parts)
 			}
 			if part.Class != Const {
-				if at == positionStart || at == positionHost && part.Class != Config && part.Class != Host {
+				// Labels too: whether a "." and the rest of the host follow them is the caller's to check as it places
+				// the parts (the server's expressionTarget), as a part that gives nothing isn't among them
+				if at == positionStart || at == positionHost && part.Class != Config && part.Class != Host && part.Class != Labels {
 					t.Fatalf("%q placed part %d (%+v) where it can't go: %+v", source, i, part, parts)
 				}
 				continue

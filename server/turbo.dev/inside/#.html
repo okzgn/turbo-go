@@ -503,6 +503,10 @@ document.addEventListener('DOMContentLoaded', function(){
 		if(!reverseFlag && (charKey = undoCharReplacements(encodedValue)) != inputValue){ ambiguousValues.push({ sent: encodeURIComponent(encodedValue), value: inputValue, received: charKey }); } // The server would read another text: apiRequest doesn't send it
 		return encodedValue;
 	}
+	function nameAsSent(name, received){ // A name sent as typed (an extension, a header, an alias): if a replacement's token is in it, the server would read another name, and apiRequest doesn't send it
+		if(typeof name == 'string' && name && (received = undoCharReplacements(name)) != name){ ambiguousValues.push({ sent: encodeURIComponent(name), value: name, received: received }); }
+		return name;
+	}
 	function undoCharReplacements(inputValue, tokens, chars, charKey){ // As the server does: tokens don't contain one another, so their order doesn't matter
 		tokens = [], chars = {};
 		for(charKey in charReplacementMap){ tokens.push(charReplacementMap[charKey].replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), chars[charReplacementMap[charKey]] = charKey; }
@@ -859,7 +863,7 @@ document.addEventListener('DOMContentLoaded', function(){
 				event.preventDefault(), context = getCurrentContext(), triggerEl = this, aliasValue = triggerEl.alias;
 				showDialog('confirm', {
 					text: 'Delete the alias "' + aliasValue + '" of "' + context.site + '"?',
-					okFn: function(){ apiRequest((triggerEl.href + '&s=' + encodeURIComponent(context.domain) + '&d=' + encodeURIComponent(context.subdomain)), function(r){ statusMessageEl.dataset.ok = r, container.removeChild(newLinkEl), (delete mainPanel.site[context.subdomain][CONFIG_KEYS.ALIASES][aliasValue]); }, function(e){ statusMessageEl.dataset.error = e; }); }
+					okFn: function(){ nameAsSent(aliasValue), apiRequest((triggerEl.href + '&s=' + encodeURIComponent(context.domain) + '&d=' + encodeURIComponent(context.subdomain)), function(r){ statusMessageEl.dataset.ok = r, container.removeChild(newLinkEl), (delete mainPanel.site[context.subdomain][CONFIG_KEYS.ALIASES][aliasValue]); }, function(e){ statusMessageEl.dataset.error = e; }); }
 				});
 			};
 		},
@@ -874,14 +878,14 @@ document.addEventListener('DOMContentLoaded', function(){
 			deleteBtn = createDeleteButton(newLinkEl, '/admin:inside:delMIME'), fromOrName = newLinkEl.mime.from, toOrContent = newLinkEl.mime.to,
 			deleteBtn.onclick = function(event){
 				event.preventDefault();
-				showDialogSequence({ type: 'confirm', text: 'Delete the MIME "' + fromOrName + '" with "' + toOrContent + '"?', abortOnCancel: true }, { text: 'Current password:', secret: true, required: true, okFn: function(z, password){ apiRequest((deleteBtn.href + getCurrentContext().request + '&a=' + encodeURIComponent(fromOrName) + '&b=' + encodeURIComponent(password)), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.MIME_TYPES][fromOrName]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
+				showDialogSequence({ type: 'confirm', text: 'Delete the MIME "' + fromOrName + '" with "' + toOrContent + '"?', abortOnCancel: true }, { text: 'Current password:', secret: true, required: true, okFn: function(z, password){ apiRequest((deleteBtn.href + getCurrentContext().request + '&a=' + encodeURIComponent(nameAsSent(fromOrName)) + '&b=' + encodeURIComponent(password)), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.MIME_TYPES][fromOrName]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
 			}, newLinkEl.onclick = function(event){ event.preventDefault(), tempEditValues[0] = fromOrName, tempEditValues[1] = toOrContent, addMimeLink.onclick.call(this); };
 		},
 		'box-headers': function handleNewHeaderEntry(container, newLinkEl, deleteBtn, fromOrName, toOrContent){
 			deleteBtn = createDeleteButton(newLinkEl, '/admin:inside:delHeader'), fromOrName = newLinkEl.header.name, toOrContent = newLinkEl.header.content,
 			deleteBtn.onclick = function(event){
 				event.preventDefault();
-				showDialogSequence({ type: 'confirm', text: 'Delete the header "' + fromOrName + '" with "' + shortValue(toOrContent) + '"?', abortOnCancel: true }, { text: 'Current password:', secret: true, required: true, okFn: function(z, password){ apiRequest((deleteBtn.href + getCurrentContext().request + '&a=' + encodeURIComponent(fromOrName) + '&b=' + encodeURIComponent(password)), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.HEADERS][fromOrName]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
+				showDialogSequence({ type: 'confirm', text: 'Delete the header "' + fromOrName + '" with "' + shortValue(toOrContent) + '"?', abortOnCancel: true }, { text: 'Current password:', secret: true, required: true, okFn: function(z, password){ apiRequest((deleteBtn.href + getCurrentContext().request + '&a=' + encodeURIComponent(nameAsSent(fromOrName)) + '&b=' + encodeURIComponent(password)), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.HEADERS][fromOrName]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
 			}, newLinkEl.onclick = function(event){ event.preventDefault(), tempEditValues[0] = fromOrName, tempEditValues[1] = toOrContent, addHeaderLink.onclick.call(this); };
 		},
 		'box-preprocessors': function handleNewPreprocessorEntry(container, newLinkEl, deleteBtn, fromOrName, toOrContent){
@@ -890,7 +894,7 @@ document.addEventListener('DOMContentLoaded', function(){
 				event.preventDefault();
 				// Without its preprocessor, the extension's files would be served as text, their source included: the
 				// current password is asked, as to add one
-				showDialogSequence({ type: 'confirm', text: 'Delete the preprocessor for "' + fromOrName + '" with "' + toOrContent + '"? Its files would be served as text, their source code included.', abortOnCancel: true }, { text: 'Current password:', secret: true, required: true, okFn: function(z, password){ apiRequest((deleteBtn.href + getCurrentContext().request + '&a=' + encodeURIComponent(fromOrName) + '&b=' + encodeURIComponent(password)), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.PREPROCESSORS][fromOrName]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
+				showDialogSequence({ type: 'confirm', text: 'Delete the preprocessor for "' + fromOrName + '" with "' + toOrContent + '"? Its files would be served as text, their source code included.', abortOnCancel: true }, { text: 'Current password:', secret: true, required: true, okFn: function(z, password){ apiRequest((deleteBtn.href + getCurrentContext().request + '&a=' + encodeURIComponent(nameAsSent(fromOrName)) + '&b=' + encodeURIComponent(password)), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.PREPROCESSORS][fromOrName]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
 			}, newLinkEl.onclick = function(event){ event.preventDefault(), tempEditValues[0] = fromOrName, tempEditValues[1] = toOrContent, addPreprocessorLink.onclick.call(this); };
 		},
 		'box-indexes': function handleNewIndexEntry(container, newLinkEl, deleteBtn, indexValue, context){
@@ -1341,7 +1345,7 @@ document.addEventListener('DOMContentLoaded', function(){
 			text: 'Alias:',
 			required: true,
 			okFn: function(z, c){
-				e = getCurrentContext(), apiRequest((f.href + e.request + '&a=' + encodeURIComponent(c)), function(r){ statusMessageEl.dataset.ok = r, createSimpleEntryLink(addAliasLink.nextElementSibling, c), mainPanel.site[e.subdomain][CONFIG_KEYS.ALIASES][c] = ''; }, function(e){ statusMessageEl.dataset.error = e; });
+				e = getCurrentContext(), apiRequest((f.href + e.request + '&a=' + encodeURIComponent(nameAsSent(c))), function(r){ statusMessageEl.dataset.ok = r, createSimpleEntryLink(addAliasLink.nextElementSibling, c), mainPanel.site[e.subdomain][CONFIG_KEYS.ALIASES][c] = ''; }, function(e){ statusMessageEl.dataset.error = e; });
 			}
 		});
 	};
@@ -1408,7 +1412,7 @@ document.addEventListener('DOMContentLoaded', function(){
 				b = z.previous.previous.finalValue, c = d.mimeType,
 				b = applyCharReplacements((b.charAt(0) != '.' ? b : b.slice(1)), 1).toLowerCase(), // As the server keeps it
 				e = 'mime',
-				apiRequest((addMimeLink.href + getCurrentContext().request + '&a=' + encodeURIComponent(b) + '&b=' + encodeURIComponent(applyCharReplacements(c)) + '&c=' + encodeURIComponent(password)), function(r, s, t, u){
+				apiRequest((addMimeLink.href + getCurrentContext().request + '&a=' + encodeURIComponent(nameAsSent(b)) + '&b=' + encodeURIComponent(applyCharReplacements(c)) + '&c=' + encodeURIComponent(password)), function(r, s, t, u){
 					if(b in subdomainPanel.subdomain[CONFIG_KEYS.MIME_TYPES]){ t = findEntryByProperty(addMimeLink.nextElementSibling, 'a', [e, 'from'], b); }
 					statusMessageEl.dataset.ok = r, subdomainPanel.subdomain[CONFIG_KEYS.MIME_TYPES][b] = c, createKeyValueEntry(addMimeLink.nextElementSibling, b, e, c);
 					if(tempEditValues[0] != null){
@@ -1446,7 +1450,7 @@ document.addEventListener('DOMContentLoaded', function(){
 			okFn: function(z, password){
 				b = z.previous.previous.finalValue, c = d.headerContent,
 				b = applyCharReplacements(b, 1), e = 'header',
-				apiRequest((addHeaderLink.href + getCurrentContext().request + '&a=' + encodeURIComponent(b) + '&b=' + encodeURIComponent(applyCharReplacements(c)) + '&c=' + encodeURIComponent(password)), function(r, s, t, u){
+				apiRequest((addHeaderLink.href + getCurrentContext().request + '&a=' + encodeURIComponent(nameAsSent(b)) + '&b=' + encodeURIComponent(applyCharReplacements(c)) + '&c=' + encodeURIComponent(password)), function(r, s, t, u){
 					if(b in subdomainPanel.subdomain[CONFIG_KEYS.HEADERS]){ t = findEntryByProperty(addHeaderLink.nextElementSibling, 'a', [e, 'name'], b); }
 					statusMessageEl.dataset.ok = r, subdomainPanel.subdomain[CONFIG_KEYS.HEADERS][b] = c, createKeyValueEntry(addHeaderLink.nextElementSibling, b, e, c, function(a, b){ return { name: b, content: a } });
 					if(tempEditValues[0] != null){
@@ -1484,7 +1488,7 @@ document.addEventListener('DOMContentLoaded', function(){
 				b = z.previous.previous.finalValue, c = d.executable,
 				b = applyCharReplacements((b.charAt(0) != '.' ? b : b.slice(1)), 1),
 				e = 'preprocessor',
-				apiRequest((addPreprocessorLink.href + getCurrentContext().request + '&a=' + encodeURIComponent(b) + '&b=' + encodeURIComponent(c) /* The path as typed: no character replacements */ + '&c=' + encodeURIComponent(password)), function(r, s, t, u){
+				apiRequest((addPreprocessorLink.href + getCurrentContext().request + '&a=' + encodeURIComponent(nameAsSent(b)) + '&b=' + encodeURIComponent(c) /* The path as typed: no character replacements */ + '&c=' + encodeURIComponent(password)), function(r, s, t, u){
 					if(b in subdomainPanel.subdomain[CONFIG_KEYS.PREPROCESSORS]){ t = findEntryByProperty(addPreprocessorLink.nextElementSibling, 'a', [e, 'from'], b); }
 					statusMessageEl.dataset.ok = r, subdomainPanel.subdomain[CONFIG_KEYS.PREPROCESSORS][b] = c, createKeyValueEntry(addPreprocessorLink.nextElementSibling, b, e, c);
 					if(tempEditValues[0] != null){

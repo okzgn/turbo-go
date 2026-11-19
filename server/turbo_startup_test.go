@@ -120,7 +120,7 @@ func TestRL_F6_InvalidTurboUser(t *testing.T) {
 	select {
 	case err := <-p.done:
 		p.done <- err
-		if err == nil || !strings.Contains(p.out.String(), "TURBO_USER must have 1 to 24 characters") {
+		if err == nil || !strings.Contains(p.out.String(), "TURBO_USER must have 1 to 24 bytes") {
 			t.Errorf("exit %v with:\n%s", err, p.out.String())
 		}
 	case <-time.After(10 * time.Second):

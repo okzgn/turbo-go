@@ -98,7 +98,7 @@ func dynamic(mode preprocessorMode, basePath string, requestPath string, querySt
 	// not at all, holds no slot (with the network body, the CGI waited for it until RT), and a CGI always gets
 	// CONTENT_LENGTH (chunked, or HTTP/2 without Content-Length). It reaches the CGI through a pipe.
 	request.Body = customNetHttp.MaxBytesReader(responseWriter, request.Body, maxBodySize.Load())
-	body, size, cleanup, err := bufferedRequestBody(request.Body, request.ContentLength)
+	body, size, cleanup, err := bufferedRequestBodyOf(cgiSlotKeys(ipAddr(request.RemoteAddr)), request.Body, request.ContentLength)
 	if err != nil {
 		var tooLarge *customNetHttp.MaxBytesError
 		switch {
@@ -115,7 +115,11 @@ func dynamic(mode preprocessorMode, basePath string, requestPath string, querySt
 		}
 		return
 	}
-	defer cleanup()
+	// The body is given back as soon as the CGI is done with it (below), not when its response has reached the client:
+	// kept until then, a client that didn't read its responses held the budgets of the bodies, which are for every
+	// site, with CGIs that had ended. Here for the ways out before that, and for a panic.
+	releaseBody := sync.OnceFunc(cleanup)
+	defer releaseBody()
 	request.Body, request.ContentLength, request.TransferEncoding = body, size, nil
 	slotKeys, gotSlot := acquireCGISlot(request.Context(), ipAddr(request.RemoteAddr), cgiSlotWait)
 	if !gotSlot {
@@ -152,6 +156,7 @@ func dynamic(mode preprocessorMode, basePath string, requestPath string, querySt
 		if slotHeld {
 			releaseCGISlot(slotKeys)
 		}
+		releaseBody() // No one reads it any more: the mode has returned, and its process has ended
 		if completed {
 			output.finish() // What is left reaches the client, the slot already free
 		} else {
@@ -169,11 +174,21 @@ func dynamic(mode preprocessorMode, basePath string, requestPath string, querySt
 	}
 	// The client's query goes first, without the parameters that the rewrite's query sets, and the rewrite's after it:
 	// an application gets the rewrite's value whether it reads the first of a repeated parameter (Python's parse_qs,
-	// Perl's CGI.pm, Go's Query().Get) or the last (PHP). Only the last was the rewrite's.
+	// Perl's CGI.pm) or the last (PHP). Only the last was the rewrite's.
+	rewriteQuery := queryString != ""
 	if clientQuery := withoutParametersOf(request.URL.RawQuery, queryString); clientQuery != "" && queryString != "" {
 		queryString = clientQuery + "&" + queryString
 	} else if clientQuery != "" {
 		queryString = clientQuery
+	}
+	// REQUEST_URI is the path that the client asked for (what the routers of the applications read) and, where the
+	// rewrite has a query, that same query: an application that takes its parameters from REQUEST_URI and not from
+	// QUERY_STRING (a CGI of Go: net/http/cgi makes the URL of the request from it) got the client's value of a
+	// parameter that the rewrite sets.
+	requestURI := request.URL.RequestURI()
+	if rewriteQuery {
+		path, _, _ := strings.Cut(requestURI, "?")
+		requestURI = path + "?" + queryString
 	}
 	if timeout > 0 {
 		// The connection's write deadline (WT from the end of the request) would pass right when the CGI is cut:
@@ -181,7 +196,7 @@ func dynamic(mode preprocessorMode, basePath string, requestPath string, querySt
 		// of a CGI that runs out of time reaches the client.
 		_ = customNetHttp.NewResponseController(responseWriter).SetWriteDeadline(time.Now().Add(timeout + 2*time.Second)) // Not supported only by test writers
 	}
-	mode.serve(&dynamicJob{request: request, output: output, executable: executable, basePath: basePath, requestPath: requestPath, queryString: queryString, timeout: timeout})
+	mode.serve(&dynamicJob{request: request, output: output, executable: executable, basePath: basePath, requestPath: requestPath, queryString: queryString, requestURI: requestURI, timeout: timeout})
 	completed = true
 	releaseCGISlot(slotKeys) // The CGI has ended: its slot is free while its output reaches the client
 	slotHeld = false
@@ -874,8 +889,9 @@ func (cgiMode) serve(job *dynamicJob) {
 	handler.Env = append(handler.Env, "DOCUMENT_ROOT="+job.basePath)
 	handler.Env = append(handler.Env, "SCRIPT_FILENAME="+job.basePath+job.requestPath)
 	// The script's URL path, after the rewrite, and no extra path: what the handler derives from Root is a path on
-	// disk, which an application would show (PHP_SELF) or put in its links. REQUEST_URI stays the original one.
-	handler.Env = append(handler.Env, "SCRIPT_NAME="+job.requestPath, "PATH_INFO=")
+	// disk, which an application would show (PHP_SELF) or put in its links. REQUEST_URI stays the original path, with
+	// the query of QUERY_STRING (dynamic).
+	handler.Env = append(handler.Env, "SCRIPT_NAME="+job.requestPath, "PATH_INFO=", "REQUEST_URI="+job.uri())
 	handler.ServeHTTP(job.output, job.request)
 }
 
@@ -961,7 +977,7 @@ func (e cgiBodyFileError) Error() string {
 // cgiBodyBudget is how much of the request bodies of the CGIs may be in memory at once, all of them: the rest go to
 // temporary files. Each body was read whole into memory, up to cgiBodyMemory, before its CGI got a slot, and kept
 // there while it waited for one and while it ran, with nothing that bounded how many there were. A variable, so that
-// tests can lower it.
+// tests can lower it. It is kept until its CGI has ended, not until the response has reached the client.
 var cgiBodyBudget int64 = 32 << 20
 
 // cgiBodyInUse is what the request bodies of the CGIs take in memory.
@@ -998,26 +1014,113 @@ func reserveBodyMemory(size int64) bool {
 	}
 }
 
-// bufferedRequestBody reads a request body, already bounded by MBB, before the CGI starts, so that the CGI gets
-// CONTENT_LENGTH and doesn't wait for the client: in memory up to cgiBodyMemory, while cgiBodyBudget allows it, and in
-// a temporary file beyond. expected is the length the request gives (Content-Length), or -1. cleanup gives back the
-// memory, or closes that file, which deletes it (it has no name).
+// cgiBodyShares is what the request bodies of each client take of the two budgets (cgiBodyBudget and
+// cgiBodyFileBudget), by the keys of its CGI slots (cgiSlotKeys: the client and, in IPv6, its /48). A client may take
+// a quarter of each budget, and a /48 half, as of the slots and of the output: without a share, the bodies of one
+// client took all of both, and every other client's request with a body for a CGI got 503.
+var cgiBodyShares struct {
+	mutex  sync.Mutex
+	memory map[string]int64
+	files  map[string]int64
+}
+
+// reserveBodyShare takes size bytes of the share of each of keys in the budget of the memory, or in that of the
+// files, if they fit in all of them. Without keys there is no share to take (the tests of the budgets alone).
+func reserveBodyShare(keys []string, size int64, files bool) bool {
+	if len(keys) == 0 {
+		return true
+	}
+	budget := cgiBodyBudget
+	if files {
+		budget = cgiBodyFileBudget()
+	}
+	cgiBodyShares.mutex.Lock()
+	defer cgiBodyShares.mutex.Unlock()
+	if cgiBodyShares.memory == nil {
+		cgiBodyShares.memory, cgiBodyShares.files = make(map[string]int64), make(map[string]int64)
+	}
+	used := cgiBodyShares.memory
+	if files {
+		used = cgiBodyShares.files
+	}
+	for index, key := range keys {
+		share := budget / 4 // The client
+		if index > 0 {      // Its /48
+			share = budget / 2
+		}
+		if used[key]+size > share {
+			return false
+		}
+	}
+	for _, key := range keys {
+		used[key] += size
+	}
+	return true
+}
+
+// releaseBodyShare gives back what reserveBodyShare took.
+func releaseBodyShare(keys []string, size int64, files bool) {
+	if len(keys) == 0 || size == 0 {
+		return
+	}
+	cgiBodyShares.mutex.Lock()
+	defer cgiBodyShares.mutex.Unlock()
+	used := cgiBodyShares.memory
+	if files {
+		used = cgiBodyShares.files
+	}
+	for _, key := range keys {
+		if used[key] -= size; used[key] <= 0 {
+			delete(used, key)
+		}
+	}
+}
+
+// bufferedRequestBody is bufferedRequestBodyOf without a client: the budgets alone, without the share of each one.
 func bufferedRequestBody(body io.Reader, expected int64) (io.ReadCloser, int64, func(), error) {
+	return bufferedRequestBodyOf(nil, body, expected)
+}
+
+// bufferedRequestBodyOf reads a request body, already bounded by MBB, before the CGI starts, so that the CGI gets
+// CONTENT_LENGTH and doesn't wait for the client: in memory up to cgiBodyMemory, while cgiBodyBudget and the share of
+// its client (keys, cgiBodyShares) allow it, and in a temporary file beyond; a body that doesn't fit in the budget of
+// the files, or in its client's share of it, gives errCGIBodyFilesFull. expected is the length the request gives
+// (Content-Length), or -1. cleanup gives back the memory, or closes that file, which deletes it (it has no name).
+func bufferedRequestBodyOf(keys []string, body io.Reader, expected int64) (io.ReadCloser, int64, func(), error) {
+	if expected == 0 { // No body: nothing to keep. It took a byte of the budget, or a temporary file when that didn't fit
+		return io.NopCloser(bytes.NewReader(nil)), 0, func() {}, nil
+	}
 	var memory []byte
 	var reserved int64
 	release := func() {
 		cgiBodyInUse.Add(-reserved)
+		releaseBodyShare(keys, reserved, false)
 		reserved = 0
 	}
-	// In blocks taken from the budget: the first as long as the request says (and one byte more, to see its end), or
-	// 32 KiB, and then twice as long each time. A body longer than cgiBodyMemory goes straight to the file.
-	block := int64(32 << 10)
-	if expected >= 0 {
-		block = expected + 1
+	reserveBodyMemory := func(size int64) bool {
+		if !reserveBodyShare(keys, size, false) {
+			return false
+		}
+		if !reserveBodyMemory(size) {
+			releaseBodyShare(keys, size, false)
+			return false
+		}
+		return true
 	}
+	// In blocks taken from the budget as the body arrives: the first of 32 KiB, or as long as the request says (and one
+	// byte more, to see its end) if that is less, and then twice as long each time, never beyond what the request
+	// says. Taken whole for what the request said, a request that sent only its headers held a megabyte of the budget
+	// of every site until RT. A body longer than cgiBodyMemory goes straight to the file.
+	block := int64(32 << 10)
 	for expected <= cgiBodyMemory && int64(len(memory)) <= cgiBodyMemory {
 		grow := min(block, cgiBodyMemory+1-int64(len(memory)))
-		if !reserveBodyMemory(grow) { // The bodies of the other requests take the budget: the file
+		if expected >= 0 {
+			grow = min(grow, expected+1-int64(len(memory)))
+		}
+		if grow <= 0 { // More than the request said: never with a body that its length bounds; the file takes it
+			break
+		}
+		if !reserveBodyMemory(grow) { // The bodies of the other requests, or of this client, take the budget: the file
 			break
 		}
 		reserved += grow
@@ -1039,10 +1142,11 @@ func bufferedRequestBody(body io.Reader, expected int64) (io.ReadCloser, int64, 
 		release()
 		return nil, 0, nil, cgiBodyFileError{err}
 	}
-	writer := &cgiBodyWriter{file: file}
+	writer := &cgiBodyWriter{file: file, keys: keys}
 	cleanup := func() {
 		_ = file.Close()
 		cgiBodyFilesInUse.Add(-writer.reserved) // What it took of the budget of the files, once it is gone
+		releaseBodyShare(keys, writer.reserved, true)
 		writer.reserved = 0
 	}
 	size, err := io.Copy(writer, io.MultiReader(bytes.NewReader(memory), body))
@@ -1064,13 +1168,18 @@ func bufferedRequestBody(body io.Reader, expected int64) (io.ReadCloser, int64, 
 // it took, given back when the file is closed.
 type cgiBodyWriter struct {
 	file     *os.File
+	keys     []string // Its client's, for its share of the budget (cgiBodyShares)
 	reserved int64
 }
 
 func (w *cgiBodyWriter) Write(p []byte) (int, error) {
 	size := int64(len(p))
+	if !reserveBodyShare(w.keys, size, true) {
+		return 0, errCGIBodyFilesFull
+	}
 	if cgiBodyFilesInUse.Add(size) > cgiBodyFileBudget() {
 		cgiBodyFilesInUse.Add(-size)
+		releaseBodyShare(w.keys, size, true)
 		return 0, errCGIBodyFilesFull
 	}
 	w.reserved += size

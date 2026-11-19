@@ -55,6 +55,12 @@ var dxLuaScripts = map[string]string{
 	"loop.lua":    `while true do end`,
 	"memory.lua":  `local s = "x" for i = 1, 40 do s = s .. s end return #s`,
 	"n.lua":       `return REQUEST.params.n`,
+	"deep.lua": `
+		local depth = 0
+		local function f() depth = depth + 1 return (string.gsub("x", "x", f)) end
+		local ok, message = pcall(f)
+		return tostring(ok) .. "|" .. depth .. "|" .. tostring(message)`,
+	"number.lua": `return { headers = { ["X-Ratio"] = 1.5 }, body = 2.5 }`,
 }
 
 func setupDXLua(t *testing.T) (string, string) {
@@ -144,6 +150,29 @@ func TestDXLuaTime(t *testing.T) {
 	}
 	if code, body := dxRequest(t, "GET", base, "/hello.lua", nil, nil); code != 200 || !strings.Contains(body, "world") {
 		t.Errorf("after it: %d %q", code, body)
+	}
+}
+
+// V2.5.0 review DX-1: a script that recurses through a function of the library (string.gsub with a function) gets
+// LuaJIT's "stack overflow", an error that pcall catches, and its worker goes on: the stack of C ran out first, the
+// worker ended, and so did the one of the retry. And DX-4: a number with decimals is a body and a header's value.
+func TestDXLuaDeepRecursionKeepsTheWorker(t *testing.T) {
+	_, base := setupDXLua(t)
+	logs := captureLog(t)
+	for attempt := 0; attempt < 2; attempt++ {
+		code, body := dxRequest(t, "GET", base, "/deep.lua", nil, nil)
+		if code != 200 || !strings.HasPrefix(body, "false|") || !strings.Contains(body, "stack overflow") {
+			t.Fatalf("request %d of a script that recurses through string.gsub: %d %q; expected the error caught by pcall", attempt+1, code, body)
+		}
+	}
+	if code, body := dxRequest(t, "GET", base, "/number.lua", nil, nil); code != 200 || body != "2.5" {
+		t.Errorf("a number as the body: %d %q", code, body)
+	}
+	if code, body := dxRequest(t, "GET", base, "/hello.lua", nil, nil); code != 200 || !strings.Contains(body, "world") {
+		t.Errorf("after them: %d %q", code, body)
+	}
+	if text := logs.String(); strings.Contains(text, "the worker ended") || strings.Contains(text, "overflowed its stack") {
+		t.Errorf("a worker ended: %s", text)
 	}
 }
 

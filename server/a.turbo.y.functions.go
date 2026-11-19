@@ -40,6 +40,7 @@ import (
 	"os/exec"
 	pathpkg "path"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -779,7 +780,10 @@ func publishCertificates() {
 			byName[name] = cert
 		}
 	}
-	if panelCertificate != nil {
+	// The panel's goes first while it is valid. Expired (one put by hand isn't renewed), it goes with the expired ones,
+	// first among them: it won over the valid certificate of a site for every name that both covered.
+	panelValid := certificateValid(panelCertificate, now)
+	if panelCertificate != nil && panelValid {
 		for _, name := range certificateNames(panelCertificate) {
 			take(name, panelCertificate)
 		}
@@ -790,6 +794,14 @@ func publishCertificates() {
 		}
 	}
 	for _, valid := range []bool{true, false} { // The other names of the valid ones, then of the others
+		if !valid && panelCertificate != nil && !panelValid {
+			for _, name := range certificateNames(panelCertificate) {
+				if _, parent, _ := strings.Cut(name, "."); parent != "" && certificateValid(byName["*."+parent], now) {
+					continue // As below: a valid wildcard keeps the name
+				}
+				take(name, panelCertificate)
+			}
+		}
 		for _, key := range siteKeys {
 			if cert := siteCertificates[key]; certificateValid(cert, now) == valid {
 				for _, name := range certificateNames(cert) {
@@ -819,7 +831,14 @@ func scheduleCertificatesPublish(now time.Time) {
 		certificatesPublishTimer = nil
 	}
 	var next time.Time
+	certificates := make([]*tls.Certificate, 0, len(siteCertificates)+1)
 	for _, cert := range siteCertificates {
+		certificates = append(certificates, cert)
+	}
+	if panelCertificate != nil { // Its place among the others changes when it expires
+		certificates = append(certificates, panelCertificate)
+	}
+	for _, cert := range certificates {
 		if leaf := certificateLeaf(cert); leaf != nil {
 			for _, moment := range []time.Time{leaf.NotBefore, leaf.NotAfter} {
 				if moment.After(now) && (next.IsZero() || moment.Before(next)) {
@@ -872,7 +891,9 @@ func certificateCovers(cert *tls.Certificate, siteKey string) bool {
 
 // sameCertificate reports whether two certificates are the same one (their first certificates are).
 func sameCertificate(a *tls.Certificate, b *tls.Certificate) bool {
-	return a != nil && b != nil && len(a.Certificate) > 0 && len(b.Certificate) > 0 && bytes.Equal(a.Certificate[0], b.Certificate[0])
+	// The whole chain: with the leaf alone, a chain put right on disk (an intermediate that was missing) was taken
+	// for the one in use, and the incomplete one went on being served until a restart
+	return a != nil && b != nil && len(a.Certificate) > 0 && slices.EqualFunc(a.Certificate, b.Certificate, bytes.Equal)
 }
 
 // panelCertificate is the certificate of the panel's own host, read from <sites>/turbo.panel/ (nil without one),
@@ -1529,16 +1550,19 @@ func panelCertificateAction(action string, email string, adapter string, setAdap
 	if action != "0" && action != "1" {
 		return false, "Invalid value"
 	}
+	// Both checked before either is kept: an e-mail was saved by a request that was then refused for its adapter
 	if email != "" {
 		if problem := certbotEmailProblem(email); problem != "" {
 			return false, problem
 		}
+	}
+	if setAdapter && adapter != "" && !validCertbotAdapter.MatchString(adapter) {
+		return false, "Invalid adapter: dns-<provider> is accepted"
+	}
+	if email != "" {
 		panelCertEmail = email
 	}
 	if setAdapter {
-		if adapter != "" && !validCertbotAdapter.MatchString(adapter) {
-			return false, "Invalid adapter: dns-<provider> is accepted"
-		}
 		panelCertAdapter = adapter
 	}
 	panelDir := sitesDir.Get() + panelCertDirName + "/"
@@ -1637,13 +1661,13 @@ func panelACMEChallenge(responseWriter customNetHttp.ResponseWriter, request *cu
 		return true
 	}
 	defer root.Close()
-	file, err := root.Open(token)
+	file, info, err := openSiteFile(root, token) // Never a FIFO
 	if err != nil {
 		reqMsg(responseWriter, 404)
 		return true
 	}
 	defer file.Close()
-	if info, err := file.Stat(); err != nil || !info.Mode().IsRegular() || info.Size() > 4096 {
+	if !info.Mode().IsRegular() || info.Size() > 4096 {
 		reqMsg(responseWriter, 404)
 		return true
 	}

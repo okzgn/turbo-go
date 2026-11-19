@@ -71,11 +71,8 @@ func ipBlocked(client clientAddress) (bool, int64) {
 // rejected, it returns the status (429 for the IP, 503 for the whole server) and the seconds to send in
 // Retry-After; otherwise status is 0.
 func rateLimited(client clientAddress) (status int, retryAfter int64) {
-	if perIPNotAvailable(client, true) {
-		if blocked, retryAfter := ipBlocked(client); blocked {
-			return 429, retryAfter
-		}
-		return 429, 1
+	if rejected, retryAfter := perIPRejected(client, true); rejected {
+		return 429, retryAfter
 	}
 	if globalRateExceeded() {
 		return 503, 1
@@ -244,17 +241,33 @@ func cleanIPReferences() {
 // count (which restarts after CIL): with t elapsed, CII × (⌊t/CIS⌋ + 1) requests are allowed, the current one
 // included. Going over blocks the client for 5 seconds.
 func perIPNotAvailable(client clientAddress, incrementCounter bool) bool {
-	if deniedUntil(client) > time.Now().Unix() { // Without the global lock, like the rest of the limiter
-		return true
+	rejected, _ := perIPRejected(client, incrementCounter)
+	return rejected
+}
+
+// perIPRejected is perIPNotAvailable with the seconds left of the block that rejects the request (of the entry
+// counted, shared or not); the line of turbo.denials is written once the entry is unlocked.
+func perIPRejected(client clientAddress, incrementCounter bool) (bool, int64) {
+	nowUnix := time.Now().Unix()
+	if until := deniedUntil(client); until > nowUnix { // Without the global lock, like the rest of the limiter
+		return true, until - nowUnix
 	}
 
 	ipData := limiterReference(client.key)
 	ipData.mutex.Lock()
-	defer ipData.mutex.Unlock()
+	rejected, left, newBlock := ipData.countLocked(incrementCounter)
+	ipData.mutex.Unlock()
+	if newBlock {
+		serverWriteLogs(denialsLogName, nil, 0, client.ip+" conn denial")
+	}
+	return rejected, (left + int64(time.Second) - 1) / int64(time.Second)
+}
 
+// countLocked counts a request in the entry. Callers hold its mutex.
+func (ipData *IPReference) countLocked(incrementCounter bool) (rejected bool, left int64, newBlock bool) {
 	now := monotonicNow()
 	if ipData.blockedUntil > now {
-		return true
+		return true, ipData.blockedUntil - now, false
 	}
 	if incrementCounter {
 		ipData.requestCount++
@@ -273,14 +286,13 @@ func perIPNotAvailable(client clientAddress, incrementCounter bool) bool {
 		}
 	}
 	if windowLimit == 0 || maxRequests == 0 {
-		return false
+		return false, 0, false
 	}
 	if ipData.requestCount > maxRequests*(timeDiff/windowLimit+1) {
 		ipData.blockedUntil = now + 5*int64(time.Second)
-		serverWriteLogs(denialsLogName, nil, 0, client.ip+" conn denial")
-		return true
+		return true, 5 * int64(time.Second), true
 	}
-	return false
+	return false, 0, false
 }
 
 // IPReference is the limiter entry of an IP. Times are of the monotonic clock (monotonicNow).

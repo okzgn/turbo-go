@@ -86,7 +86,8 @@ impl Capability for Clock {
 ```
 
 and the worker offers it: `Capabilities::none().with(Clock)`. A script sees it only in the requests that Turbo grants
-it to, by its name in the pair `DX_GRANTS`; a client can't name it, since its headers arrive as `HTTP_*` pairs.
+it to, by its name in the pair `DX_GRANTS` (which Turbo doesn't send in this version); a client can't name it, since
+its headers arrive as `HTTP_*` pairs.
 
 What a capability must do:
 

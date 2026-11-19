@@ -112,7 +112,7 @@ func TestV02_PHPReal(t *testing.T) {
 		// query goes first.
 		_, body := do("GET", "/r/x/y?a=1", "", nil, "")
 		v := lines(body)
-		if v["QUERY_STRING"] != "a=1&c=x%2Fy%3Fa%3D1" || v["PHP_SELF"] != "/info.php" || v["REQUEST_URI"] != "/r/x/y?a=1" || v["GET"] != `{"a":"1","c":"x\/y?a=1"}` {
+		if v["QUERY_STRING"] != "a=1&c=x%2Fy%3Fa%3D1" || v["PHP_SELF"] != "/info.php" || v["REQUEST_URI"] != "/r/x/y?a=1&c=x%2Fy%3Fa%3D1" || v["GET"] != `{"a":"1","c":"x\/y?a=1"}` {
 			t.Errorf("after the rewrite: %q", body)
 		}
 	})

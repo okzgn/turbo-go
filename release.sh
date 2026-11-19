@@ -1,9 +1,11 @@
 #!/bin/bash
 # Builds the binaries of a Turbo release and their SHA256SUMS in dist/<version>/.
 #
-# Usage: git tag v2.4.1 && bash release.sh v2.4.1
+# Usage: git tag v2.5.1 && bash release.sh v2.5.1
 #
-# - It uses the Go on the PATH, which must be the latest patch of the go.mod version.
+# - It uses the Go on the PATH, which must be the latest patch of the go.mod version: that Go itself, not an older
+#   one that switches to it (inside the repository "go version" shows the one it switches to). If the Go of go.mod is
+#   in the module cache: PATH="$(go env GOROOT)/bin:$PATH" bash release.sh v2.5.1
 # - Static binaries (CGO_ENABLED=0), without local paths (-trimpath) or symbols,
 #   with the version embedded: Turbo writes it at startup, with the commit and the Go.
 # - It requires the version's tag on HEAD and a clean tree (also without untracked
@@ -26,7 +28,7 @@
 # - If anything fails, dist/<version> is removed: nothing half done is left to publish.
 set -euo pipefail
 
-VERSION="${1:?Usage: $0 <version, for example v2.4.1>}"
+VERSION="${1:?Usage: $0 <version, for example v2.5.1>}"
 cd "$(dirname "$0")"
 
 # The version names dist/<version>, which is deleted before building: only
@@ -48,6 +50,23 @@ if [ -n "$HIDDEN" ]; then
 	echo "There are files marked so that git doesn't see their changes (skip-worktree or assume-unchanged):" >&2
 	echo "$HIDDEN" >&2
 	echo "Remove the mark (git update-index --no-skip-worktree --no-assume-unchanged <file>) and review the tree." >&2
+	exit 1
+fi
+# The scripts are run as their usage lines say (./release.sh, deploy/real-ports-test.sh): a commit made by copying the
+# files on Windows loses the bit, and a chmod afterwards leaves the tree with changes.
+NOT_EXECUTABLE="$(git ls-files -s release.sh 'deploy/*.sh' | awk '$1 != "100755" {print $4}')"
+if [ -n "$NOT_EXECUTABLE" ]; then
+	echo "These scripts aren't executable in the repository (git update-index --chmod=+x <file>, and commit):" >&2
+	echo "$NOT_EXECUTABLE" >&2
+	exit 1
+fi
+# The Go of the PATH as it is (GOTOOLCHAIN=local, below): an older one that go.mod makes switch says so here, not in
+# the middle of the build.
+WANTED_GO="go$(sed -n 's/^go //p' go.mod | tr -d '\r')"
+LOCAL_GO="$(cd / && GOTOOLCHAIN=local go env GOVERSION 2>/dev/null || true)" # Outside the module: go.mod doesn't speak there
+if [ "$LOCAL_GO" != "$WANTED_GO" ]; then
+	echo "The Go on the PATH is ${LOCAL_GO:-unknown}, and go.mod asks for $WANTED_GO: put that Go first in the PATH." >&2
+	echo "If it is in the module cache: PATH=\"\$(go env GOROOT)/bin:\$PATH\" bash release.sh $VERSION" >&2
 	exit 1
 fi
 # The Go environment, fixed before the first go command (the folders of the packages, below, are the ones of the

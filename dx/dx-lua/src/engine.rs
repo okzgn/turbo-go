@@ -121,6 +121,63 @@ fn file_identity(meta: &std::fs::Metadata) -> u64 {
     }
 }
 
+/// Opens what may be a script without waiting, whatever it is: the caller looks at what was opened, by its handle, and
+/// reads it only if it is a file. Looked at by its name first and opened afterwards, a pipe put in the place of the
+/// script between the two held the worker until a writer came: a pipe is opened for reading at once only without
+/// blocking, and a file is read the same either way.
+#[cfg(unix)]
+fn open_script(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new().read(true).custom_flags(O_NONBLOCK).open(path)
+}
+
+/// O_NONBLOCK, which std doesn't name: the one of Linux (but on the architectures where it is another), and the one
+/// of macOS and the BSDs. Elsewhere 0: the open may wait there, as it did.
+#[cfg(all(
+    any(target_os = "linux", target_os = "android"),
+    not(any(target_arch = "mips", target_arch = "mips64", target_arch = "sparc", target_arch = "sparc64"))
+))]
+const O_NONBLOCK: i32 = 0o4000;
+#[cfg(any(
+    target_os = "macos",
+    target_os = "ios",
+    target_os = "freebsd",
+    target_os = "dragonfly",
+    target_os = "netbsd",
+    target_os = "openbsd"
+))]
+const O_NONBLOCK: i32 = 0x0004;
+#[cfg(all(
+    unix,
+    not(any(
+        all(
+            any(target_os = "linux", target_os = "android"),
+            not(any(target_arch = "mips", target_arch = "mips64", target_arch = "sparc", target_arch = "sparc64"))
+        ),
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "dragonfly",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    ))
+))]
+const O_NONBLOCK: i32 = 0;
+
+/// On Windows no open of what is inside the folder of a site waits (a named pipe isn't a file of a folder); a folder is
+/// opened as one (FILE_FLAG_BACKUP_SEMANTICS), so that its handle tells what it is, as on Unix.
+#[cfg(windows)]
+fn open_script(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    std::fs::OpenOptions::new().read(true).custom_flags(FILE_FLAG_BACKUP_SEMANTICS).open(path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn open_script(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
+}
+
 pub struct LuaEngine {
     config: Config,
     cache: HashMap<PathBuf, Cached>,
@@ -163,25 +220,20 @@ impl LuaEngine {
     }
 
     /// The code of a script, from the cache while its size and date don't change. `None` if it isn't a file. What is
-    /// read is what was opened, checked again by its handle, and at most a byte more than a script may have: a file that
-    /// grows, or another one put in its place, can't make the worker read more.
+    /// read is what was opened, which its handle tells to be a file (see `open_script`), and at most a byte more than a
+    /// script may have: a file that grows, or another one put in its place, can't make the worker read more.
     fn load(&mut self, path: &Path) -> Result<Option<Rc<[u8]>>, String> {
         let not_found = |e: std::io::Error| match e.kind() {
             std::io::ErrorKind::NotFound => Ok(None),
             _ => Err(e.to_string()),
         };
-        match std::fs::metadata(path) {
-            Ok(meta) if meta.is_file() => {} // Not opened otherwise: a folder, or a pipe that would wait for a writer
-            Ok(_) => return Ok(None),
-            Err(e) => return not_found(e),
-        }
-        let file = match std::fs::File::open(path) {
+        let file = match open_script(path) {
             Ok(file) => file,
             Err(e) => return not_found(e),
         };
         let meta = file.metadata().map_err(|e| e.to_string())?;
         if !meta.is_file() {
-            return Ok(None);
+            return Ok(None); // A folder, a pipe, a device
         }
         let too_large = || format!("a script larger than {} bytes", self.config.max_script);
         if meta.len() > self.config.max_script {
@@ -266,7 +318,7 @@ impl LuaEngine {
             // call, not eval: eval tries the script as an expression first, and a script that ends in a call
             // would lose its line in the errors (a tail call).
             let value: Value = lua.load(code).set_name(format!("@{name}")).set_mode(ChunkMode::Text).call(())?;
-            Ok(to_response(value))
+            Ok(to_response(&lua, value))
         })
         .map_err(|e| e.to_string())?
     }
@@ -291,8 +343,13 @@ impl Engine for LuaEngine {
 /// stays off: only `jit_init`, which `StdLib::JIT` runs, turns it on, and the code it compiles doesn't call the hook that
 /// ends a script when its time is over (`while true do end` would never end). A state whose memory can't be limited
 /// (mlua falls back to a state without its allocator) runs nothing: the request answers 500.
+///
+/// A panic of Rust inside what a script calls isn't an error of Lua (`catch_rust_panics` off): `pcall` and `xpcall`
+/// don't catch it, so it ends the worker, which Turbo replaces. Caught, a script went on in a worker whose state
+/// nobody knows, with the text of the panic in its hands.
 pub fn new_state(memory_limit: usize) -> Result<Lua, String> {
-    let lua = Lua::new_with(StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::BIT, LuaOptions::default())
+    let options = LuaOptions::new().catch_rust_panics(false);
+    let lua = Lua::new_with(StdLib::TABLE | StdLib::STRING | StdLib::MATH | StdLib::BIT, options)
         .map_err(|e| format!("a Lua state: {e}"))?;
     lua.set_memory_limit(memory_limit).map_err(|e| format!("a Lua state without a memory limit: {e}"))?;
     Ok(lua)
@@ -339,13 +396,13 @@ fn sandbox(lua: &Lua, deadline: Option<Instant>, name: &str, max_print: usize, w
     // the script too, which may have a line break). Each line counts with its start and its end: empty ones too.
     let printed = Rc::new(Cell::new(0usize));
     let prefix = format!("[dx-lua] {}: ", util::escape_line(name.as_bytes()));
-    let print = lua.create_function(move |_, args: MultiValue| {
+    let print = lua.create_function(move |lua, args: MultiValue| {
         if printed.get() > max_print {
             return Ok(()); // Over the limit already: nothing is joined nor escaped
         }
         let (room, needed) = (max_print - printed.get(), prefix.len() + 1); // A line takes its start and its end
         let left = room.saturating_sub(needed);
-        let (line, total) = print_line(&args, left);
+        let (line, total) = print_line(lua, &args, left)?;
         if needed + total <= room {
             write(&format!("{prefix}{}", util::escape_line(&line)));
             printed.set(printed.get() + needed + total);
@@ -370,7 +427,7 @@ fn sandbox(lua: &Lua, deadline: Option<Instant>, name: &str, max_print: usize, w
 /// The line that `print` writes of its arguments, joined with tabs, and its length: of the line, only what can be written
 /// (`left` bytes, and one more to tell that there is more). A script can pass a large text many times in a call, and
 /// each copy of it would be the worker's memory, which the limit of the state doesn't count.
-fn print_line(args: &MultiValue, left: usize) -> (Vec<u8>, usize) {
+fn print_line(lua: &Lua, args: &MultiValue, left: usize) -> mlua::Result<(Vec<u8>, usize)> {
     let (mut line, mut total) = (Vec::new(), 0usize);
     let mut push = |piece: &[u8]| {
         total = total.saturating_add(piece.len());
@@ -383,21 +440,31 @@ fn print_line(args: &MultiValue, left: usize) -> (Vec<u8>, usize) {
         }
         match value {
             Value::String(s) => push(&s.as_bytes()[..]), // Borrowed from the state: a text isn't copied whole
-            other => push(&printable(other)),
+            other => push(&printable(lua, other)?),
         }
     }
-    (line, total)
+    Ok((line, total))
 }
 
-/// What `print` writes of a value that isn't a text.
-fn printable(value: &Value) -> Vec<u8> {
-    match value {
+/// What `print` writes of a value that isn't a text: a number as Lua writes it.
+fn printable(lua: &Lua, value: &Value) -> mlua::Result<Vec<u8>> {
+    Ok(match value {
         Value::Nil => b"nil".to_vec(),
         Value::Boolean(b) => b.to_string().into_bytes(),
-        Value::Integer(i) => i.to_string().into_bytes(),
-        Value::Number(n) => n.to_string().into_bytes(),
+        Value::Integer(_) | Value::Number(_) => number_text(lua, value)?,
         other => other.type_name().as_bytes().to_vec(),
-    }
+    })
+}
+
+/// A number as Lua writes it (`tostring`, the `%.14g` of C): 1.5, 1e+300, 9.007199254741e+15 for 2^53, inf, and nan or
+/// -nan as LuaJIT gives it. LuaJIT itself writes it, in a text of the state: no metamethod runs, a number has none.
+fn number_text(lua: &Lua, value: &Value) -> mlua::Result<Vec<u8>> {
+    let number = match *value {
+        Value::Integer(i) => Value::Number(i as f64), // A double too: mlua tells apart those without decimals
+        Value::Number(n) => Value::Number(n),
+        _ => return Ok(Vec::new()),
+    };
+    Ok(lua.coerce_string(number)?.map(|text| text.as_bytes().to_vec()).unwrap_or_default())
 }
 
 /// REQUEST and its short names (METHOD, URI, QUERY, BODY), and turbox with its functions. Returns turbox, where the
@@ -595,12 +662,12 @@ fn lua_len(value: &Value) -> usize {
     }
 }
 
-fn lua_bytes(value: &Value) -> Option<Vec<u8>> {
+/// The bytes of a text, or of a number as Lua writes it (see `number_text`); `None` of anything else.
+fn lua_bytes(lua: &Lua, value: &Value) -> Result<Option<Vec<u8>>, String> {
     match value {
-        Value::String(s) => Some(s.as_bytes().to_vec()),
-        Value::Integer(i) => Some(i.to_string().into_bytes()),
-        Value::Number(n) if n.fract() == 0.0 && n.abs() < 1e15 => Some((*n as i64).to_string().into_bytes()),
-        _ => None,
+        Value::String(s) => Ok(Some(s.as_bytes().to_vec())),
+        Value::Integer(_) | Value::Number(_) => number_text(lua, value).map(Some).map_err(|e| e.to_string()),
+        _ => Ok(None),
     }
 }
 
@@ -616,8 +683,9 @@ fn status(value: &Value) -> Option<u16> {
 /// The answer of what a script returns:
 /// nil, false or "" → 204 · a text → 200, `text/html` if it starts with `<` (after spaces), else `text/plain` ·
 /// a number 200-599 → that status without a body (Turbo answers 400 or more with the site's template) ·
-/// a table {status, headers, body}, where a header may have a list of values.
-fn to_response(value: Value) -> Result<Response, String> {
+/// a table {status, headers, body}, where a header may have a list of values; a body, or a value of a header, that is
+/// a number is written as Lua writes it.
+fn to_response(lua: &Lua, value: Value) -> Result<Response, String> {
     match value {
         Value::Nil | Value::Boolean(false) => Ok(Response::empty(204)),
         Value::String(s) => {
@@ -644,7 +712,7 @@ fn to_response(value: Value) -> Result<Response, String> {
             };
             let body = match field("body")? {
                 Value::Nil => Vec::new(),
-                value => lua_bytes(&value).ok_or("a body that isn't a text or a number")?,
+                value => lua_bytes(lua, &value)?.ok_or("a body that isn't a text or a number")?,
             };
             let mut headers = Vec::new();
             // What the headers take of the head of the answer, which Turbo takes up to MAX_HEAD: counted before each is
@@ -656,7 +724,7 @@ fn to_response(value: Value) -> Result<Response, String> {
                 if head > MAX_HEAD {
                     return Err(too_large());
                 }
-                let value = lua_bytes(value).ok_or("a header whose value isn't a text or a number")?;
+                let value = lua_bytes(lua, value)?.ok_or("a header whose value isn't a text or a number")?;
                 headers.push((name.to_vec(), value));
                 Ok(())
             };
@@ -668,7 +736,7 @@ fn to_response(value: Value) -> Result<Response, String> {
                         if lua_len(&name) > MAX_HEAD {
                             return Err(too_large());
                         }
-                        let name = lua_bytes(&name).ok_or("a header without a text for its name")?;
+                        let name = lua_bytes(lua, &name)?.ok_or("a header without a text for its name")?;
                         match value {
                             // Raw, as everything read of what a script returns: no metamethod of it runs after it ended.
                             Value::Table(values) => {

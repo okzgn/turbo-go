@@ -21,6 +21,10 @@ It returns its answer:
 Anything else, or an error, is answered 500, with the site's template. The text of the error, with its file and line, goes to the worker's standard
 error, which Turbo writes to its log, never to the client.
 
+A body, or the value of a header, may be a number: it is written as Lua writes it (`tostring`, 14 digits at most), so
+`1.5` is `1.5`, `1e300` is `1e+300` and `2^53` is `9.007199254741e+15`; `print` writes its numbers the same way. For
+every digit of a large integer, format it: `string.format("%d", n)`.
+
 The type of a text is chosen by its first character, so a script that returns what a client sent
 (`return REQUEST.params.q`) lets the client choose it: a `<script>` of theirs would run as a page of the site. Escape
 what comes from the request (`turbox.html_escape`), or return a table with its `Content-Type`.
@@ -69,6 +73,14 @@ What `html_escape` and `json_escape` give counts in the memory of the state, and
   is a 500; catching the error with `pcall` or `xpcall` doesn't keep it going. The time is looked at between the
   steps of the script: one held inside a single call of the library (a pattern that backtracks, a sort) goes on until
   Turbo kills the worker at `WT` (504). With `WT` 0 nothing stops a script, as nothing stops a CGI.
+- **The depth of the calls** is LuaJIT's: a recursion too deep ends in the error `stack overflow`, answered 500 as
+  any other error (or caught by `pcall`), and the worker goes on. That holds for a recursion through functions of the
+  library too (`string.gsub` with a function, `table.sort` with a comparator, `string.format` with a `__tostring`),
+  which take the stack of the program and not only Lua's: the worker runs the scripts in a thread with a stack of
+  128 MiB, more than such a recursion reaches before LuaJIT's limit. That stack is only reserved, and is memory only as
+  far as a script has gone into it, which the worker keeps while it lives (some 85 MiB on Linux after the deepest of
+  them, `string.gsub`; a few MiB after the others). Where the system counts what is reserved (Linux with
+  `vm.overcommit_memory=2`), each worker counts the 128 MiB, and Turbo may keep as many workers as its turns (`CGP`).
 - **Bodies of 8 MiB at most,** half the memory of a state: a larger one is answered 413 (dx-core reads it and drops
   it, without keeping it).
 - **The request counts in the memory of the state:** its body, its form and its files are in it, so a form

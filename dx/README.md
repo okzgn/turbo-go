@@ -58,6 +58,10 @@ In the panel, a site's **Add preprocessor**: the extension (`lua`), the mode **D
 "?": { "lua": "dx>/opt/turbo-dx/dx-lua" }
 ```
 
+A worker of `dx-lua` reserves 128 MiB for the stack of its scripts, besides the 16 MiB at most of the state of a
+request: reserved only (memory as far as a script recurses into it), but counted for each worker where the system
+counts what is reserved (Linux with `vm.overcommit_memory=2`). See [its guide](dx-lua/README.md#the-sandbox).
+
 Turbo starts a worker when a request needs one, keeps up to one per request being served at once (never more than its
 turns, `CGP`, in use or starting), and ends a worker that has been idle for 60 seconds (within the next minute: the
 idle workers are looked at once a minute). Workers are shared by every site that names the same program; each request gets a
@@ -83,8 +87,8 @@ pairs:                          u32 count, then for each: u32 length, name, u32 
   `REQUEST_URI`, `QUERY_STRING`, `SCRIPT_NAME`, `SCRIPT_FILENAME`, `DOCUMENT_ROOT`, `SERVER_NAME`, `SERVER_PORT`,
   `REMOTE_ADDR`, `HTTPS`, `CONTENT_TYPE`, `CONTENT_LENGTH` (absent without a body: 0), `HTTP_*`...), plus `DX_TIMEOUT_MS`, the milliseconds the
   worker has (a tenth less than what is left of Turbo's `WT`, 250 ms at most, so that it answers before Turbo gives up
-  and kills it; 0: no limit), and `DX_GRANTS`, the capabilities granted, by name, separated by commas (none, in this
-  version).
+  and kills it; 0: no limit). `DX_GRANTS`, the capabilities granted, by name, separated by commas, is kept for what
+  is to come: Turbo doesn't send it in this version (nothing is granted): take its absence as none.
 - An answer starts with the id of its request, a random number: Turbo refuses an answer with another id (one written
   late, after the answer of an earlier request), and kills its worker. So it does with anything written after the
   greeting, before the first request.

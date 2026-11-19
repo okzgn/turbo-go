@@ -17,8 +17,9 @@
 //!
 //! The pairs of a request are what a CGI gets in its environment, with the same names (`REQUEST_METHOD`,
 //! `SCRIPT_FILENAME`, `HTTP_*`...), and `DX_TIMEOUT_MS`, the milliseconds the worker has, a little less than what Turbo
-//! waits, so that it answers before Turbo gives up (0: no limit), and
-//! `DX_GRANTS`, the capabilities granted, by name, separated by commas. The answer starts with the id of its request,
+//! waits, so that it answers before Turbo gives up (0: no limit). `DX_GRANTS`, the capabilities granted, by name,
+//! separated by commas, is kept for what is to come: Turbo doesn't send it in this version (nothing is granted): take
+//! its absence as none. The answer starts with the id of its request,
 //! a random number: Turbo refuses an answer with another id, and kills its worker. A worker reads the whole request
 //! before it answers, writes only the protocol to its standard output (its messages go to its standard error), and
 //! ends when its input closes.

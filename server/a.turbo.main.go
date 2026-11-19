@@ -193,7 +193,7 @@ func Main(version string) {
 		os.Exit(1)
 	}
 	if envExists && !panelUserValid(envValue) { // Saved as "U", turbo.config would be refused once it is unset
-		slog.Error("TURBO_USER must have 1 to 24 characters, without control characters: Turbo does not start")
+		slog.Error("TURBO_USER must have 1 to 24 bytes (UTF-8), without control characters: Turbo does not start")
 		os.Exit(1)
 	}
 	if envExists {
@@ -231,6 +231,7 @@ func Main(version string) {
 	if envExists {
 		slog.Info("Sites directory taken from TURBO_DIR", "directory", envValue)
 		sitesDirValue.Set(envValue)
+		sitesDirFromEnv = true
 	}
 	resolvedDir, err := resolveSitesDir(sitesDirValue.Get())
 	if err != nil {
@@ -280,26 +281,54 @@ func Main(version string) {
 // each tick of renew, the certificates that are due are renewed; of config, turbo.config and the sites directory
 // are read again; of cleanup, what has expired is forgotten (sessions, denied IPs, failed logins, the limiter's
 // entries). A panic in one of them is logged, and the rest goes on (runRecovering).
+//
+// The periodic work has a goroutine of its own, one thing at a time, and the signal is waited for here: a reload or a
+// check of the renewals that hung (a disk that doesn't answer) held the signal with it, and Turbo didn't stop until
+// it came back, nor heard a second signal.
 func runMaintenance(stop chan os.Signal, renew <-chan time.Time, config <-chan time.Time, cleanup <-chan time.Time) {
-	for {
-		select {
-		case received := <-stop:
-			shutdown(received, stop)
-			return
-		case <-renew:
-			runRecovering("renewCertificates", renewCertificates)
-		case <-config:
-			runRecovering("updateSettings", func() { logConfigError(updateSettings(true)) })
-		case <-cleanup:
-			runRecovering("cleanOldValues", func() {
-				cleanOldValues(&signedInTokens)
-				cleanOldValues(&sessionDeadlines)
-				withGlobalLock(cleanDeniedIPs)
-				cleanLoginFailures()
-				cleanIPReferences()
-			})
-			runRecovering("idlePreprocessorModes", idlePreprocessorModes)
+	stopping := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-stopping:
+				return
+			case <-renew:
+				if maintenanceStopping(stopping) {
+					return
+				}
+				runRecovering("renewCertificates", renewCertificates)
+			case <-config:
+				if maintenanceStopping(stopping) {
+					return
+				}
+				runRecovering("updateSettings", func() { logConfigError(updateSettings(true)) })
+			case <-cleanup:
+				if maintenanceStopping(stopping) {
+					return
+				}
+				runRecovering("cleanOldValues", func() {
+					cleanOldValues(&signedInTokens)
+					cleanOldValues(&sessionDeadlines)
+					withGlobalLock(cleanDeniedIPs)
+					cleanLoginFailures()
+					cleanIPReferences()
+				})
+				runRecovering("idlePreprocessorModes", idlePreprocessorModes)
+			}
 		}
+	}()
+	received := <-stop
+	close(stopping)
+	shutdown(received, stop)
+}
+
+// maintenanceStopping reports whether Turbo is stopping: no periodic work starts then.
+func maintenanceStopping(stopping <-chan struct{}) bool {
+	select {
+	case <-stopping:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -641,6 +670,10 @@ var (
 
 // listenAddress returns the address in the environment variable name ("host:port", ":port" or just
 // the port), or def if it isn't set.
+// sitesDirFromEnv says that TURBO_DIR chose the start directory: the "M" of its turbo.config written with
+// {TURBO_CURRENT_DIR} then means that directory, not the working one (updateSettingsFollowing). Set at start.
+var sitesDirFromEnv bool
+
 func listenAddress(name, def string) (string, error) {
 	value := os.Getenv(name)
 	if value == "" {
@@ -653,10 +686,12 @@ func listenAddress(name, def string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if portNumber, err := strconv.Atoi(port); err != nil || portNumber < 1 || portNumber > 65535 {
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber > 65535 {
 		return "", errors.New("invalid port: " + port)
 	}
-	return net.JoinHostPort(host, port), nil
+	// The port as a number writes it: "+443" or "0443" listened on 443, and went as they came into the redirections
+	return net.JoinHostPort(host, strconv.Itoa(portNumber)), nil
 }
 
 // httpServerStart serves on httpAddr (:80). Without it Turbo can't work, so it ends with an error instead of
@@ -1303,6 +1338,13 @@ func windowsNamesApply() bool {
 // folder of one of its sites (a host name, in lower case), asked for in capitals, is the same folder. Without a
 // site whose name has letters, or if it can't be looked at, it reports false: the default of the system applies.
 func probeNameFolding(baseDir string, sites []diskSite) bool {
+	folds, _ := probeNameFoldingKnown(baseDir, sites)
+	return folds
+}
+
+// probeNameFoldingKnown is probeNameFolding, and whether it could look: not without a site whose name has letters and
+// whose folder is there. A reload that can't look keeps what the one before found.
+func probeNameFoldingKnown(baseDir string, sites []diskSite) (folds bool, known bool) {
 	for _, site := range sites {
 		name := changeWildcards(site.site)
 		upper := strings.ToUpper(name)
@@ -1314,9 +1356,9 @@ func probeNameFolding(baseDir string, sites []diskSite) bool {
 			continue
 		}
 		upperInfo, err := os.Stat(baseDir + upper)
-		return err == nil && os.SameFile(lowerInfo, upperInfo)
+		return err == nil && os.SameFile(lowerInfo, upperInfo), true
 	}
-	return false
+	return false, false
 }
 
 // folderListings are the folders that a pass of checkSites listed, each listed once.
@@ -1790,9 +1832,10 @@ func (plan *servePlan) serve(responseWriter customNetHttp.ResponseWriter, reques
 		return
 	}
 	// Go's file server redirects a URL that ends in "/index.html" to its folder ("./"), which serves the site's index.
-	// Where index.html isn't an index of the site, that led to another file or to 404, and it was never served; and a
-	// rewrite of that URL to another file was never applied. There the file opened is served as it is.
-	if strings.HasSuffix(request.URL.Path, "/index.html") && (plan.rewritten || !plan.hasIndex("index.html")) {
+	// Where index.html isn't an index of the site, or another index of that folder goes before it, that led to another
+	// file or to 404, and it was never served; and a rewrite of that URL to another file was never applied. There the
+	// file opened is served as it is.
+	if strings.HasSuffix(request.URL.Path, "/index.html") && (plan.rewritten || !plan.folderServesIndexHTML(opened.root, rewrittenPath)) {
 		if content, canSeek := opened.file.(io.ReadSeeker); canSeek {
 			if info, err := opened.file.Stat(); err == nil {
 				customNetHttp.ServeContent(responseWriter, request, info.Name(), info.ModTime(), content)
@@ -1803,11 +1846,16 @@ func (plan *servePlan) serve(responseWriter customNetHttp.ResponseWriter, reques
 	customNetHttp.ServeFileFS(responseWriter, request, opened, rootName(rewrittenPath))
 }
 
-// hasIndex reports whether name is one of the indexes of the plan's site.
-func (plan *servePlan) hasIndex(name string) bool {
+// folderServesIndexHTML reports whether the folder of filePath ("/a/index.html") serves its index.html: it is an index
+// of the site and no index before it is in that folder.
+func (plan *servePlan) folderServesIndexHTML(root *os.Root, filePath string) bool {
+	folder := strings.TrimSuffix(filePath, "index.html")
 	for _, index := range plan.indexes {
-		if index == name {
+		if index == "index.html" {
 			return true
+		}
+		if info, err := root.Stat(rootName(folder + index)); err == nil && !info.IsDir() {
+			return false
 		}
 	}
 	return false
@@ -2113,7 +2161,17 @@ func choose(overTLS bool, responseWriter customNetHttp.ResponseWriter, request *
 		reqMsg(responseWriter, 500)
 		return chosenPath{}, false
 	} else {
-		rewriteResult = shortcutWords(request, rewriteResult, site, matchedRewrite, pathWithoutQuery)
+		var hostKept bool
+		if rewriteResult, hostKept = shortcutWordsChecked(request, rewriteResult, site, matchedRewrite, pathWithoutQuery); !hostKept {
+			// The keywords written passed textTargetProblem, and what they gave for this request didn't: one after the
+			// labels and their "." gave nothing ({FIRST_DOMAIN} without an alias), and the client's labels were the host
+			siteName := joinedSite(site.siteSubdomain, site.siteDomain)
+			if logDueOnceAMinute(siteName + "|rewrite|" + matchedRewrite) {
+				slog.Error("Rewrite whose host would end with labels that the client chose: 500 (reported once a minute)", "site", siteName, "source", matchedRewrite, "reason", "a keyword after {SUBDOMAIN} or {FIRST_SUBDOMAIN} gave nothing for the request")
+			}
+			reqMsg(responseWriter, 500)
+			return chosenPath{}, false
+		}
 	}
 	rewriteResult, query, _ := strings.Cut(rewriteResult, "?")
 	switch rewriteResult[0] {
@@ -2144,8 +2202,28 @@ func choose(overTLS bool, responseWriter customNetHttp.ResponseWriter, request *
 // takes the path alone, and in a redirection the request's query is added to the target's (an internal target
 // already gets it). Unknown placeholders give nothing.
 func shortcutWords(request *customNetHttp.Request, input string, site siteMatch, rewriteMatch string, requestPath string) string {
+	target, _ := shortcutWordsChecked(request, input, site, rewriteMatch, requestPath)
+	return target
+}
+
+// shortcutWordsChecked is shortcutWords, and whether the host of a redirection keeps the rule of the labels that the
+// client may choose ({SUBDOMAIN}, {FIRST_SUBDOMAIN}) with the values of this request, as expressionTarget checks it
+// for an expression: after them, a "." and the rest of the host. textTargetProblem looks at the keywords written, and
+// one that gives nothing for a request ({FIRST_DOMAIN} and {FIRST_SITE}, without an alias or a wildcard domain) left
+// "https://{SUBDOMAIN}.{FIRST_DOMAIN}/" as the client's labels and a dot: the host that the client chose.
+func shortcutWordsChecked(request *customNetHttp.Request, input string, site siteMatch, rewriteMatch string, requestPath string) (string, bool) {
 	writer := newTargetWriter(request, input != "" && (input[0] == 'H' || input[0] == 'S'))
 	remaining := input
+	labels, hostKept := 0, true // labels: 1 right after labels that the client may choose, 2 after them and a "."
+	text := func(literal string) {
+		if writer.position == targetInHost {
+			var ok bool
+			if labels, ok = hostAfterLabels(labels, literal); !ok {
+				hostKept = false
+			}
+		}
+		writer.text(literal)
+	}
 	for {
 		// The first "}" after the "{", as the validator reads a target (unknownPlaceholder): with the first "}" of
 		// all, one before the "{" ("/a}b/{DOMAIN}", accepted) left every placeholder of the target as it was written.
@@ -2158,17 +2236,53 @@ func shortcutWords(request *customNetHttp.Request, input string, site siteMatch,
 			break
 		}
 		closeBraceIdx += openBraceIdx
-		writer.text(remaining[:openBraceIdx])
+		text(remaining[:openBraceIdx])
 		placeholder := remaining[openBraceIdx+1 : closeBraceIdx]
 		remaining = remaining[closeBraceIdx+1:]
 		replacer, placeholderExists := shortcutWordReplacers[placeholder]
 		if !placeholderExists {
 			continue
 		}
-		writer.value(placeholder, replacer(request, site, rewriteMatch, requestPath))
+		value := replacer(request, site, rewriteMatch, requestPath)
+		if writer.position == targetInHost && value != "" { // One that gives nothing places nothing: what was before it still is
+			if class, _ := expr.ClassOf(placeholder); class == expr.Labels {
+				labels = 1
+			} else {
+				if labels == 1 { // Right after the labels, it would start another name with them
+					hostKept = false
+				}
+				labels = 0
+			}
+		}
+		writer.value(placeholder, value)
 	}
-	writer.text(remaining)
-	return writer.finish()
+	text(remaining)
+	if labels != 0 {
+		hostKept = false
+	}
+	return writer.finish(), hostKept
+}
+
+// labelsBeforeAnAliasKeyword reports whether the host of a redirection written as a text (as it is kept) has
+// {SUBDOMAIN} or {FIRST_SUBDOMAIN}, a "." and then {FIRST_DOMAIN} or {FIRST_SITE}, which give nothing for a request
+// that comes through no alias and no wildcard domain: those requests answer 500 (shortcutWordsChecked). Turbo warns of
+// it when the rewrite is added or read: through an alias it is what is meant.
+func labelsBeforeAnAliasKeyword(target string) bool {
+	if target == "" || target[0] != 'H' && target[0] != 'S' {
+		return false
+	}
+	host := target[1:]
+	if end := strings.IndexAny(host, "/?"); end != -1 {
+		host = host[:end]
+	}
+	for _, labels := range []string{"{SUBDOMAIN}.", "{FIRST_SUBDOMAIN}."} {
+		for _, keyword := range []string{"{FIRST_DOMAIN}", "{FIRST_SITE}"} {
+			if strings.Contains(host, labels+keyword) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // textTargetProblem says why a target written as a text (as it is kept: "N/…", or "H" or "S" and the host) can't be

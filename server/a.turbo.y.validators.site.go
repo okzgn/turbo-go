@@ -36,6 +36,10 @@ import (
 
 // siteSSLSettingOrder is the order of the settings of "!": with R and W both at 1, R comes first and W is
 // refused (only one of the two redirections can be on).
+// msgAnyHostSiteHasNoWWW is why R and W can't be on for the site *: it serves the hosts that no other site does, IP
+// addresses included, and "www." before one of those is no host ("http://www.::1/").
+const msgAnyHostSiteHasNoWWW = "The site * serves any host, IP addresses included: it has no www to redirect"
+
 var siteSSLSettingOrder = []string{"S", "C", "R", "W", "E", "A", "Z"}
 
 var validCertbotAdapter = regexp.MustCompile(`^dns-[a-z0-9-]{2,30}$`) // Certbot DNS plugins, passed as --<adapter>
@@ -359,6 +363,9 @@ var siteSSLSettingCheckers = map[string]func(bool, ...string) (bool, string){
 		if siteSSLConfig[siteKey].rootToWWW {
 			return false, "Redirect to www enabled"
 		}
+		if siteKey == "*" {
+			return false, msgAnyHostSiteHasNoWWW
+		}
 		siteSSLConfig[siteKey].wwwToRoot = true
 		return true, "Redirect to root enabled"
 	},
@@ -386,6 +393,9 @@ var siteSSLSettingCheckers = map[string]func(bool, ...string) (bool, string){
 		}
 		if siteSSLConfig[siteKey].wwwToRoot {
 			return false, "Redirect to root enabled"
+		}
+		if siteKey == "*" {
+			return false, msgAnyHostSiteHasNoWWW
 		}
 		siteSSLConfig[siteKey].rootToWWW = true
 		return true, "Redirect to WWW enabled"

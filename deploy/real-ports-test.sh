@@ -197,7 +197,7 @@ check "Panel on panel.test over HTTP" "$(curl -s -o /dev/null -w '%{http_code} %
 check "Panel on panel.test over HTTPS" "$(panel -o /dev/null -w '%{http_code}' https://panel.test/admin:)" "200"
 check "HSTS on panel.test" "$(panel -D - -o /dev/null https://panel.test/admin: | tr -d '\r' | sed -n 's/^strict-transport-security: //Ip')" "max-age=31536000"
 check "POST over HTTP to panel.test" "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Host: panel.test' http://localhost/admin:inside:sites)" "308"
-check "addSite panel.test" "$(panel -w ' %{http_code}' -X POST -H "ok: $TOKEN" -d 's=panel.test' 'https://panel.test/admin:inside:addSite')" "The site would serve the panel host.* 400"
+check "addSite panel.test" "$(panel -w ' %{http_code}' -X POST -H "ok: $TOKEN" -d 's=panel.test' 'https://panel.test/admin:inside:addSite')" "The site would serve panel\.test, where the panel answers.* 400"
 
 echo "== Messages on stdout"
 check "Start with level and time" "$(grep -c '^time=.* level=INFO msg=Starting' "$TMPD/stdout.txt")" "1"

@@ -2,9 +2,30 @@
 
 [Español](CHANGELOG.es.md)
 
-v2.5 is the next release after v2.4.4. If you upgrade from **v2.4.4**, read [Upgrading from v2.4.4](#upgrading-from-v244). If you upgrade from **v2.4.3**, read only that one too: v2.4.4 changed nothing in what Turbo does ([Upgrading from v2.4.3](#upgrading-from-v243)). If you upgrade from **v2.4.2**, read [Upgrading from v2.4.2](#upgrading-from-v242) first, and then [Upgrading from v2.4.4](#upgrading-from-v244). If you upgrade from **v2.4.1**, v2.4.2 applies too: read [Upgrading from v2.4.1](#upgrading-from-v241), and then [Upgrading from v2.4.2](#upgrading-from-v242) and [Upgrading from v2.4.4](#upgrading-from-v244). If you upgrade from **v2.4**, read [Upgrading from v2.4](#upgrading-from-v24), and then those three. If you upgrade from **v2.3.rc3**, every stage of v2.4 and every later version applies: read [Upgrading from v2.3.rc3](#upgrading-from-v23rc3) first, and then the other four.
+v2.5.1 is the next release after v2.5. If you upgrade from **v2.5**, read [Upgrading from v2.5](#upgrading-from-v25). From an earlier version, read first what this paragraph says for it, and then [Upgrading from v2.5](#upgrading-from-v25) too. If you upgrade from **v2.4.4**, read [Upgrading from v2.4.4](#upgrading-from-v244). If you upgrade from **v2.4.3**, read only that one too: v2.4.4 changed nothing in what Turbo does ([Upgrading from v2.4.3](#upgrading-from-v243)). If you upgrade from **v2.4.2**, read [Upgrading from v2.4.2](#upgrading-from-v242) first, and then [Upgrading from v2.4.4](#upgrading-from-v244). If you upgrade from **v2.4.1**, v2.4.2 applies too: read [Upgrading from v2.4.1](#upgrading-from-v241), and then [Upgrading from v2.4.2](#upgrading-from-v242) and [Upgrading from v2.4.4](#upgrading-from-v244). If you upgrade from **v2.4**, read [Upgrading from v2.4](#upgrading-from-v24), and then those three. If you upgrade from **v2.3.rc3**, every stage of v2.4 and every later version applies: read [Upgrading from v2.3.rc3](#upgrading-from-v23rc3) first, and then the other four.
 
 Published binaries are static and built with the latest Go 1.26 patch. Check the download with `SHA256SUMS`, in the folder of the download: `sha256sum -c --ignore-missing SHA256SUMS` (`--ignore-missing` checks only the binaries you downloaded; without it, `sha256sum` fails for the others). A signed release also has `SHA256SUMS.sig`: [SECURITY.md](SECURITY.md) says how to check it.
+
+## Upgrading from v2.5
+
+**Recommendation: upgrade as soon as possible.** v2.5.1 fixes security issues of v2.5, most of them of earlier versions too: one client that didn't read its responses could make every request with a body for a script answer 503; a rewrite to another address written with `{SUBDOMAIN}` and `{FIRST_DOMAIN}` could send the visitors to a host of their choice; and a list of a site written under another name in a `turbo.config` edited by hand left the scripts of the site served as text.
+
+Replace the binary, and build `dx-lua` again if you use it (0.3.1). What is configured goes on doing the same, with these exceptions:
+- **A key of the section of a site of `turbo.config` that is no list makes the file invalid** (`"? "` or `"Preprocessors"` for `"?"`): Turbo doesn't start with it, and says where it is. v2.5 skipped it without a word, and the site lost what the list held: its preprocessors, and with them its scripts were served as text. The lists are `!`, `=`, `$`, `.`, `?`, `-` and `&`, written exactly so. A file of a later schema keeps such a key, with a warning; a setting whose name no setting has (`"s"` for `"S"`, `"pa"` for `"PA"`) gets a warning too.
+- **A rewrite to `https://{SUBDOMAIN}.{FIRST_DOMAIN}/…`, or with `{FIRST_SITE}` there, answers 500 to the requests that come through no alias and no wildcard domain:** those keywords give nothing for them, and the host was the visitor's labels alone. Through an alias it redirects as before. The log warns of such a rewrite when it is added or read: write the rest of the host with `{DOMAIN}` or `{SITE}`, or as a text.
+- **`quoted` is refused in the header `Refresh`,** as in `Set-Cookie` and `Content-Security-Policy`: a browser takes the URL of `Refresh` without its quotes. One of `turbo.config` is kept, the log says so, and the site answers 500 until it is changed: use `urlencode` or `oneOf`.
+- **Through a rewrite whose target has a query, `REQUEST_URI` carries the query of `QUERY_STRING`** after the path that the client asked for, for a CGI and for a worker of the mode dx: `/x?role=admin` through `/x` → `/app.cgi?role=user` gives `REQUEST_URI=/x?role=user`. It carried the client's query, and an application that reads its parameters from it got the client's value. Without a query in the target, it is the client's, as before.
+- **A client may take a quarter of the memory and of the temporary files kept for the request bodies of the scripts** (an IPv6 /48, half): beyond its share of the memory its bodies go to files, and beyond that of the files its requests with a body get 503 with `Retry-After`, as when they are full. Behind a proxy every client is the proxy, and they share that quarter: 8 MiB in memory and 256 MiB in files (or four bodies of `MBB`, if more).
+- **With `TURBO_DIR`, an `M` written with `{TURBO_CURRENT_DIR}` in the `turbo.config` of that directory isn't followed:** it is what a save wrote when Turbo was started from its sites folder, and under a service with another working directory it led there, where no site has its folder. The directory of `TURBO_DIR` stays, and the log says so.
+- **`setM` refuses a directory whose `turbo.config` leads back to the directory in use** (a copy of the sites folder, whose `M` still names the original): it answered "Sites directory set" and nothing changed. Change that `M`, or delete that `turbo.config` to keep the settings in use.
+- **"Save configuration" answers with an error when the `turbo.config` there can't be read:** it replaced it without a copy.
+- **`R` and `W` (the redirections between `www` and the root) are refused for the site `*`,** and dropped from `turbo.config` with a warning: it serves requests by IP address, and redirected them to `www.` and the address.
+- **`/folder/index.html` is served, not redirected to `/folder/`, where another index of that folder goes before `index.html`:** the redirection led to the other index, and the file couldn't be had.
+- **On the panel's own host over HTTPS, an answer without a certificate that covers the host carries `Strict-Transport-Security: max-age=0`** (it carried none): the browser can come back by HTTP once the panel's certificate is gone.
+- **In `turbo.visits`, an empty field is written as `""`** (the host of an HTTP/1.0 request without `Host`), and a pipe named `turbo.visits` or `turbo.denials` isn't opened: the logs are regular files.
+- **`dx-lua` writes a number as Lua does** (`1.5`, `1e+14`): a body or a header's value that is a whole number of 15 digits or more goes in that notation; use `string.format("%d", n)` for those. Each worker reserves 128 MiB of stack, which only what a script reaches turns into memory.
+
+Going back to v2.5 needs nothing: it reads the `turbo.config` that v2.5.1 saves.
 
 ## Upgrading from v2.4.4
 
@@ -120,9 +141,35 @@ Before upgrading:
 
 ---
 
+## v2.5.1
+
+The next version after v2.5, with what a review of v2.5 as it was published found. Each fix has a test that failed before it.
+
+### Fixes
+- **One client can't take the memory and the files of the scripts' request bodies:** a body stayed counted in their budgets, which are for every site, until its response had reached the client, with its CGI already ended, and nothing bounded what one client took: one that sent bodies and didn't read its responses filled them, and every other request with a body for a script got 503. A body is given back when its script is done, each client has a share of both budgets (above), the budget is taken as the body arrives (a megabyte was taken for a request that had sent only its headers), and a request without a body takes nothing and needs no temporary file (with the memory taken, each `GET` for a script made one, and answered 500 where none could be made).
+- **The host of a redirection is checked with the values of each request:** a target written as a text followed the rule of `{SUBDOMAIN}` and `{FIRST_SUBDOMAIN}` (a `.` and the rest of the host after them) only as it was written, and a keyword after them that gave nothing left the host to the visitor's labels: `https://{SUBDOMAIN}.{FIRST_DOMAIN}/home` sent the visitor of `evil.test.example.com` to `evil.test.`. It is checked as the target is placed, as an expression's is, and answers 500 (above). `quoted` is refused in `Refresh`. An expression whose host is `SUBDOMAIN` and one label gets the warning that the same target written as a text gets.
+- **`turbo.config` edited by hand never serves a script's source, also with a list written under another name:** a key of a site's section that is no list makes the file invalid (above), and a setting with a name that no setting has is reported by its name.
+- **`dx-lua` 0.3.1:** a script that recursed through functions of the library (`string.gsub` with a function, `table.sort` with a comparator, `string.format` with a `__tostring`) ended its worker, and the one of the retry, `pcall` or not; the scripts now run in a thread with a stack of 128 MiB (reserved only), so the recursion ends in LuaJIT's `stack overflow`, a 500 as any other error, and the worker goes on. A panic of Rust inside what a script calls is no longer an error that `pcall` catches: it ends the worker, which Turbo replaces. A number with decimals is a body and a header's value (it was refused as "not a text or a number"), and `print` writes numbers as Lua does. A script is opened without blocking and checked by its handle: a pipe with the name of a script is answered 404 at once instead of holding the worker. On Windows, Turbo no longer writes the name of the program twice before its lines (`[dx-lua.exe] [dx-lua] …`).
+- **The sites directory:** `setM` refuses a directory whose `turbo.config` leads back to the one in use, and going back to the start directory counts no directories followed (an `M` set by hand afterwards was refused for "more sites directories than Turbo follows"). An `M` that names a directory that isn't there yet (a disk not mounted) is tried again in every reload, and followed once the directory is there, as its message asks; its error is logged once. With `TURBO_DIR`, an `M` written with `{TURBO_CURRENT_DIR}` isn't followed to the working directory. Saving doesn't replace a `turbo.config` that it can't read. The message of an `M` that can't be used says that the directory in use stays, and the port of `TURBO_HTTP_ADDR` and `TURBO_HTTPS_ADDR` is kept as a number (`+443` listened on 443 and went as it came into the redirections).
+- **The limiter and the logs:** the line of `turbo.denials` of a client that goes over `CII` was written with its entry of the limiter locked, and the loop that accepts connections waited for that entry with the next connection of the client: while a log waited for its disk, no one else was accepted. A pipe named `turbo.visits` or `turbo.denials` isn't opened (opening it waited for a reader: at start, before the ports were open; later, with the periodic work, which also heard the signals). `Retry-After` carries the seconds left of the block also when the entry is the one a client shares with its network. An empty field of `turbo.visits` is written as `""`.
+- **Serving:** `/folder/index.html` is served by its name where another index of the folder goes first. `R` and `W` are refused for the site `*`. A pipe among the panel's ACME challenges answers 404 at once, as one in a site's folder.
+- **Certificates:** reading `turbo.config` again keeps the certificate that a site had in use when its files can't be loaded at that moment (a chain renewed whose key hasn't come yet), or were removed by "Delete SSL" while it stayed in use: the site was left with HTTPS on and without a certificate. A chain put right on disk with the same leaf (an intermediate that was missing) is put in use: only the leaf was compared. An expired certificate of the panel no longer wins over the valid ones of the sites for the names that both cover: the panel's goes first while it is valid. `cfgPC` checks the adapter before it keeps the e-mail.
+- **The periodic work:** the signal to stop is heard while a reload or a check of the renewals is held by a disk that doesn't answer: it waited for them, and so did a second signal. A reload that can't look at whether the sites directory takes names in other capitals (no site found for a moment) keeps what was known: the rewrites that close a folder, and the names of Windows, stopped applying until the next one. A reload that panics while it applies `turbo.config` is applied again by the next one: the file counted as read, and the sites stayed with the defaults.
+- **The panel:** the answer of `setM`, and of `cfgPC` with `a=0` once the files of the panel's certificate are gone, says that its host has no certificate left (`max-age=0`): it carried a year of HSTS, with no HTTPS to come back to. Whether `cfgE`, `cfgA`, `cfgC` and `cfgPC` need the current password is judged again as they are applied: a request that needed none when it came put back the adapter or the e-mail that another had just changed. The pages don't send the name of a MIME type, a header, an alias or a preprocessor that the server would read as another one because of a character replacement, and say so.
+- **CGIs:** `REQUEST_URI` carries the query of a rewrite's target (above).
+- **Documentation:** the user of the panel has 1 to 24 bytes, as the API says, not characters (`TURBO_USER`, `U`); the comments of `deploy/turbo.service` no longer propose changing the credentials from the panel while the file sets them; a response of a CGI is sent with its length only when it is short (2 KiB); `PUT` and `DELETE` without a body may be given to another worker of the mode dx, as `GET`; on Windows the temporary files of the CGIs' output have a name while they are used; Turbo doesn't send `DX_GRANTS`.
+
+### In the repository
+- **`release.sh` and the scripts of `deploy/` are executable in the repository,** and the continuous integration and `release.sh` fail when one isn't: the commit of v2.5 had left them without the bit again. `release.sh` says, before it builds, when the Go on the PATH isn't the one of `go.mod` itself.
+- **`deploy/real-ports-test.sh`** follows the message of `addSite` for a host of the panel, which v2.5 changed: its job failed in the continuous integration of v2.5.
+- **Tests:** `TestR250_…`, in `server/turbo_review_v250_<subject>_test.go`, and `dx/dx-lua/tests/worker.rs`, with the real program; the oracle of `FuzzEvaluate` knows the labels that start the host of a redirection.
+- **The earlier versions say how they were published:** as commits of `main`, without binaries.
+
+---
+
 ## v2.5
 
-Not published yet: the next version after v2.4.4.
+Published as a commit of `main`, without binaries: the next version after v2.4.4.
 
 ### New
 - **Expressions in headers and rewrites:** the value of a site's header and the target of a rewrite can be computed for each request ([§6.3 of the API](API_SPECIFICATION.md#63-expressions-in-headers-and-rewrites)): `Cache-Control` by the extension of the file served, the `Access-Control-Allow-Origin` of an origin chosen from a list, a page in the language of the visitor, a redirection to a host chosen from a list. The language is a subset of CEL without loops. In the panel, the dialogs of headers and rewrites choose "Text" or "Expression", and an expression is written in a text area, which may span lines. What the client sends never reaches a header as it came, nor the host of a redirection, and an expression that fails answers 500: Turbo checks that when the expression is added, and again for each request. The headers an expression reads are added to the `Vary` of the response. The example `turbo.config` has a header computed by extension.
@@ -155,7 +202,7 @@ Not published yet: the next version after v2.4.4.
 
 ## v2.4.4
 
-Not published yet: the next version after v2.4.3. The server is the same, without a change in what it does: this version brings its new isotype and, in the repository, the source in a folder and two tests that no longer depend on how fast the machine is.
+Published as a commit of `main`, without binaries: the next version after v2.4.3. The server is the same, without a change in what it does: this version brings its new isotype and, in the repository, the source in a folder and two tests that no longer depend on how fast the machine is.
 
 ### New
 - **New isotype:** the panel and the sample site show Turbo's new isotype, and the icons of the repository (`turbo.icon.png`, `turbo.icon.small.png`, `turbo.icon.nano.png`) are the new one too. A copy of `turbo.dev` in the sites directory goes on showing its own `admin/i.png`.
@@ -167,7 +214,7 @@ Not published yet: the next version after v2.4.3. The server is the same, withou
 
 ## v2.4.3
 
-Not published yet: the next version after v2.4.2, with what a full review of its code found. Each fix has a test that failed before it.
+Published as a commit of `main`, without binaries: the next version after v2.4.2, with what a full review of its code found. Each fix has a test that failed before it.
 
 ### New
 - **Precompressed files (`cfgZ`):** a site, or a subdomain, can answer the request of a file with the `<file>.br` or `<file>.gz` that is next to it, for the requests whose `Accept-Encoding` accepts it, with the type of the file, the length of the copy, an `ETag` of its own and `Vary: Accept-Encoding`. It is off until it is turned on for a site: "Precompressed" in the panel, `cfgZ` in the API, `"Z"` among the settings of the site in `turbo.config`. Turbo doesn't compress: whoever deploys the site makes the copies, and their dates aren't compared with the file's. Requests with `Range`, the files that a preprocessor runs and the URLs that end in `/index.html` are served as always (API specification, §8.4).
@@ -241,7 +288,7 @@ Not published yet: the next version after v2.4.2, with what a full review of its
 
 ## v2.4.2
 
-Not published yet: the next version after v2.4.1, with the fixes found after it.
+Published as a commit of `main`, without binaries: the next version after v2.4.1, with the fixes found after it.
 
 ### Fixes
 - **A site of `turbo.config` without a section of its own:** a site that the file named only through its subdomains (`"example.com": {"www": {…}}`), or as `{}` or `null`, was built with nothing, and its `/` answered 404, while the same site found on disk has `index.html` as its index. Now it gets what a site found on disk gets: `index.html` as its index and the state of its certificate. A site with a `""` section keeps exactly what the section says: `"": {}` leaves it without an index. A site saved meanwhile already has its section, with `"-": {}`, and stays without an index: add the index from the panel.

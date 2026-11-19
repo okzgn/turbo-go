@@ -61,6 +61,10 @@ var defaultSettingKeysGroup = map[string][]string{
 	".": {"M", "PA", "MUB", "MHB", "MBB", "CIL", "CIS", "CII", "CGL", "CGP", "RT", "RHT", "WT", "WFT", "IT"}, // Not "C": saving is an action
 }
 
+// otherGlobalSettingKeys are the keys of "." of turbo.config that aren't in defaultSettingKeysGroup: "C", which is
+// reported apart, the credentials and the settings of the panel's certificate, each read by its own code.
+var otherGlobalSettingKeys = map[string]bool{"C": true, "U": true, "PH": true, "P": true, "PCE": true, "PCA": true}
+
 var defaultSettingErrorExceptions = map[string]map[string]map[string]bool{ // Refusals that keep the setting as it is, instead of resetting it to its default
 	".": {
 		"M":   map[string]bool{msgSitesDirUnchanged: true},

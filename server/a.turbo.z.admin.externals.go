@@ -66,27 +66,35 @@ func (configSchemaError) Error() string {
 	return `"^" does not give a valid schema: it must be {"v":"<positive integer>"}`
 }
 
+// rawConfigSchema returns the schema that a turbo.config says in "^": 1 without it, and configSchemaError when what
+// it says is no schema.
+func rawConfigSchema(raw map[string]map[string]interface{}) (int, error) {
+	versionSection, hasVersion := raw["^"]
+	if !hasVersion {
+		return 1, nil
+	}
+	switch version := versionSection["v"].(type) {
+	case string:
+		number, convErr := strconv.Atoi(version)
+		if convErr != nil || number < 1 {
+			return 0, configSchemaError{}
+		}
+		return number, nil
+	case float64:
+		if version < 1 || version != float64(int(version)) {
+			return 0, configSchemaError{}
+		}
+		return int(version), nil
+	}
+	return 0, configSchemaError{}
+}
+
 // migrateConfig converts in memory a turbo.config read with an older schema to the current one and returns
 // the schema it had. It never rewrites the file. A later schema is left as is: what is understood loads. "v"
 // may be a string or a JSON number, but a positive integer; without "^" the schema is 1.
 func migrateConfig(raw map[string]map[string]interface{}, configBytes []byte) (from int, err error) {
-	from = 1
-	if versionSection, hasVersion := raw["^"]; hasVersion {
-		switch version := versionSection["v"].(type) {
-		case string:
-			number, convErr := strconv.Atoi(version)
-			if convErr != nil || number < 1 {
-				return 0, configSchemaError{}
-			}
-			from = number
-		case float64:
-			if version < 1 || version != float64(int(version)) {
-				return 0, configSchemaError{}
-			}
-			from = int(version)
-		default:
-			return 0, configSchemaError{}
-		}
+	if from, err = rawConfigSchema(raw); err != nil {
+		return 0, err
 	}
 	if from < 2 {
 		for _, key := range []string{"CIL", "CIS"} {
@@ -243,6 +251,28 @@ func (e configPointerError) Error() string {
 		return `"M" names ` + e.target + ", " + e.reason + ": following it would leave the sites without their settings (their scripts served as text) and empty the configuration in use. Make that directory available, with a usable turbo.config if it has one, or change \"M\""
 	}
 	return `only has "M", which points to ` + e.target + ", " + e.reason + ": applying it would leave the default configuration (the default user and password, and the panel on any host). Make that directory available again with its turbo.config, or restore the whole configuration here (a .bak copy)"
+}
+
+// sitesDirChainEnd returns the sites directory that the turbo.config of dir leads to, through its "M" and those of
+// the directories it names, as a reload follows them: dir itself without a turbo.config, or with one that names no
+// other directory. For a chain that sitesDirChainProblem has accepted.
+func sitesDirChainEnd(dir string) string {
+	for hops := 0; hops <= maxSitesDirHops; hops++ {
+		config, err := parseSiteConfig(dir + configFileName)
+		if err != nil || config.raw == nil {
+			return dir
+		}
+		value, _ := configSitesDir(config.raw)
+		if value == "" {
+			return dir
+		}
+		resolved, err := resolveSitesDir(value)
+		if err != nil || !dirExists(resolved) || sameDir(resolved, dir) {
+			return dir
+		}
+		dir = resolved
+	}
+	return dir
 }
 
 // sitesDirChainProblem says, before anything is applied, why the sites directories that a turbo.config read in
@@ -459,7 +489,12 @@ func saveDefaultConfig() bool {
 	})
 	if !sameDir(baseDir, startDir) && !sameFile(startDir+configFileName, configPath) { // Turbo starts reading startDir: leave there where the sites are
 		pointerPath := startDir + configFileName
-		if original, err := os.ReadFile(pointerPath); err == nil && !isSitesDirPointer(original) { // #nosec G304 -- turbo.config of the start directory
+		original, err := os.ReadFile(pointerPath) // #nosec G304 -- turbo.config of the start directory
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			slog.Error("turbo.config can't be read to keep a copy of it: the pointer to the sites directory is not saved", "file", pointerPath, "error", err)
+			return false
+		}
+		if err == nil && !isSitesDirPointer(original) {
 			// A whole configuration is about to become a pointer: keep it, whatever its schema
 			if !backupBeforeSave(pointerPath, configSchemaOf(original), true) {
 				return false
@@ -480,8 +515,14 @@ func saveDefaultConfig() bool {
 // copy couldn't be written.
 func backupBeforeSave(configPath string, schema int, always bool) bool {
 	original, err := os.ReadFile(configPath) // #nosec G304 -- path under the sites directory chosen by the administrator (TURBO_DIR or M)
-	if err != nil {
+	if errors.Is(err, fs.ErrNotExist) {
 		return true // Nothing to keep
+	}
+	if err != nil {
+		// One that is there and can't be read (another owner, after an edit with sudo) is what someone wrote: replaced
+		// without a copy, as it was, that edit was lost while the answer said "Configuration saved"
+		slog.Error("turbo.config can't be read to keep a copy of it: nothing is saved", "file", configPath, "error", err)
+		return false
 	}
 	var backupPath, message string
 	level := slog.LevelInfo
@@ -889,12 +930,32 @@ func configErrorMessage(err error, starting bool) string {
 	return headline + "\n" + err.Error()
 }
 
-// logConfigError logs an error of a periodic updateSettings, if any.
+// logConfigError logs an error of a periodic updateSettings, if any. That of an "M" that can't be followed, which
+// every reload meets again until its directory is there, is logged when it changes, not every 30 s.
 func logConfigError(err error) {
-	if err != nil {
-		slog.Error(configErrorMessage(err, false))
+	pendingChainMutex.Lock()
+	defer pendingChainMutex.Unlock()
+	if err == nil {
+		pendingChainLogged = ""
+		return
 	}
+	message := configErrorMessage(err, false)
+	if errors.As(err, &configPointerError{}) {
+		if message == pendingChainLogged {
+			return
+		}
+		pendingChainLogged = message
+	} else {
+		pendingChainLogged = ""
+	}
+	slog.Error(message)
 }
+
+// pendingChainLogged is the last error of an "M" that can't be followed that logConfigError wrote.
+var (
+	pendingChainMutex  sync.Mutex
+	pendingChainLogged string
+)
 
 // parseConfig decodes turbo.config into raw. Anything but an object of objects at the top level is an error, as
 // a section that couldn't be read would get its defaults (the password among them).
@@ -941,6 +1002,7 @@ func (e configSettingError) Error() string { return `"` + e.key + `" can't be us
 type configSiteError struct {
 	domain, where string
 	list          string   // The list written in the site, outside its sections ("?"…), if that is the problem
+	unknown       string   // The key of a section that is no list of a site ("? ", "Preprocessors"…), if that is the problem
 	name          string   // Why the key isn't the name of a site or of a subdomain, if that is the problem
 	keys          []string // The keys that lead to what can't be used, from the site (configKeyOffset)
 }
@@ -948,6 +1010,9 @@ type configSiteError struct {
 func (e configSiteError) Error() string {
 	if e.name != "" {
 		return e.where + ` can't be used: it isn't the name of a site (` + e.name + `). A site, or a subdomain, is named as its folder, with "*" where the folder has "#": in lower case, with letters, digits and "-" between dots, and without spaces nor a final dot`
+	}
+	if e.unknown != "" {
+		return e.where + ` can't be used: ` + jsonString(e.unknown) + ` is no list of a site (its lists are "!", "=", "$", ".", "?", "-" and "&", written exactly so)`
 	}
 	if e.list != "" {
 		return e.where + ` can't be used: the lists of a site go inside its "" section, as in ` + jsonString(e.domain) + `: {"": {` + jsonString(e.list) + `: {…}}}, and those of a subdomain inside the subdomain's section`
@@ -959,8 +1024,12 @@ func (e configSiteError) Error() string {
 // and each of their lists are JSON objects, and that a site has no list outside its sections (configSiteError). No
 // list name is a host, and Turbo never writes one there: skipped, a site's preprocessors written in it by hand were
 // lost without a word. A key that isn't a site's name ("Example.com", "example.com.") was skipped without a word too,
-// and its folder came from the disk with the defaults: its scripts served as text.
+// and its folder came from the disk with the defaults: its scripts served as text. So was a key of a section that is
+// no list ("? " or "Preprocessors" for "?"): the list written under it was lost, the preprocessors with it. Only a
+// file of a later schema, which may have lists this version doesn't know, keeps such a key, with a warning.
 func siteSectionsProblem(raw map[string]map[string]interface{}) error {
+	schema, schemaErr := rawConfigSchema(raw) // An invalid "^" is migrateConfig's to refuse
+	laterSchema := schemaErr == nil && schema > configSchema
 	for _, domain := range sortedKeys(raw) {
 		switch domain {
 		case "_", "@", "#", ".", "^": // Not sites
@@ -989,6 +1058,15 @@ func siteSectionsProblem(raw map[string]map[string]interface{}) error {
 						return configSiteError{domain: domain, where: where + " > " + strconv.Quote(key), keys: []string{domain, subdomain, key}}
 					}
 				}
+			}
+			for _, key := range sortedKeys(section) {
+				if _, isList := subdomainContentCheckers[key]; isList {
+					continue
+				}
+				if !laterSchema {
+					return configSiteError{domain: domain, where: where + " > " + strconv.Quote(key), unknown: key, keys: []string{domain, subdomain, key}}
+				}
+				slog.Warn("turbo.config of a later schema: a list of a site that this version doesn't know is ignored", "site", domain, "subdomain", subdomain, "list", key)
 			}
 		}
 	}
@@ -1019,7 +1097,7 @@ func panelSettingsProblem(settings map[string]interface{}) error {
 	}
 	if value, present := settings["U"]; present && !userFromEnv {
 		if text, isString := value.(string); !isString || !panelUserValid(text) {
-			return configSettingError{"U", "a string of 1 to 24 characters, without control characters, is expected"}
+			return configSettingError{"U", "a string of 1 to 24 bytes (UTF-8), without control characters, is expected"}
 		}
 	}
 	if passwordFromEnv {

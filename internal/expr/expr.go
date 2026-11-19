@@ -214,7 +214,15 @@ type Program struct {
 	root    *node
 	headers []string
 	cookies bool
+	// The host of a redirection may be SUBDOMAIN or FIRST_SUBDOMAIN, a "." and one label of a text of the expression
+	labelsOneLabel bool
 }
+
+// LabelsBeforeOneLabel reports whether the target of a rewrite may have, as the host of a redirection, SUBDOMAIN or
+// FIRST_SUBDOMAIN and then a text with a "." and one label only ("SUBDOMAIN + '.com'"): under a wildcard subdomain the
+// visitor chooses that label's domain whole (evil.yoursite.net to evil.com). It compiles, as a site may want it with
+// a suffix of its own; the caller may warn of it.
+func (p *Program) LabelsBeforeOneLabel() bool { return p.labelsOneLabel }
 
 // Source is the expression as it was written.
 func (p *Program) Source() string { return p.source }
@@ -262,7 +270,7 @@ func Compile(source string, options Options) (*Program, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Program{source: source, target: options.Target, root: root, headers: c.headers, cookies: c.cookies}, nil
+	return &Program{source: source, target: options.Target, root: root, headers: c.headers, cookies: c.cookies, labelsOneLabel: c.labelsOneLabel}, nil
 }
 
 // Header evaluates a header expression for r: the value of the header, without the spaces and tabs at its ends, or

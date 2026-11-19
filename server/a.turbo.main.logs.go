@@ -85,13 +85,18 @@ const maxScriptLine = 4 << 10
 type scriptStderr struct {
 	mutex    sync.Mutex
 	prefix   string
+	ownName  string // The prefix without the ".exe" of Windows, as a program names itself ("[dx-lua] ")
 	pending  []byte
 	dropping bool // The rest of a line longer than maxScriptLine
 }
 
 func newScriptStderr(program string) *scriptStderr {
 	name := strings.ReplaceAll(filepath.Base(filepath.FromSlash(program)), " ", "_")
-	return &scriptStderr{prefix: "[" + name + "] "}
+	ownName := name
+	if len(name) > 4 && strings.EqualFold(name[len(name)-4:], ".exe") {
+		ownName = name[:len(name)-4]
+	}
+	return &scriptStderr{prefix: "[" + name + "] ", ownName: "[" + ownName + "] "}
 }
 
 func (w *scriptStderr) Write(p []byte) (int, error) {
@@ -135,7 +140,8 @@ func (w *scriptStderr) writeLocked(cut bool) {
 		line += " (cut)"
 	}
 	prefix := w.prefix
-	if strings.HasPrefix(line, prefix) { // The program names itself already ("[dx-lua] …")
+	// The program names itself already ("[dx-lua] …"), on Windows without its ".exe": "[dx-lua.exe] [dx-lua] …" there
+	if strings.HasPrefix(line, prefix) || strings.HasPrefix(line, w.ownName) {
 		prefix = ""
 	}
 	_, _ = scriptLines.Write([]byte(prefix + strings.ToValidUTF8(line, "\uFFFD")))
@@ -393,8 +399,17 @@ func refreshLogFiles(baseDir string) {
 				continue // Still the same file
 			}
 		}
+		if statErr == nil && !pathInfo.Mode().IsRegular() { // A FIFO would wait for a reader, with settingsUpdateMutex held
+			if previous, _ := logOpenProblems.Swap(baseDir+logType, "not a regular file"); previous != "not a regular file" {
+				slog.Warn("Can't open the log: it isn't a regular file", "file", baseDir+logType)
+			}
+			if openFile != nil {
+				serverSetLogState(logType, nil)
+			}
+			continue
+		}
 		if statErr == nil {
-			logFile, openErr := os.OpenFile(baseDir+logType, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600) // #nosec G304 -- fixed log name in the sites directory
+			logFile, openErr := os.OpenFile(baseDir+logType, os.O_APPEND|os.O_CREATE|os.O_WRONLY|logOpenFlags, 0600) // #nosec G304 -- fixed log name in the sites directory
 			if openErr == nil {
 				serverSetLogState(logType, logFile) // Closes the one that was open
 				logOpenProblems.Delete(baseDir + logType)
@@ -418,6 +433,9 @@ var logOpenProblems sync.Map
 // invalid UTF-8, so that each line keeps its fields apart (an HTTP/2 path may have spaces) and shows in a terminal
 // as it is.
 func logField(field string) string {
+	if field == "" {
+		return `""`
+	}
 	for _, r := range field {
 		if r <= ' ' || r == '"' || r == utf8.RuneError || !strconv.IsPrint(r) {
 			return strconv.Quote(field)

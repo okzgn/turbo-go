@@ -138,7 +138,8 @@ func TestN04_PanelCertificateRemoved(t *testing.T) {
 
 // Review of 57cbb3c, S1: without a certificate for the panel's host (cfgPC a=0 removes it and sends max-age=0), HSTS
 // isn't sent again: a request on a connection still open, or a TLS session resumed, set it again for a year, with
-// no HTTPS to come back to.
+// no HTTPS to come back to. Since the review of v2.5.0 (PA-1) such a request clears it (max-age=0), whatever took
+// the certificate away.
 func TestRL_S1_NoHSTSWithoutPanelCertificate(t *testing.T) {
 	panelHTTPSSetup(t)
 	withGlobalLock(func() {
@@ -148,7 +149,7 @@ func TestRL_S1_NoHSTSWithoutPanelCertificate(t *testing.T) {
 	recorder := &responseRecorder{}
 	request := &customNetHttp.Request{Method: "GET", Host: "panel.test", RequestURI: "/admin:", RemoteAddr: "127.0.0.1:5000", Header: customNetHttp.Header{}, TLS: &tls.ConnectionState{}}
 	console(recorder, request)
-	if got := recorder.Header().Get("Strict-Transport-Security"); got != "" {
-		t.Errorf("HSTS on the panel's host without its certificate: %q", got)
+	if got := recorder.Header().Get("Strict-Transport-Security"); got != "max-age=0" {
+		t.Errorf("HSTS on the panel's host without its certificate: %q; expected max-age=0", got)
 	}
 }

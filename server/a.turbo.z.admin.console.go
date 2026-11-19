@@ -104,11 +104,7 @@ func console(responseWriter customNetHttp.ResponseWriter, request *customNetHttp
 	if request.TLS == nil && panelHTTPSRedirect(responseWriter, request) {
 		return true
 	}
-	// Its own host, while a certificate covers it: always HTTPS. Without one (cfgPC a=0 sent max-age=0), a request on a
-	// connection still open, or a TLS session resumed, would set it again for a year, with no HTTPS to come back to.
-	if hostName := panelHostName(request); request.TLS != nil && panelAccess.Load().hosts[hostName] && certificateFor(hostName) != nil {
-		panelHeaders.Set("Strict-Transport-Security", "max-age=31536000")
-	}
+	panelHSTS(responseWriter, request)
 
 	request.RequestURI = cutAt(request.RequestURI[prefixLen:], '?')
 
@@ -120,6 +116,24 @@ func console(responseWriter customNetHttp.ResponseWriter, request *customNetHttp
 	}
 	consoleFiles(adminPathPrefix, request.RequestURI, responseWriter, request)
 	return true
+}
+
+// panelHSTS sets Strict-Transport-Security in an answer of the panel on its own host over TLS: a year while a
+// certificate covers the host, and max-age=0 without one, so that the browser can come back by HTTP (a request on a
+// connection still open, or a TLS session resumed, once the certificate is gone). It is set as each request comes in,
+// and again by the actions that may take the certificate away before they answer (setM to a directory without
+// turbo.panel, cfgPC a=0 also when its files were already gone): their answer carried the year decided before them,
+// with no HTTPS left to come back to, and the administrator's browser was kept out of the panel.
+func panelHSTS(responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request) {
+	hostName := panelHostName(request)
+	if request.TLS == nil || !panelAccess.Load().hosts[hostName] {
+		return
+	}
+	if certificateFor(hostName) != nil {
+		responseWriter.Header().Set("Strict-Transport-Security", "max-age=31536000")
+	} else {
+		responseWriter.Header().Set("Strict-Transport-Security", "max-age=0")
+	}
 }
 
 // panelHTTPSRedirect sends a panel request that came over HTTP to HTTPS, on the host it asked for, when a
@@ -759,7 +773,7 @@ func warnDefaultCredentials() {
 	}
 }
 
-// panelUserValid says whether a panel username can be used and saved as "U": 1 to 24 characters, without control
+// panelUserValid says whether a panel username can be used and saved as "U": 1 to 24 bytes, without control
 // characters, as setU and turbo.config take it.
 func panelUserValid(user string) bool {
 	return len(user) >= 1 && len(user) <= 24 && textAllowed(user, false)
@@ -1972,6 +1986,13 @@ func setSitesDir(value string, currentSession string) (bool, string) {
 	if err := configFileProblem(resolved, start, hops); err != nil {
 		return false, "The sites directory is not changed. " + configErrorMessage(err, false)
 	}
+	// Its turbo.config may lead back to the directory in use (a copy of this one, whose "M" still names it, or is
+	// {TURBO_CURRENT_DIR}): followed, the reload came back here, and answered that the directory was set.
+	if !start {
+		if end := sitesDirChainEnd(resolved); !sameDir(end, resolved) && sameDir(end, sitesDir.Get()) {
+			return false, "The sites directory is not changed. The turbo.config of " + resolved + " leads back to the sites directory in use (its \"M\"): change that \"M\", or delete that turbo.config to keep the settings in use there"
+		}
+	}
 	settingsUpdateMutex.Lock()
 	defer settingsUpdateMutex.Unlock()
 	type panelSettings struct{ access, user, hash string }
@@ -2142,6 +2163,7 @@ func consoleActionsAPI(apiPath string, currentSession string, viaCookie bool, re
 						if panelUser.Get()+"\x00"+panelPasswordHash.Get() != credentials { // Those of the new directory: as with setU and setP
 							withGlobalLock(func() { renewCredentialsSessionLocked(responseWriter, request, viaCookie) })
 						}
+						panelHSTS(responseWriter, request) // The panel's certificate is the one of the new directory, or none
 						respond(responseWriter, message)
 					} else {
 						badReq(responseWriter, request, message)
@@ -2539,6 +2561,12 @@ func consoleActionsAPI(apiPath string, currentSession string, viaCookie bool, re
 						}
 					}
 					applied, message = lockedCheckLooking(look, func() (bool, string) {
+						// What is saved may have changed since the password was asked for, or not (the look at the disk and
+						// the wait for the lock are in between): judged again as it is applied, as addRewrite does. A
+						// request that needed no password when it came put back the adapter that another had just changed.
+						if !needed && certificatePasswordNeeded(apiPath, request.Form) {
+							return false, msgMissingData + ": the current password (b)"
+						}
 						if apiPath == "PC" {
 							return panelCertificateAction(request.Form["a"][0], email, adapter, yParamExists)
 						}
@@ -2550,6 +2578,9 @@ func consoleActionsAPI(apiPath string, currentSession string, viaCookie bool, re
 					})
 					return applied, message
 				}()
+				if apiPath == "PC" { // With or without its certificate now, whatever the answer says (panelHSTS)
+					panelHSTS(responseWriter, request)
+				}
 				if !applied && isCertificateWait(message) { // In progress, not an error
 					responseWriter.Header().Set(contentTypeHeader, jsonContentType)
 					responseWriter.WriteHeader(202)
@@ -2559,10 +2590,6 @@ func consoleActionsAPI(apiPath string, currentSession string, viaCookie bool, re
 				if !applied {
 					badReq(responseWriter, request, message)
 					return true
-				}
-				if apiPath == "PC" && request.Form["a"][0] == "0" && request.TLS != nil {
-					// Without its certificate the panel's host has no HTTPS: the browser has to be able to come back by HTTP
-					responseWriter.Header().Set("Strict-Transport-Security", "max-age=0")
 				}
 				respond(responseWriter, message)
 			} else {

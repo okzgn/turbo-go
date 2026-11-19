@@ -78,8 +78,9 @@ func expressionOptions(target expr.Target, header string) expr.Options {
 
 // quotedUnsafeHeaders are the headers whose grammar doesn't keep a quoted text together: a ";" or a space inside the
 // quotes still ends the value there (an attribute of Set-Cookie, a directive or a source of a policy), and what
-// quoted gives of the request could add one.
-var quotedUnsafeHeaders = map[string]bool{"Set-Cookie": true, "Content-Security-Policy": true, "Content-Security-Policy-Report-Only": true}
+// quoted gives of the request could add one. And Refresh, whose URL a browser takes without its quotes: quoted left
+// there the URL as the client sent it, and the page went where the client said.
+var quotedUnsafeHeaders = map[string]bool{"Set-Cookie": true, "Content-Security-Policy": true, "Content-Security-Policy-Report-Only": true, "Refresh": true}
 
 // compiledExpressions are the expressions compiled, each once, by their target and their text, with the error of
 // those that don't compile: the views of the sites take them from here each time they are made. Only what the

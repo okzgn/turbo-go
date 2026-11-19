@@ -43,7 +43,16 @@ type dynamicJob struct {
 	basePath    string                       // The content folder of the site (DOCUMENT_ROOT)
 	requestPath string                       // The path of the script in the site, after the rewrite (SCRIPT_NAME)
 	queryString string                       // The client's query without the parameters the rewrite's sets, then the rewrite's
+	requestURI  string                       // REQUEST_URI: the path the client asked for, with queryString where a rewrite's query changed it
 	timeout     time.Duration                // WT: how long the script may run; 0, without a limit
+}
+
+// uri is the REQUEST_URI of the job: requestURI, or the request's own where no one set it.
+func (job *dynamicJob) uri() string {
+	if job.requestURI != "" {
+		return job.requestURI
+	}
+	return job.request.URL.RequestURI()
 }
 
 // preprocessorMode is what a mode of preprocessor does.

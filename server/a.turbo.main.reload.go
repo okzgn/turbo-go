@@ -33,6 +33,7 @@ import (
 	"log/slog"
 	"math"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -243,16 +244,30 @@ func updateSettingsFollowing(checkSitesFlag bool, redirects int, options reloadO
 	// usable before anything is applied (sitesDirChainProblem). Outside setM, a pointer must lead to a configuration:
 	// applied on its own, it would leave the defaults, the default credentials and an open panel included. One without
 	// "M" ({}, or only "^") points nowhere: it is an empty configuration, loaded as such.
-	if readConfig && configErr == nil && config.raw != nil && !options.ignorePointer {
+	// With TURBO_DIR, the "M" of the whole turbo.config of that directory that is written with {TURBO_CURRENT_DIR}
+	// means that directory, where it was saved when Turbo was started from it: followed, it led to the working
+	// directory of the service (another one, without a turbo.config), where no site has its folder.
+	ownDirMeant := false
+	if readConfig && configErr == nil && config.raw != nil && !following && sitesDirFromEnv && !isSitesDirPointerMap(config.raw) {
+		if value, _ := configSitesDir(config.raw); strings.Contains(value, "{"+currentDirPlaceholder+"}") {
+			if resolved, err := resolveSitesDir(value); err == nil && sameDir(baseDir, startDir) && !sameDir(resolved, baseDir) {
+				ownDirMeant = true
+				slog.Warn("The \"M\" of turbo.config is written with {"+currentDirPlaceholder+"}, which with TURBO_DIR is another directory: it is not followed, and the sites directory of TURBO_DIR stays. Saving the configuration writes \"M\" as TURBO_DIR says", "directory", baseDir, "working directory", resolved)
+			}
+		}
+	}
+	chainPending := false // The chain of "M" can't be followed now: tried again, as what it waits for (a disk) may come
+	if readConfig && configErr == nil && config.raw != nil && !options.ignorePointer && !ownDirMeant {
 		if problem := sitesDirChainProblem(config.raw, baseDir, redirects, options.keepWithoutConfig); problem != nil {
 			data, _ := os.ReadFile(baseDir + configFileName) // #nosec G304 -- turbo.config of the sites directory in use, for the message
 			configErr = &configFileError{path: baseDir + configFileName, data: data, err: problem}
+			chainPending = true
 		}
 	}
 	// A turbo.config whose "M" names another sites directory is followed without applying it here. A pointer has no
 	// settings. A whole one without a turbo.config there applies there, where its sites are (carried); with one there,
 	// that one applies, after the credentials of this one (inherited), as when this one was applied first.
-	if readConfig && configErr == nil && config.raw != nil && !options.ignorePointer {
+	if readConfig && configErr == nil && config.raw != nil && !options.ignorePointer && !ownDirMeant {
 		if value, _ := configSitesDir(config.raw); value != "" {
 			if resolved, err := resolveSitesDir(value); err == nil && dirExists(resolved) && !sameDir(resolved, baseDir) {
 				_, statErr := os.Lstat(resolved + configFileName)
@@ -275,8 +290,9 @@ func updateSettingsFollowing(checkSitesFlag bool, redirects int, options reloadO
 					return err
 				}
 				// It changed since it was checked: the configuration in use stays, as with a chain that can't be
-				// followed, and this turbo.config isn't read again until it changes
+				// followed, and this turbo.config is read again in the next reload
 				configErr = err
+				chainPending = true
 			}
 		}
 	}
@@ -289,7 +305,7 @@ func updateSettingsFollowing(checkSitesFlag bool, redirects int, options reloadO
 		kept = nil
 	}
 	diskSites, mixedCase := scanDiskSites(baseDir, dirEntries, kept)
-	folds := probeNameFolding(baseDir, diskSites)
+	folds, foldsKnown := probeNameFoldingKnown(baseDir, diskSites)
 	var restoring map[diskSite]map[string]interface{}
 	if !following {
 		restoring = dormantSectionsFound(diskSites)
@@ -316,6 +332,16 @@ func updateSettingsFollowing(checkSitesFlag bool, redirects int, options reloadO
 	// another directory empties what belonged to the one left in the same section.
 	beforeSitesScan()
 	withDiskLook(look, func() {
+		// A panic while the file is applied (a bug of a validator) is recovered by whoever runs the reload, with what
+		// came from the file already emptied: the file isn't noted as read, so the next reload applies it again, whole.
+		// Noted, the sites stayed with the defaults, without their preprocessors, until the file changed.
+		defer func() {
+			if failure := recover(); failure != nil {
+				configFileStamp = configStamp{}
+				certificatePublishPaused, loadingConfig = false, false
+				panic(failure)
+			}
+		}()
 		credentials := panelUser.Get() + "\x00" + panelPasswordHash.Get()
 		if following {
 			certificatePublishPaused = true
@@ -323,16 +349,27 @@ func updateSettingsFollowing(checkSitesFlag bool, redirects int, options reloadO
 			sitesDir.Set(baseDir)
 			sitesDirValue.Set(options.targetValue)
 			sitesDirHops = redirects
+			if sameDir(baseDir, startDir) { // Back in the start directory, however it got there: the next start counts from it
+				sitesDirHops = 0
+			}
 			for _, inherited := range options.inherited {
 				loadCredentials(inherited.settings, inherited.password)
 			}
 		}
 		switch {
+		case readConfig && chainPending:
+			// Not noted as read: the directory that its "M" waits for may appear without this file changing (a disk
+			// mounted later), and it was followed only at the next start. The error is logged when it changes
+			// (logConfigError).
 		case readConfig:
 			configFileStamp = stamp // Not read again until it changes, also if it is invalid
 			if configErr == nil {
 				certificatePublishPaused = true
+				inUse := siteCertificates // applySiteConfig makes the map anew
 				applySiteConfig(config)
+				if !following {
+					keepCertificatesInUseLocked(inUse)
+				}
 				configFileLoaded = stamp.kind != stampMissing
 				configFileDigest = config.digest
 			}
@@ -348,8 +385,18 @@ func updateSettingsFollowing(checkSitesFlag bool, redirects int, options reloadO
 			closeOtherSessions(options.keepSession)
 		}
 		if sitesDir.Get() == baseDir { // Not the folders of a directory that "M" leaves: they aren't its sites
-			if sitesDirFolds.Swap(folds) != folds && folds && !namesIgnoreCase {
-				slog.Info("The sites directory takes names in other capitals for the same file: paths and rewrites are treated as on a system that ignores case", "directory", baseDir)
+			// Where it couldn't be looked at (no site with letters in its name was found: a share that didn't answer),
+			// what was known of this directory stays: taken as false, the rewrites that close a folder and the names
+			// of Windows stopped applying until the next reload.
+			if !foldsKnown && !following {
+				folds = sitesDirFolds.Load()
+			}
+			if sitesDirFolds.Swap(folds) != folds && !namesIgnoreCase {
+				if folds {
+					slog.Info("The sites directory takes names in other capitals for the same file: paths and rewrites are treated as on a system that ignores case", "directory", baseDir)
+				} else {
+					slog.Info("The sites directory no longer takes names in other capitals for the same file: paths and rewrites are treated as the system does", "directory", baseDir)
+				}
 			}
 			sitesActivated = activateDiskSites(diskSites, checkSitesFlag)
 			dropAliasesOfSites() // Once all the sites are in: a site wins over an alias of its host
@@ -548,6 +595,13 @@ func applySiteConfig(config parsedConfig) {
 			if _, keyExists = rawConfigMap[configKey]["C"]; keyExists { // "Save" is an action, not a setting: never run while loading
 				slog.Warn("turbo.config key ignored: saving is a panel action (setC), not a setting", "key", "C")
 			}
+			// A setting written with another name ("pa" for "PA") was lost without a word, and its default applied. Only
+			// its name is logged: what was meant may be a password.
+			for _, key := range sortedKeys(rawConfigMap[configKey]) {
+				if !slices.Contains(defaultSettingKeysGroup[configKey], key) && !otherGlobalSettingKeys[key] {
+					slog.Warn("turbo.config setting ignored: no setting has that name", "key", key)
+				}
+			}
 			for _, subValue := range defaultSettingKeysGroup[configKey] {
 				if rawValue, present := rawConfigMap[configKey][subValue]; present {
 					var reason string
@@ -562,7 +616,11 @@ func applySiteConfig(config parsedConfig) {
 					} else {
 						reason = "wrong type (a string or an integer is expected)"
 					}
-					slog.Warn("turbo.config setting discarded: the default value is used", "key", subValue, "value", configValueForLog(subValue, rawValue), "reason", reason)
+					if subValue == "M" { // It has no default to go back to
+						slog.Warn("turbo.config setting discarded: the sites directory in use stays", "key", subValue, "value", configValueForLog(subValue, rawValue), "reason", reason)
+					} else {
+						slog.Warn("turbo.config setting discarded: the default value is used", "key", subValue, "value", configValueForLog(subValue, rawValue), "reason", reason)
+					}
 				}
 				defaultSettingsResetFallbacks[configKey][subValue]()
 			}
@@ -607,6 +665,24 @@ func applySiteConfig(config parsedConfig) {
 		}
 	}
 	rawConfigMap = make(map[string]map[string]interface{})
+}
+
+// keepCertificatesInUseLocked puts back, after a turbo.config was applied over the same sites directory, the
+// certificate that each site with HTTPS had in use (inUse) and that its files didn't give again: a pair that can't
+// be loaded now (a chain renewed whose key hasn't come yet, a key that can't be read), or files that "Delete SSL"
+// removed while the certificate stayed in use. Applying the file emptied every certificate and read them from the
+// disk, so an edit of turbo.config left such a site with HTTPS on and without a certificate: its handshakes failed. Its
+// stamp says that its files couldn't be loaded, so the look of every 30 s reads them again (refreshSiteCertificates).
+// Callers hold the global lock.
+func keepCertificatesInUseLocked(inUse map[string]*tls.Certificate) {
+	for siteKey, cert := range inUse {
+		if _, loaded := siteCertificates[siteKey]; loaded || cert == nil || !httpsEnabled(siteKey) {
+			continue
+		}
+		siteCertificates[siteKey] = cert
+		siteCertificateStamps[siteKey] = unloadableStampMark
+		slog.Warn("The certificate files of a site can't be loaded: the certificate in use stays", "site", siteKey)
+	}
 }
 
 // subdomainContentOrder is the order in which the content of a site of turbo.config is applied.

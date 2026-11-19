@@ -128,7 +128,8 @@ func init() { registerPreprocessorMode("dx", dxWorkers) }
 // A worker that waited may have ended meanwhile without its end being seen yet (one that ends after some requests,
 // right after its answer): the request goes to another, once, when nothing of it reached the worker, or when the
 // worker ended without a byte of an answer and the request may be made twice (idempotent, and without a body), as a
-// proxy retries a request with its next server. One that changes something is never made twice.
+// proxy retries a request with its next server. One that isn't idempotent (POST, PATCH), or has a body, is never
+// made twice; PUT and DELETE without a body are idempotent, and may be.
 func (mode *dxMode) serve(job *dynamicJob) {
 	if mode.serveOnce(job, true) {
 		mode.serveOnce(job, false)
@@ -621,7 +622,7 @@ func dxRequestPairs(job *dynamicJob) []byte {
 	}
 	pairs := [][2]string{
 		{"SERVER_SOFTWARE", "go"}, {"SERVER_PROTOCOL", "HTTP/1.1"}, {"HTTP_HOST", request.Host}, {"GATEWAY_INTERFACE", "CGI/1.1"},
-		{"REQUEST_METHOD", request.Method}, {"QUERY_STRING", job.queryString}, {"REQUEST_URI", request.URL.RequestURI()},
+		{"REQUEST_METHOD", request.Method}, {"QUERY_STRING", job.queryString}, {"REQUEST_URI", job.uri()},
 		{"PATH_INFO", ""}, {"SCRIPT_NAME", job.requestPath}, {"SCRIPT_FILENAME", job.basePath + job.requestPath},
 		{"SERVER_PORT", port}, {"DOCUMENT_ROOT", job.basePath}, {"REDIRECT_STATUS", "CGI"},
 	}

@@ -58,6 +58,13 @@ var subdomainContentCheckers = map[string]func(bool, interface{}, bool, ...strin
 			return false, "Invalid configuration data"
 		}
 
+		if isFromFile { // A setting written with another name ("s" for "S") was lost without a word, the site's HTTPS with it
+			for _, key := range sortedKeys(mapData) {
+				if _, known := siteSSLSettingCheckers[key]; !known {
+					slog.Warn("turbo.config site setting ignored: no setting of a site has that name", "site", siteKeys[0], "subdomain", siteKeys[1], "setting", key)
+				}
+			}
+		}
 		for _, setting := range siteSSLSettingOrder {
 			if _, exists := mapData[setting]; !exists {
 				continue
@@ -154,7 +161,8 @@ var subdomainContentCheckers = map[string]func(bool, interface{}, bool, ...strin
 				// Kept with the mode X. Compiled now, and what it gives is checked as it is placed (choose). One of
 				// turbo.config that doesn't compile is kept as it is, and the paths it takes answer 500 until it is
 				// fixed: dropped, they would be served as they were named.
-				if _, err := compileExpression(expr.RewriteTarget, "", source); err != nil {
+				program, err := compileExpression(expr.RewriteTarget, "", source)
+				if err != nil {
 					if printErrors {
 						return false, err.Error()
 					}
@@ -162,6 +170,8 @@ var subdomainContentCheckers = map[string]func(bool, interface{}, bool, ...strin
 						continue
 					}
 					slog.Warn("turbo.config rewrite whose expression doesn't compile: the paths it takes answer 500", "site", siteKeys[0], "subdomain", siteKeys[1], "source", targetURI, "reason", err.Error())
+				} else if program.LabelsBeforeOneLabel() && !(isExisting && current == "X"+source) { // As for a target written as a text
+					slog.Warn("Rewrite whose host is SUBDOMAIN and one label: under a wildcard subdomain, the visitor chooses the whole domain of the redirection. Write the rest of the host as a domain of the site", "site", joinedSite(siteKeys[1], siteKeys[0]), "source", targetURI)
 				}
 				if isExisting && current == "X"+source {
 					if printErrors {
@@ -246,6 +256,9 @@ var subdomainContentCheckers = map[string]func(bool, interface{}, bool, ...strin
 			}
 			if labelsBeforeOneLabel(schemeMode + strVal) {
 				slog.Warn("Rewrite whose host is {SUBDOMAIN} and one label: under a wildcard subdomain, the visitor chooses the whole domain of the redirection. Write the rest of the host as a domain of the site", "site", joinedSite(siteKeys[1], siteKeys[0]), "source", targetURI)
+			}
+			if labelsBeforeAnAliasKeyword(schemeMode + strVal) {
+				slog.Warn("Rewrite whose host is {SUBDOMAIN} and {FIRST_DOMAIN} or {FIRST_SITE}: these give nothing for a request that comes through no alias and no wildcard domain, and such a request answers 500", "site", joinedSite(siteKeys[1], siteKeys[0]), "source", targetURI)
 			}
 			// Compared as it is kept: decoded, and with its scheme in a letter. It was compared as written, so the
 			// same target answered "Rewrite changed", and a target without its scheme "Rewrite unchanged".

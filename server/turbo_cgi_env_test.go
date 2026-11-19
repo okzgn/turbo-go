@@ -34,7 +34,9 @@ func TestN37_CGIScriptName(t *testing.T) {
 	base := startServer(t)
 	for _, c := range []struct{ path, scriptName, requestURI, query string }{
 		{"/app/x.cgi?a=1", "/app/x.cgi", "/app/x.cgi?a=1", "a=1"},
-		{"/r?a=1", "/app/x.cgi", "/r?a=1", "a=1&b=2"},
+		{"/r?a=1", "/app/x.cgi", "/r?a=1&b=2", "a=1&b=2"}, // The path the client asked for, with the query of QUERY_STRING (review of v2.5.0, CG-3)
+		{"/r?b=9&a=1", "/app/x.cgi", "/r?a=1&b=2", "a=1&b=2"},
+		{"/r", "/app/x.cgi", "/r?b=2", "b=2"},
 	} {
 		code, body, err := get(base, c.path, nil)
 		if err != nil || code != 200 {
