@@ -323,7 +323,7 @@ func (h *CgiHandler) ServeHTTP(rw ResponseWriter, req *Request) {
 		}
 		val = textproto.TrimString(val)
 		switch {
-		case header == "Status":
+		case strings.EqualFold(header, "Status"): // turbo:P15: in any case, as the names of a CGI's headers are (RFC 3875)
 			// turbo:P12: three digits from 200 to 599 (a 1xx is not a final response); otherwise, 500 with the
 			// template instead of an empty 200 or a WriteHeader panic.
 			code, ok := turboCGIStatus(val)

@@ -26,11 +26,14 @@ package server
 // them with, its rewrites whatever their capitals) is kept from one to the next.
 
 import (
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"unicode"
 	"unicode/utf8"
+
+	"turbo/customNetHttp"
 )
 
 // stateLock is the lock of the shared state (globalMutex): a sync.RWMutex that counts the times it is locked for
@@ -62,15 +65,19 @@ func (lock *stateLock) Unlock() {
 }
 
 // siteView is what a site serves its requests with, copied from the shared state: its MIME types, its preprocessors
-// and its headers (nil for none), its indexes in the order they are tried, and whether it has precompressed files
-// on. Nothing changes one once it is made: the plans of the requests of the site share it, and use it without the
-// lock.
+// and its headers written as they are (nil for none), those that are expressions, already compiled, its indexes in
+// the order they are tried, and whether it has precompressed files on. Nothing changes one once it is made: the
+// plans of the requests of the site share it, and use it without the lock.
 type siteView struct {
-	mimeTypes     map[string]string
-	preprocessors map[string]string
-	headers       map[string]string
-	indexes       []string
-	precompressed bool
+	mimeTypes         map[string]string
+	preprocessors     map[string]string
+	headers           map[string]string
+	headerExpressions []headerExpression // By name
+	brokenHeader      string             // The first header whose expression doesn't compile (turbo.config edited by hand), and why
+	brokenWhy         string
+	vary              []string // What the responses depend on because of the expressions of the headers
+	indexes           []string
+	precompressed     bool
 }
 
 // newSiteView copies what the site of siteKey ("sub.example.com", or "example.com" for the domain) serves with.
@@ -79,9 +86,9 @@ func newSiteView(siteKey string) *siteView {
 	view := &siteView{
 		mimeTypes:     cloneOrNil(mimeTypes[siteKey]),
 		preprocessors: cloneOrNil(preprocessors[siteKey]),
-		headers:       cloneOrNil(customHeaders[siteKey]),
 		precompressed: settingsOf(siteKey).precompressed,
 	}
+	view.headers, view.headerExpressions, view.brokenHeader, view.brokenWhy, view.vary = siteHeaderExpressions(customHeaders[siteKey])
 	if len(indexFiles[siteKey]) > 0 {
 		view.indexes = orderedIndexes(siteKey)
 	}
@@ -92,9 +99,10 @@ func newSiteView(siteKey string) *siteView {
 // the views by the key of their settings, and the folded rewrites by their site in sitesMap. As many as the sites
 // have at most: never by the Host of a request.
 type siteViews struct {
-	generation     uint64
-	bySiteKey      sync.Map // string → *siteView
-	foldedRewrites sync.Map // rewriteSite → map[string]string
+	generation         uint64
+	bySiteKey          sync.Map // string → *siteView
+	foldedRewrites     sync.Map // rewriteSite → map[string]string
+	rewriteExpressions sync.Map // The source of the expression of a rewrite → compiledExpression
 }
 
 // rewriteSite names the rewrites of a site as sitesMap has them: by its domain and its subdomain there.
@@ -151,6 +159,9 @@ func siteViewOf(siteKey string) *siteView {
 // what isn't UTF-8 becomes U+FFFD, as EqualFold reads it. ASCII without capitals, as most paths are, is returned as it
 // is.
 func foldKey(s string) string {
+	if foldNormalizes {
+		s = nfcOf(s)
+	}
 	for i := 0; i < len(s); i++ {
 		if c := s[i]; c >= utf8.RuneSelf || 'A' <= c && c <= 'Z' {
 			var folded strings.Builder
@@ -160,6 +171,21 @@ func foldKey(s string) string {
 				folded.WriteRune(foldRune(r))
 			}
 			return folded.String()
+		}
+	}
+	return s
+}
+
+// foldNormalizes is set on macOS, where the file system opens a name written with a letter and its accent apart (NFD)
+// as the same name with them in one character (NFC): foldKey takes both for one, so that the rewrites of "/café/"
+// take "/cafe%CC%81/" too, which opens the same folder.
+var foldNormalizes = runtime.GOOS == "darwin"
+
+// nfcOf is s in the Unicode normalization form C, or s itself when it is ASCII (most paths), which is in it already.
+func nfcOf(s string) string {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= utf8.RuneSelf {
+			return customNetHttp.NFC.String(s)
 		}
 	}
 	return s

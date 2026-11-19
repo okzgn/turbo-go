@@ -1,0 +1,15 @@
+[package]
+name = "dx-lua"
+description = "A worker of Turbo's preprocessor mode dx that runs Lua scripts (LuaJIT) in a sandbox: no files, no network, no system"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "dx-lua"
+path = "src/main.rs"
+
+[dependencies]
+dx-core = { path = "../dx-core" }
+mlua = { version = "0.12", features = ["luajit", "vendored"] }

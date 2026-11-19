@@ -162,7 +162,7 @@ var (
 			setHTTPResponses(func(responses map[int]string) { delete(responses, code) })
 			return true, "HTTP code response removed"
 		},
-		"_": func(char string) (bool, string) { // The API already undid the replacements of the parameter
+		"_": func(char string) (bool, string) { // The character as sent: delCharsReplace is one of the literalActions
 			var exists bool
 			if _, exists = charReplacements[char]; !exists {
 				return false, "Replacement not found"
@@ -265,7 +265,6 @@ var (
 	// whose decoded, clean path (requestPath) matched the rewrite key rewriteMatch. The values aren't encoded here:
 	// shortcutWords does it for where they go.
 	shortcutWordReplacers = map[string]func(request *customNetHttp.Request, site siteMatch, rewriteMatch string, requestPath string) string{
-		currentDirPlaceholder: func(*customNetHttp.Request, siteMatch, string, string) string { return currentDir() },
 		"WILDCARD_SITE": func(_ *customNetHttp.Request, site siteMatch, _ string, _ string) string {
 			return joinedSite(site.siteSubdomain, site.siteDomain)
 		},
@@ -305,7 +304,7 @@ var (
 		"REWRITE_COMPLEMENT": func(request *customNetHttp.Request, _ siteMatch, rewriteMatch string, requestPath string) string {
 			// What follows the key in the decoded, clean path it matched, and the query
 			complement := ""
-			if length := len(rewriteMatch); length < len(requestPath) {
+			if length := matchedPrefixLength(requestPath, rewriteMatch); length < len(requestPath) {
 				complement = requestPath[length:]
 			}
 			if queryStart := strings.IndexByte(request.RequestURI, '?'); queryStart != -1 {
@@ -315,6 +314,26 @@ var (
 		},
 	}
 )
+
+// matchedPrefixLength is how many bytes of the request path the rewrite key matched (rewrite): the key itself, as
+// written; or, where names fold, the path whole, or up to one of its "/", that foldKey takes for the key, which may be
+// longer or shorter than the key ("/%E2%84%AAilo/", a kelvin sign of three bytes for the k of "/kilo/"; on macOS a
+// letter and its accent apart). A key that is the path with a final "/" (a folder named without it) leaves nothing.
+func matchedPrefixLength(path string, key string) int {
+	if strings.HasPrefix(path, key) || len(path) < len(key) && key == path+"/" {
+		return len(key)
+	}
+	folded := foldKey(key)
+	if foldKey(path) == folded {
+		return len(path)
+	}
+	for i := 0; i < len(path); i++ {
+		if path[i] == '/' && foldKey(path[:i+1]) == folded {
+			return i + 1
+		}
+	}
+	return len(path) + 1 // The path with a final "/", or nothing it matched: nothing follows
+}
 
 // replacementTokenProblem says why token can't stand for char among the character replacements in use, or "": a
 // token can't have a replaced character (its own included), contain another token or be inside one, and char

@@ -230,7 +230,7 @@ func TestR6_V08_AddSiteKeepsSubdomainsWithoutRoot(t *testing.T) {
 	previous := panelAccess.Load()
 	panelAccess.Store(list)
 	t.Cleanup(func() { panelAccess.Store(previous) })
-	if ok, msg := addSiteFromPanel("panel.b.test", ""); ok || !strings.Contains(msg, "panel host") {
+	if ok, msg := addSiteFromPanel("panel.b.test", ""); ok || !strings.Contains(msg, "where the panel answers") {
 		t.Fatalf("addSite of the panel's host: %v %q; expected it refused", ok, msg)
 	}
 	if siteExistsLocked("panel.b.test", "") || !kept("panel.b.test") {

@@ -244,3 +244,63 @@ func TestR6_P03_ExternalRewriteThroughAReplacement(t *testing.T) {
 		t.Error("the rewrite was saved without the password")
 	}
 }
+
+// V2.5 review S-1: the value of cfgS is read as the panel sends it, 0 or 1: any other way of writing 0 ("00", "-0",
+// "+0") is refused, with or without the current password, instead of taking a site's HTTPS off as 0 does, which needs
+// the password. turbo.config keeps any integer (older versions saved an index). cfgC deletes only with "0" as it is.
+func TestV25R_S1_OffOnlyWithZeroAsThePanelWritesIt(t *testing.T) {
+	dir := initForTest(t)
+	writeTestCertificate(t, dir+"localhost/", time.Hour, "localhost")
+	base := startServer(t)
+	tok := login(t, base)
+	site := url.Values{"s": {"localhost"}, "d": {""}}
+	with := func(values url.Values, more ...string) string {
+		all := url.Values{}
+		for name, value := range values {
+			all[name] = value
+		}
+		for i := 0; i+1 < len(more); i += 2 {
+			all.Set(more[i], more[i+1])
+		}
+		return all.Encode()
+	}
+	if code, body, _ := post(base, "/admin:inside:cfgS?"+with(site, "a", "1"), tok); code != 200 {
+		t.Fatalf("cfgS a=1: %d %q", code, body)
+	}
+	inUse := func() (bool, bool) {
+		globalMutex.RLock()
+		defer globalMutex.RUnlock()
+		_, certificate := siteCertificates["localhost"]
+		return certificate, siteSSLConfig["localhost"].https
+	}
+	for _, a := range []string{"00", "-0", "+0", "000", "2", "-1", "1 "} {
+		for _, password := range []string{"", "Admin"} {
+			query := with(site, "a", a)
+			if password != "" {
+				query = with(site, "a", a, "b", password)
+			}
+			code, body, _ := post(base, "/admin:inside:cfgS?"+query, tok)
+			certificate, https := inUse()
+			if code != 400 || !strings.Contains(body, "Invalid value") || !certificate || !https {
+				t.Errorf("cfgS a=%q (password %q): %d %q, certificate in use %v, HTTPS %v; expected 400 and nothing changed", a, password, code, body, certificate, https)
+			}
+			code, body, _ = post(base, "/admin:inside:cfgC?"+query, tok)
+			if certificate, https = inUse(); !certificate || !https {
+				t.Errorf("cfgC a=%q (password %q): %d %q, certificate in use %v, HTTPS %v; expected the certificate kept", a, password, code, body, certificate, https)
+			}
+		}
+	}
+	if _, err := os.Stat(dir + "localhost/" + certFileName); err != nil {
+		t.Errorf("the certificate's files: %v", err)
+	}
+	// 0 as the panel writes it still turns HTTPS off with the password, and 1 back on
+	if code, body, _ := post(base, "/admin:inside:cfgS?"+with(site, "a", "0", "b", "Admin"), tok); code != 200 {
+		t.Errorf("cfgS a=0 with the password: %d %q", code, body)
+	}
+	if certificate, https := inUse(); certificate || https {
+		t.Errorf("after cfgS a=0: certificate in use %v, HTTPS %v", certificate, https)
+	}
+	if code, body, _ := post(base, "/admin:inside:cfgS?"+with(site, "a", "1"), tok); code != 200 {
+		t.Errorf("cfgS a=1 again: %d %q", code, body)
+	}
+}

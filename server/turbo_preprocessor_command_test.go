@@ -20,7 +20,7 @@ func TestR6_O7_PreprocessorCommandWithoutTheWorkingDirectory(t *testing.T) {
 			t.Errorf("preprocessorCommand(%q) = %q, %q; expected %q", value, executable, problem, expected)
 		}
 	}
-	for _, value := range []string{"", "dx>/usr/bin/php", strings.Repeat("a", 129), invalidPreprocessorMark + "x"} {
+	for _, value := range []string{"", "xx>/usr/bin/php", strings.Repeat("a", 129), invalidPreprocessorMark + "x"} { // xx: a mode this binary doesn't have
 		if executable, problem := preprocessorCommand(value); executable != "" || problem == "" {
 			t.Errorf("preprocessorCommand(%q) = %q, %q; expected a problem", value, executable, problem)
 		}

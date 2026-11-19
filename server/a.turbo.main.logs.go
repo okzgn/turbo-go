@@ -26,9 +26,11 @@ package server
 // connections and of the CGIs, which are grouped by kind.
 
 import (
+	"bytes"
 	"log"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -51,13 +53,112 @@ var (
 // then at most once a minute, with the count and the last line.
 var errorLines = &aggregatedLog{}
 
+// scriptLines is where the standard error of the CGIs and of the workers of the mode dx goes, grouped as errorLines:
+// a PHP with log_errors on writes a line for each request that a client makes, and written one by one they filled the
+// log, and journald dropped Turbo's own messages past its rate limit.
+var scriptLines = &aggregatedLog{kindOf: scriptLineKind}
+
+// scriptLineKind is the kind of a line of a script's standard error: its first four words, the program among them
+// (scriptStderr), with their digits as "0". The lines of Turbo's own errors stop at a word with a digit (an address, a
+// port), which here is the name of a site or of a script as often as not ("[dx-lua] site2.example/x.lua: …"): with
+// every script of such a site in one kind, only the first error of any of them was written, and a minute later the
+// last. The numbers that change from a line to the next (of a line of code, of an id) still make one kind.
+func scriptLineKind(line string) string {
+	words := strings.Fields(line)
+	if len(words) > 4 {
+		words = words[:4]
+	}
+	return strings.Map(func(r rune) rune {
+		if r >= '0' && r <= '9' {
+			return '0'
+		}
+		return r
+	}, strings.Join(words, " "))
+}
+
+// maxScriptLine is the most of a line of a script's standard error that is logged.
+const maxScriptLine = 4 << 10
+
+// scriptStderr is the standard error of a program (a CGI, a worker): it cuts what it gets into lines, of at most
+// maxScriptLine bytes, and writes each to scriptLines after the name of the program in brackets, one word, so that the
+// kind of a line is the program and the first words of its message.
+type scriptStderr struct {
+	mutex    sync.Mutex
+	prefix   string
+	pending  []byte
+	dropping bool // The rest of a line longer than maxScriptLine
+}
+
+func newScriptStderr(program string) *scriptStderr {
+	name := strings.ReplaceAll(filepath.Base(filepath.FromSlash(program)), " ", "_")
+	return &scriptStderr{prefix: "[" + name + "] "}
+}
+
+func (w *scriptStderr) Write(p []byte) (int, error) {
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+	for rest := p; len(rest) > 0; {
+		end := bytes.IndexByte(rest, '\n')
+		piece := rest
+		if end != -1 {
+			piece = rest[:end]
+		}
+		if !w.dropping {
+			if room := maxScriptLine - len(w.pending); len(piece) > room {
+				w.pending = append(w.pending, piece[:room]...)
+				w.writeLocked(true)
+				w.dropping = true
+			} else {
+				w.pending = append(w.pending, piece...)
+			}
+		}
+		if end == -1 {
+			break
+		}
+		if !w.dropping {
+			w.writeLocked(false)
+		}
+		w.dropping = false
+		rest = rest[end+1:]
+	}
+	return len(p), nil
+}
+
+// writeLocked writes the line pending, cut or not. Callers hold w.mutex.
+func (w *scriptStderr) writeLocked(cut bool) {
+	line := strings.TrimRight(string(w.pending), "\r")
+	w.pending = w.pending[:0]
+	if strings.TrimSpace(line) == "" {
+		return
+	}
+	if cut {
+		line += " (cut)"
+	}
+	prefix := w.prefix
+	if strings.HasPrefix(line, prefix) { // The program names itself already ("[dx-lua] …")
+		prefix = ""
+	}
+	_, _ = scriptLines.Write([]byte(prefix + strings.ToValidUTF8(line, "\uFFFD")))
+}
+
+// flush writes what is left without its line break, once the program has ended.
+func (w *scriptStderr) flush() {
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+	if len(w.pending) > 0 && !w.dropping {
+		w.writeLocked(false)
+	}
+	w.pending, w.dropping = w.pending[:0], false
+}
+
 // aggregatedLog writes lines that anyone can make the server write, one per connection or per frame (a failed TLS
 // handshake, a bogus HTTP/2 preface, a GOAWAY with an error, a protocol error, a client gone from a CGI…), as
 // warnings: the first of each kind at once, and those that follow within aggregatedLogInterval counted, and written
 // when it ends with the count and the last one. One line each let anyone fill the log, and journald, past its rate
 // limit, dropped Turbo's other messages. The kinds are the first words of a line, up to one with a digit (an
-// address, a port); at most aggregatedLogKinds are kept apart, and the rest share one.
+// address, a port), or what kindOf says; at most aggregatedLogKinds are kept apart, and the rest share one.
 type aggregatedLog struct {
+	kindOf func(line string) string // The kind of a line, if not aggregatedLogKind's
 	mutex  sync.Mutex
 	kinds  map[string]*aggregatedKind
 	timer  *time.Timer // The next write of the lines counted, while there are any
@@ -129,7 +230,11 @@ func panicLogKind(line string) (string, bool) {
 
 func (l *aggregatedLog) Write(p []byte) (int, error) {
 	line := strings.TrimSpace(string(p))
-	kind := aggregatedLogKind(line)
+	kindOf := aggregatedLogKind
+	if l.kindOf != nil {
+		kindOf = l.kindOf
+	}
+	kind := kindOf(line)
 	now := time.Now()
 	l.mutex.Lock()
 	if l.closed {
@@ -330,8 +435,9 @@ func serverWriteLogs(logType string, request *customNetHttp.Request, timestamp i
 		return // Not open: nothing to build nor to wait for (a log opened right now gets the next line)
 	}
 	line := ""
-	if request == nil {
-		line = prefix + " " + "\n"
+	if request == nil { // A line of turbo.denials: who (the first word of prefix), when (Unix seconds) and what
+		who, what, _ := strings.Cut(prefix, " ")
+		line = who + " " + strconv.FormatInt(time.Now().Unix(), 10) + " " + what + "\n"
 	} else {
 		line = prefix + " " + request.RemoteAddr + " " + strconv.FormatInt(timestamp, 10) + " " + logField(request.Method) + " " + logField(request.Host) + " " + logField(request.RequestURI) + " " + "\n"
 	}

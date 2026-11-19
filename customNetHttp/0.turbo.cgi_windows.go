@@ -81,6 +81,12 @@ type turboCGIGroup struct {
 // cmd.Cancel (when the context expires) kills whole.
 func turboCGIPrepare(cmd *exec.Cmd) *turboCGIGroup {
 	group := &turboCGIGroup{}
+	// A process group of its own, as on Unix (Setpgid): the Ctrl+C of Turbo's console doesn't end it while Turbo
+	// stops in order, and lets the requests in progress finish.
+	if cmd.SysProcAttr == nil {
+		cmd.SysProcAttr = &syscall.SysProcAttr{}
+	}
+	cmd.SysProcAttr.CreationFlags |= syscall.CREATE_NEW_PROCESS_GROUP
 	cmd.Cancel = func() error {
 		group.kill()
 		return cmd.Process.Kill()
@@ -153,6 +159,10 @@ func (g *turboCGIGroup) kill() {
 func (g *turboCGIGroup) wait(cmd *exec.Cmd) {
 	cmd.Wait()
 }
+
+// exited follows the end of a process kept running (TurboProcess): nothing to do
+// on Windows, where the Job Object is a handle, which no other process can get.
+func (g *turboCGIGroup) exited() {}
 
 // release closes the Job Object without killing anyone: the processes left by
 // a CGI that ended normally go on.

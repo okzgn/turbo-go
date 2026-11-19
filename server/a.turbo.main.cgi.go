@@ -84,15 +84,14 @@ func queryParameterName(parameter string) string {
 	return name
 }
 
-func dynamic(basePath string, requestPath string, queryString string, scriptPath string, responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request) {
-	handler := new(customNetHttp.CgiHandler)
-	handler.Path = scriptPath
-	handler.Logger = cgiErrorLog                             // Counted as the connections' errors: one per request a client could make
-	handler.Timeout = serverTimeLimits.Load().WT             // Zero (no write timeout) leaves the CGI without limit
-	handler.Env = append(handler.Env, "REDIRECT_STATUS=CGI") // PHP refuses to run as a CGI without it while cgi.force_redirect is on (the default)
-	handler.InheritEnv = cgiTempVariables
+// dynamic runs the preprocessor of a site for a request, with its mode: the program executable runs the script
+// requestPath of the folder basePath. vary are the headers the response depends on besides the script's (those the
+// expressions of the site's headers read), added to its Vary. What every mode shares is done here (dynamicJob); the
+// mode only runs the script.
+func dynamic(mode preprocessorMode, basePath string, requestPath string, queryString string, executable string, vary []string, responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request) {
+	timeout := serverTimeLimits.Load().WT // Zero (no write timeout) leaves the script without limit
 	if request.ContentLength > maxBodySize.Load() {
-		reqMsg(responseWriter, 413)
+		siteErrorMsg(responseWriter, 413)
 		return
 	}
 	// The body is read whole, up to MBB, before the CGI takes a slot and starts: a client that sends it slowly, or
@@ -104,23 +103,27 @@ func dynamic(basePath string, requestPath string, queryString string, scriptPath
 		var tooLarge *customNetHttp.MaxBytesError
 		switch {
 		case errors.As(err, &tooLarge):
-			reqMsg(responseWriter, 413)
+			siteErrorMsg(responseWriter, 413)
 		case errors.Is(err, errCGIBodyFilesFull): // Too many bodies on disk at once: as without a free slot
 			responseWriter.Header().Set("Retry-After", "2")
-			reqMsg(responseWriter, 503)
+			siteErrorMsg(responseWriter, 503)
 		case errors.As(err, &cgiBodyFileError{}): // The server's temporary folder (full, or not there)
 			cgiErrorLog.Printf("Can't keep the body of a request for a CGI: %v", err)
-			reqMsg(responseWriter, 500)
+			siteErrorMsg(responseWriter, 500)
 		default: // The client's body (cut, or malformed)
-			reqMsg(responseWriter, 400)
+			siteErrorMsg(responseWriter, 400)
 		}
 		return
 	}
 	defer cleanup()
 	request.Body, request.ContentLength, request.TransferEncoding = body, size, nil
-	if !acquireCGISlot(cgiSlotWait) { // Too many CGIs running: the server stays responsive
-		responseWriter.Header().Set("Retry-After", "2")
-		reqMsg(responseWriter, 503)
+	slotKeys, gotSlot := acquireCGISlot(request.Context(), ipAddr(request.RemoteAddr), cgiSlotWait)
+	if !gotSlot {
+		if request.Context().Err() != nil { // The client went away while it waited: no one to answer
+			panic(customNetHttp.ErrAbortHandler)
+		}
+		responseWriter.Header().Set("Retry-After", "2") // Too many CGIs running: the server stays responsive
+		siteErrorMsg(responseWriter, 503)
 		return
 	}
 	// The CGI's output waits in output for the client (newCGIOutput), so that the CGI, done, frees its slot at once,
@@ -131,14 +134,15 @@ func dynamic(basePath string, requestPath string, queryString string, scriptPath
 	// watches it, so that a CGI ended while it waited in Write for its client frees its slot then.
 	var cgiContext context.Context
 	var cancelCGI context.CancelFunc
-	if handler.Timeout > 0 {
-		cgiContext, cancelCGI = context.WithTimeout(request.Context(), handler.Timeout)
+	if timeout > 0 {
+		cgiContext, cancelCGI = context.WithTimeout(request.Context(), timeout)
 	} else {
 		cgiContext, cancelCGI = context.WithCancel(request.Context())
 	}
 	defer cancelCGI()
 	request = request.WithContext(cgiContext)
-	output := newCGIOutput(cgiResponseWriter{responseWriter}, ipAddr(request.RemoteAddr), cancelCGI)
+	_, throughHost := mode.(cgiMode)
+	output := newCGIOutput(cgiResponseWriter{ResponseWriter: responseWriter, vary: vary, hostPages: throughHost}, ipAddr(request.RemoteAddr), cancelCGI)
 	output.watch(cgiContext)
 	slotHeld, completed := true, false
 	defer func() {
@@ -146,7 +150,7 @@ func dynamic(basePath string, requestPath string, queryString string, scriptPath
 		// (and, when the context ended, killed its group: P12), and the sender may wait for a client that doesn't read
 		// until WT + 2 s.
 		if slotHeld {
-			releaseCGISlot()
+			releaseCGISlot(slotKeys)
 		}
 		if completed {
 			output.finish() // What is left reaches the client, the slot already free
@@ -154,7 +158,7 @@ func dynamic(basePath string, requestPath string, queryString string, scriptPath
 			output.abort() // Cut (the client went away, or WT ran out): nothing more is written
 		}
 	}()
-	withoutSessionCookie(request)
+	withoutPanelCredentials(request)
 	// A header with "_" in its name becomes the same variable as the one with "-" (X_Forwarded_For and
 	// X-Forwarded-For are both HTTP_X_FORWARDED_FOR), and the client's could win over what a proxy in front set: as
 	// Apache does, they don't reach the CGI.
@@ -171,21 +175,15 @@ func dynamic(basePath string, requestPath string, queryString string, scriptPath
 	} else if clientQuery != "" {
 		queryString = clientQuery
 	}
-	handler.Env = append(handler.Env, "QUERY_STRING="+queryString) // If not set, not includes rewrite query string
-	handler.Env = append(handler.Env, "DOCUMENT_ROOT="+basePath)
-	handler.Env = append(handler.Env, "SCRIPT_FILENAME="+basePath+requestPath)
-	// The script's URL path, after the rewrite, and no extra path: what the handler derives from Root is a path on
-	// disk, which an application would show (PHP_SELF) or put in its links. REQUEST_URI stays the original one.
-	handler.Env = append(handler.Env, "SCRIPT_NAME="+requestPath, "PATH_INFO=")
-	if handler.Timeout > 0 {
+	if timeout > 0 {
 		// The connection's write deadline (WT from the end of the request) would pass right when the CGI is cut:
 		// moved 2 s after the CGI's own, which starts now (not before the body was read nor a slot was free), the 504
 		// of a CGI that runs out of time reaches the client.
-		_ = customNetHttp.NewResponseController(responseWriter).SetWriteDeadline(time.Now().Add(handler.Timeout + 2*time.Second)) // Not supported only by test writers
+		_ = customNetHttp.NewResponseController(responseWriter).SetWriteDeadline(time.Now().Add(timeout + 2*time.Second)) // Not supported only by test writers
 	}
-	handler.ServeHTTP(output, request)
+	mode.serve(&dynamicJob{request: request, output: output, executable: executable, basePath: basePath, requestPath: requestPath, queryString: queryString, timeout: timeout})
 	completed = true
-	releaseCGISlot() // The CGI has ended: its slot is free while its output reaches the client
+	releaseCGISlot(slotKeys) // The CGI has ended: its slot is free while its output reaches the client
 	slotHeld = false
 }
 
@@ -839,6 +837,53 @@ func (output *cgiOutput) abort() {
 	output.end()
 }
 
+// cgiMode runs the script of a request as a CGI: a process of the program for each request, which gets the
+// request in its environment and its body by its input, and answers by its output (the host of the fork, which
+// ends its process group with it: P12).
+type cgiMode struct{}
+
+func init() { registerPreprocessorMode("cgi", cgiMode{}) }
+
+func (cgiMode) serve(job *dynamicJob) {
+	handler := new(customNetHttp.CgiHandler)
+	handler.Path = job.executable
+	handler.Logger = cgiErrorLog // Counted as the connections' errors: one per request a client could make
+	// Its standard error, grouped (scriptLines), through a pipe made here, as a worker's (startDXWorker), and read by a
+	// goroutine of its own until the CGI, and what it left running, have closed it. Given a writer that isn't a file,
+	// exec makes the pipe and, once the CGI ends, waits for it to close (a second: WaitDelay) and closes it: a CGI that
+	// left a process with its standard error held its answer and its slot that second, and that process then wrote to a
+	// closed pipe, which ends most programs.
+	if stderrRead, stderrWrite, err := os.Pipe(); err == nil {
+		handler.Stderr = stderrWrite
+		defer stderrWrite.Close() // #nosec G307 -- Turbo's end of the pipe, once the CGI has its own: nothing was written through it
+		go func() {
+			stderr := newScriptStderr(job.executable)
+			_, _ = io.Copy(stderr, stderrRead) // Until its writers end
+			stderr.flush()
+			_ = stderrRead.Close()
+		}()
+	} else { // No descriptors left: exec's own pipe, if it can make one
+		stderr := newScriptStderr(job.executable)
+		defer stderr.flush()
+		handler.Stderr = stderr
+	}
+	handler.Timeout = job.timeout                            // Zero (no write timeout) leaves the CGI without limit
+	handler.Env = append(handler.Env, "REDIRECT_STATUS=CGI") // PHP refuses to run as a CGI without it while cgi.force_redirect is on (the default)
+	handler.InheritEnv = cgiTempVariables
+	handler.Env = append(handler.Env, "QUERY_STRING="+job.queryString) // If not set, not includes rewrite query string
+	handler.Env = append(handler.Env, "DOCUMENT_ROOT="+job.basePath)
+	handler.Env = append(handler.Env, "SCRIPT_FILENAME="+job.basePath+job.requestPath)
+	// The script's URL path, after the rewrite, and no extra path: what the handler derives from Root is a path on
+	// disk, which an application would show (PHP_SELF) or put in its links. REQUEST_URI stays the original one.
+	handler.Env = append(handler.Env, "SCRIPT_NAME="+job.requestPath, "PATH_INFO=")
+	handler.ServeHTTP(job.output, job.request)
+}
+
+// A CGI keeps nothing running between requests.
+func (cgiMode) idle(func(string) bool) {}
+
+func (cgiMode) stop(time.Duration) {}
+
 // cgiTempVariables are the variables of the temporary folder that a CGI inherits from Turbo, when they are set:
 // PHP keeps uploads and sessions there (without them, on Windows, it fell back to the Windows folder).
 var cgiTempVariables = []string{"TMPDIR", "TEMP", "TMP"}
@@ -846,18 +891,28 @@ var cgiTempVariables = []string{"TMPDIR", "TEMP", "TMP"}
 // cgiResponseWriter is what a CGI's answer is written to. How the response is framed is the server's: the
 // hop-by-hop headers a CGI may write (Transfer-Encoding, Connection and the like) are dropped, and so is a
 // Content-Length given more than once, which would leave the client, or a proxy, unable to tell where the
-// response ends, and a header value with control characters, which would make it unreadable.
+// response ends, and a header value with control characters, which would make it unreadable. The headers of vary
+// are added to the CGI's Vary: set before the CGI, they would take its place, as the site's headers do. hostPages says
+// that the answer comes through the CGI host, whose own error pages (its 500 and its 504) are Turbo's.
 type cgiResponseWriter struct {
 	customNetHttp.ResponseWriter
+	vary      []string
+	hostPages bool
 }
 
 // cgiHopByHopHeaders are the headers about the connection, not the content, that a CGI can't set.
-var cgiHopByHopHeaders = []string{"Connection", "Keep-Alive", "Proxy-Connection", "Te", "Transfer-Encoding", "Upgrade"}
+var cgiHopByHopHeaders = []string{"Connection", "Keep-Alive", "Proxy-Connection", "Te", "Trailer", "Transfer-Encoding", "Upgrade"}
 
 func (w cgiResponseWriter) WriteHeader(code int) {
 	header := w.Header()
 	for _, name := range cgiHopByHopHeaders {
 		header.Del(name)
+	}
+	// An error page that the CGI host writes (its 500, its 504) is Turbo's (siteErrorMsg), known by the policy that only
+	// Turbo's template sets. The template that answers the error status of a worker of another mode isn't one: the
+	// status is the script's, and so are its headers about keeping the answer.
+	if w.hostPages && header.Get("Content-Security-Policy") == customNetHttp.TurboErrorCSP {
+		withoutBodyHeaders(header)
 	}
 	if lengths := header.Values("Content-Length"); len(lengths) > 1 || len(lengths) == 1 && !onlyDigits(lengths[0]) {
 		header.Del("Content-Length") // Go takes "+4" or "-0" as a number, but would send it as written
@@ -875,6 +930,7 @@ func (w cgiResponseWriter) WriteHeader(code int) {
 			header[name] = kept
 		}
 	}
+	addVary(header, w.vary)
 	w.ResponseWriter.WriteHeader(code)
 }
 
@@ -1028,16 +1084,89 @@ func (w *cgiBodyWriter) Write(p []byte) (int, error) {
 // cgiSlotWait is how long a CGI request waits for a free slot before getting 503.
 const cgiSlotWait = 2 * time.Second
 
-// cgiSlots counts the CGI processes running, and the outputs of CGIs not delivered yet; freed is closed (and
-// replaced) each time one of them ends.
+// cgiSlots counts the CGI processes running, by client too, and the outputs of CGIs not delivered yet; waiting are the
+// requests that wait for a slot, in their order of arrival, each handed one as another ends (dispatchCGISlotsLocked);
+// freed is closed (and replaced) each time a CGI or an output ends, for the shutdown (waitCGIsEnded).
 var cgiSlots struct {
 	mutex   sync.Mutex
 	running int64
 	outputs int64 // From newCGIOutput to its end: the shutdown waits for them too, with their temporary files
 	freed   chan struct{}
+	waiting []*cgiSlotWaiter
+	held    map[string]int64 // The slots in use by each client (limiterKey) and, in IPv6, by each /48
 }
 
-// cgiSlotsFreedLocked wakes those that wait for a slot, or for the CGIs and their outputs to end. Callers hold
+// cgiSlotWaiter is a request that waits for a CGI slot.
+type cgiSlotWaiter struct {
+	keys    []string      // Its client and, in IPv6, its /48 (cgiSlotKeys)
+	granted chan struct{} // Closed once a slot is handed to it
+}
+
+// cgiSlotKeys are what the slots of a request count in: its client (limiterKey of ip) and, in IPv6, its /48, whose
+// /64s are each a client.
+func cgiSlotKeys(ip string) []string {
+	keys := []string{limiterKey(ip)}
+	if network := cgiOutputNetworkKey(ip); network != "" {
+		keys = append(keys, network)
+	}
+	return keys
+}
+
+// cgiSlotShares are the slots that a client, and a /48 in IPv6, may hold while others wait: a quarter and a half of
+// the limit, at least one. Beyond, a request of theirs waits behind those of others; while no one else waits, it gets a
+// free slot as any other, so that no slot stays unused (decision D1 of the review of v2.5).
+func cgiSlotShares(limit int64) (client int64, network int64) {
+	return max(1, limit/4), max(1, limit/2)
+}
+
+// withinCGISlotShareLocked reports whether the client and the /48 of keys hold less than their share of the slots.
+// Callers hold cgiSlots.mutex.
+func withinCGISlotShareLocked(keys []string, limit int64) bool {
+	clientShare, networkShare := cgiSlotShares(limit)
+	for i, key := range keys {
+		share := clientShare
+		if i > 0 {
+			share = networkShare
+		}
+		if cgiSlots.held[key] >= share {
+			return false
+		}
+	}
+	return true
+}
+
+// takeCGISlotLocked counts a slot in use by the client of keys. Callers hold cgiSlots.mutex.
+func takeCGISlotLocked(keys []string) {
+	cgiSlots.running++
+	if cgiSlots.held == nil {
+		cgiSlots.held = make(map[string]int64)
+	}
+	for _, key := range keys {
+		cgiSlots.held[key]++
+	}
+}
+
+// dispatchCGISlotsLocked hands the free slots to the requests that wait: first the oldest whose client (and /48)
+// holds less than its share, or else the oldest. One that comes when a slot is free and no one waits takes it at once
+// (acquireCGISlot). Callers hold cgiSlots.mutex.
+func dispatchCGISlotsLocked() {
+	limit := cgiProcessLimit()
+	for cgiSlots.running < limit && len(cgiSlots.waiting) > 0 {
+		chosen := 0
+		for i, waiter := range cgiSlots.waiting {
+			if withinCGISlotShareLocked(waiter.keys, limit) {
+				chosen = i
+				break
+			}
+		}
+		waiter := cgiSlots.waiting[chosen]
+		cgiSlots.waiting = append(cgiSlots.waiting[:chosen], cgiSlots.waiting[chosen+1:]...)
+		takeCGISlotLocked(waiter.keys)
+		close(waiter.granted)
+	}
+}
+
+// cgiSlotsFreedLocked wakes the shutdown, which waits for the CGIs and their outputs to end. Callers hold
 // cgiSlots.mutex.
 func cgiSlotsFreedLocked() {
 	if cgiSlots.freed != nil {
@@ -1054,46 +1183,77 @@ func cgiProcessLimit() int64 {
 	return max(16, 4*int64(runtime.NumCPU()))
 }
 
-// acquireCGISlot takes a CGI slot, waiting up to wait for one; it reports whether it got it.
-func acquireCGISlot(wait time.Duration) bool {
-	deadline := time.Now().Add(wait)
-	for {
-		cgiSlots.mutex.Lock()
-		if cgiSlots.running < cgiProcessLimit() {
-			cgiSlots.running++
-			cgiSlots.mutex.Unlock()
-			return true
-		}
-		if cgiSlots.freed == nil {
-			cgiSlots.freed = make(chan struct{})
-		}
-		freed := cgiSlots.freed
-		cgiSlots.mutex.Unlock()
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return false
-		}
-		timer := time.NewTimer(remaining)
-		select {
-		case <-freed:
-			timer.Stop()
-		case <-timer.C:
-			return false
-		}
-	}
-}
-
-// releaseCGISlot gives back the slot of a CGI that ended.
-func releaseCGISlot() {
+// cgiSlotsLimitChanged hands the slots that a higher limit (CGP, from the panel or turbo.config) frees to the requests
+// that wait: they got them only when another request came or a CGI ended, and with neither, 503 with slots free.
+func cgiSlotsLimitChanged() {
 	cgiSlots.mutex.Lock()
 	defer cgiSlots.mutex.Unlock()
+	dispatchCGISlotsLocked()
+}
+
+// acquireCGISlot takes a CGI slot for a request of the client at ip, waiting up to wait for one, in order (see
+// dispatchCGISlotsLocked), or until ctx ends: the client that went away while it waited takes no slot. It returns what
+// the slot counts in, for releaseCGISlot, and whether it got one.
+func acquireCGISlot(ctx context.Context, ip string, wait time.Duration) ([]string, bool) {
+	keys := cgiSlotKeys(ip)
+	cgiSlots.mutex.Lock()
+	if cgiSlots.running < cgiProcessLimit() && len(cgiSlots.waiting) == 0 {
+		takeCGISlotLocked(keys)
+		cgiSlots.mutex.Unlock()
+		return keys, true
+	}
+	waiter := &cgiSlotWaiter{keys: keys, granted: make(chan struct{})}
+	cgiSlots.waiting = append(cgiSlots.waiting, waiter)
+	dispatchCGISlotsLocked() // A slot that a lower limit kept, free again
+	cgiSlots.mutex.Unlock()
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-waiter.granted:
+		return keys, true
+	case <-timer.C:
+	case <-ctx.Done():
+	}
+	cgiSlots.mutex.Lock()
+	defer cgiSlots.mutex.Unlock()
+	for i, other := range cgiSlots.waiting {
+		if other == waiter {
+			cgiSlots.waiting = append(cgiSlots.waiting[:i], cgiSlots.waiting[i+1:]...)
+			return keys, false
+		}
+	}
+	// Handed a slot right then: kept, unless the client went away
+	if ctx.Err() != nil {
+		releaseCGISlotLocked(keys)
+		return keys, false
+	}
+	return keys, true
+}
+
+// releaseCGISlot gives back the slot of a CGI that ended, which counted in keys (acquireCGISlot).
+func releaseCGISlot(keys []string) {
+	cgiSlots.mutex.Lock()
+	defer cgiSlots.mutex.Unlock()
+	releaseCGISlotLocked(keys)
+}
+
+// releaseCGISlotLocked is releaseCGISlot. Callers hold cgiSlots.mutex.
+func releaseCGISlotLocked(keys []string) {
 	cgiSlots.running--
+	for _, key := range keys {
+		if cgiSlots.held[key]--; cgiSlots.held[key] <= 0 {
+			delete(cgiSlots.held, key)
+		}
+	}
+	dispatchCGISlotsLocked()
 	cgiSlotsFreedLocked()
 }
 
-// withoutSessionCookie removes the panel session cookie from the request, so a CGI never receives it. Only that
-// pair is cut from the raw header: the other cookies reach the CGI exactly as the browser sent them.
-func withoutSessionCookie(request *customNetHttp.Request) {
+// withoutPanelCredentials removes from the request what carries a session of the panel, so that a CGI or a worker
+// never receives it: the "ok" header, which API clients send with the token, and the session cookie. Only that pair
+// is cut from the raw header: the other cookies reach the CGI exactly as the browser sent them.
+func withoutPanelCredentials(request *customNetHttp.Request) {
+	request.Header.Del(sessionHeaderName)
 	var kept []string
 	removed := false
 	for _, value := range request.Header["Cookie"] {

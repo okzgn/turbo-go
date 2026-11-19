@@ -92,8 +92,17 @@ var siteSSLSettingCheckers = map[string]func(bool, ...string) (bool, string){
 			return false, msgMissingData + " for A"
 		}
 
-		adapter, err := url.QueryUnescape(args[0])
-		if err != nil || (adapter != "" && !validCertbotAdapter.MatchString(adapter)) { // Empty means webroot
+		// From turbo.config, which keeps it URL-encoded (createSiteSettingsList); the API takes it as sent, as every
+		// cfg<KEY>.
+		adapter := args[0]
+		if fromFile {
+			decoded, err := url.QueryUnescape(adapter)
+			if err != nil {
+				return false, "Invalid adapter: dns-<provider> is accepted"
+			}
+			adapter = decoded
+		}
+		if adapter != "" && !validCertbotAdapter.MatchString(adapter) { // Empty means webroot
 			return false, "Invalid adapter: dns-<provider> is accepted"
 		}
 		args[0] = adapter
@@ -185,6 +194,10 @@ var siteSSLSettingCheckers = map[string]func(bool, ...string) (bool, string){
 		// until another certificate is installed. Asked for without files, it takes out of use the one that an
 		// earlier deletion left there.
 		_, inUse := siteCertificates[siteKey]
+		// While Certbot issues or renews it (or waits to), its files would come back, or be put in use without files
+		if !fromFile && args[0] == "0" && (currentCertDomain == siteKey || certPending[siteKey]) {
+			return false, certificateBeingIssued
+		}
 		if !fromFile && args[0] == "0" && (anyFile || (stopUsing && inUse)) {
 			// The files are removed once the global lock is released (removeFiles); if one can't be, what changes
 			// here goes back, as when it was removed first.
@@ -267,7 +280,11 @@ var siteSSLSettingCheckers = map[string]func(bool, ...string) (bool, string){
 		if argCount < 3 || argCount > 5 {
 			return false, msgMissingData + " for S"
 		}
-
+		// From the panel, 0 or 1 exactly: the action needs the current password when a is "0", and reads it as it is
+		// sent. turbo.config keeps any integer: older versions saved there the index of a certificate.
+		if !fromFile && args[0] != "0" && args[0] != "1" {
+			return false, "Invalid value: 0 or 1"
+		}
 		value, err := strconv.Atoi(args[0])
 		if err != nil {
 			return false, "Invalid value"

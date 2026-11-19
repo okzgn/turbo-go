@@ -65,6 +65,15 @@
 # pip, its DNS plugins too (python3-certbot-dns-*). If another Certbot
 # configuration writes to /etc/letsencrypt, add it to ReadWritePaths.
 #
+# The mode dx (dx> in the preprocessors): install its worker, dx-lua for one,
+# owned by root, 0755 and outside /home, for example
+#   sudo install -d -o root -g root -m 0755 /opt/turbo-dx
+#   sudo install -o root -g root -m 0755 dx-lua /opt/turbo-dx/dx-lua
+# and name /opt/turbo-dx/dx-lua in the preprocessor. Under /home/<user> the
+# service doesn't see it (ProtectHome), and inside /home/server the turbo user
+# could change the program that every site's requests run. A worker gets no
+# capability, as a CGI, and systemctl stop ends it with Turbo.
+#
 # PHP-CGI: /tmp is private to the service (PrivateTmp), so file uploads work.
 # Keep the sessions inside /home/server (session.save_path in php.ini), or add
 # their folder to ReadWritePaths.

@@ -15,7 +15,9 @@ permissions:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  # A run of main always ends, so that each commit published has its result; elsewhere a push cancels the run of the
+  # one before.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   analysis:
@@ -70,11 +72,13 @@ jobs:
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
           govulncheck ./...
-      - name: gosec (the program and the package server)
+      - name: gosec (the program, the package server and the expressions)
+        # Not customNetHttp: gosec can't load it (it merges packages of Go whose import comments differ), and its own
+        # files (0.turbo.*.go) are checked by go vet and staticcheck above, as the rest of the fork.
         run: |
           go install github.com/securego/gosec/v2/cmd/gosec@v2.30.0
-          gosec . ./server
-          GOOS=windows gosec . ./server # With the files of Windows
+          gosec . ./server ./internal/expr
+          GOOS=windows gosec . ./server ./internal/expr # With the files of Windows
 
   tests:
     name: Tests (Linux)
@@ -171,6 +175,88 @@ jobs:
       - name: go test
         run: go test -count=1 -timeout 30m ./...
 
+  dx:
+    # The workers of the mode dx (dx/, in Rust): format and clippy, their tests, and Turbo's tests with the dx-lua just
+    # built (server/turbo_dx_lua_test.go, which the other jobs skip: they have no dx-lua). Rust comes from the rustup
+    # of the runners, without an action of a third party, and cargo caches nothing, as setup-go doesn't.
+    name: dx (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    # As the job tests-macos: the Unix code of macOS isn't required yet
+    continue-on-error: ${{ matrix.os == 'macos-latest' }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: The Rust of dx/rust-toolchain.toml
+        # Fixed, so that a new lint of the Rust of the runners doesn't turn the CI red without a change of the code;
+        # it is moved by hand, with dx/rust-toolchain.toml.
+        working-directory: dx
+        run: |
+          channel="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$channel" --profile minimal --component rustfmt,clippy
+          rustc --version
+      - name: Format and clippy
+        if: runner.os == 'Linux'
+        working-directory: dx
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --locked --all-targets -- -D warnings
+      # On Windows, LuaJIT's build runs a program of its own (minilua) by its name from the folder it is in, which
+      # NoDefaultCurrentDirectoryInExePath forbids: taken out for cargo, where the image sets it.
+      - name: cargo test
+        working-directory: dx
+        run: env -u NoDefaultCurrentDirectoryInExePath cargo test --locked
+      - name: cargo build --release
+        working-directory: dx
+        run: env -u NoDefaultCurrentDirectoryInExePath cargo build --locked --release
+      - id: go
+        shell: bash
+        run: echo "version=$(sed -n '1s/^go//p' customNetHttp/UPSTREAM)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ steps.go.outputs.version }}
+          cache: false
+      - name: Turbo's tests with dx-lua
+        shell: bash
+        # The path of the program as Go reads it on each system (on Windows, pwd -W gives D:/a/...), and a test that
+        # is skipped fails the step: it would mean that dx-lua wasn't found.
+        # Every test that go test lists has passed: a step that ran none (a name changed) was green.
+        run: |
+          program="$(cd dx/target/release && (pwd -W 2>/dev/null || pwd))/dx-lua"
+          [ -f "$program.exe" ] && program="$program.exe"
+          "$program" --version
+          status=0 # The shell ends at a command that fails (-e, and pipefail): its messages below are still written
+          TURBO_DX_LUA="$program" go test -count=1 -run 'TestDXLua' -v ./server 2>&1 | tee dx.log || status=$?
+          if grep -q -- '--- SKIP' dx.log; then echo "A test was skipped: dx-lua wasn't found"; exit 1; fi
+          expected="$(go test -list '^TestDXLua' ./server | grep -c '^TestDXLua' || true)"
+          passed="$(grep -c '^--- PASS: TestDXLua' dx.log || true)"
+          if [ "$expected" = 0 ] || [ "$passed" != "$expected" ]; then
+            echo "$passed of the $expected tests TestDXLua passed"; exit 1
+          fi
+          exit "$status"
+
+  dx-msrv:
+    name: dx with Rust 1.88
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: cargo +1.88 build
+        working-directory: dx
+        run: |
+          rustup toolchain install 1.88 --profile minimal
+          cargo +1.88 build --locked
+
   real-ports:
     name: Real ports 80 and 443 (Linux)
     runs-on: ubuntu-latest
@@ -206,11 +292,14 @@ jobs:
       - name: Build
         env:
           CGO_ENABLED: "0"
-        run: go build -trimpath -o "$RUNNER_TEMP/turbo" .
+        run: |
+          go build -trimpath -o "$RUNNER_TEMP/turbo" .
+          go build -trimpath -o "$RUNNER_TEMP/dxecho" ./internal/testtools/dxecho
       - name: deploy/systemd-test.sh
         # Hosted runners have systemd as PID 1, sudo without a password and the ports 80 and 443 free: the script
-        # installs the unit as its comments say, checks it and removes it all.
-        run: sudo bash deploy/systemd-test.sh "$RUNNER_TEMP/turbo"
+        # installs the unit as its comments say, checks it and removes it all. With DXECHO, a worker of the mode dx
+        # too.
+        run: sudo DXECHO="$RUNNER_TEMP/dxecho" bash deploy/systemd-test.sh "$RUNNER_TEMP/turbo"
       - name: Journal of the unit
         if: failure()
         run: sudo journalctl -u turbo --no-pager -n 200 || true
@@ -234,18 +323,21 @@ jobs:
           go-version: ${{ steps.go.outputs.version }}
           cache: false
       - name: The Fuzz targets of this shard
-        # Every Fuzz function of the package server, split by name across the three shards.
+        # Every Fuzz function of the packages server and internal/expr, split by package and name across the three
+        # shards.
         run: |
-          for target in $(grep -ho '^func Fuzz[A-Za-z0-9_]*' server/*_test.go | cut -c6- | sort | awk -v n=3 -v i=${{ matrix.shard }} 'NR % n == i'); do
-            echo "== $target"
-            go test -run '^$' -fuzz "^$target\$" -fuzztime 15s -timeout 10m ./server
+          for entry in $(for dir in server internal/expr; do grep -ho '^func Fuzz[A-Za-z0-9_]*' $dir/*_test.go | cut -c6- | sed "s|^|$dir:|"; done | sort | awk -v n=3 -v i=${{ matrix.shard }} 'NR % n == i'); do
+            echo "== $entry"
+            go test -run '^$' -fuzz "^${entry#*:}\$" -fuzztime 15s -timeout 10m "./${entry%%:*}"
           done
       - name: Failing inputs
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: fuzz-testdata-${{ matrix.shard }}
-          path: server/testdata/fuzz
+          path: |
+            server/testdata/fuzz
+            internal/expr/testdata/fuzz
 
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}

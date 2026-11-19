@@ -49,6 +49,7 @@ func benchSites(b *testing.B) string {
 	for i := 0; i < 50; i++ {
 		rewrites["/section"+strconv.Itoa(i)+"/"] = "/pages/" + strconv.Itoa(i) + "/{REWRITE_COMPLEMENT}"
 	}
+	rewrites["/computed/"] = "=EXT == 'css' ? '/css/site.css' : '/index.html'" // An expression, for its case
 	set("$", mimes, "bench.test", "")
 	set("=", rewrites, "bench.test", "")
 	set(".", map[string]interface{}{"X-Frame-Options": "DENY", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer", "Cache-Control": "max-age=600"}, "bench.test", "")
@@ -80,6 +81,7 @@ func benchRequest(host, uri, remote string) *customNetHttp.Request {
 var benchResolveCases = []struct{ name, host, uri string }{
 	{"default", "localhost", "/"}, {"realistic", "bench.test", "/css/site.css"}, {"wildcard", "a.wild.bench", "/"},
 	{"alias", "alias.bench", "/css/site.css"}, {"miss", "unknown.bench", "/"},
+	{"expression", "bench.test", "/computed/a.css"},
 }
 
 // BenchmarkResolveRequest measures what the handler does with the global read lock held: finding the site of the

@@ -334,6 +334,26 @@ func panelSession(request *customNetHttp.Request, clientIP string) (key string, 
 	return "", false, hasCookie
 }
 
+// loginRequired answers a panel request without an open session: the same body as always, for the pages that look for
+// it; the GUI looks for the header.
+func loginRequired(responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request) {
+	responseWriter.Header().Set("X-Turbo-Login", "required")
+	consoleHTMLRedir("/"+adminPathPrefix+":", responseWriter, request)
+}
+
+// sessionStillOpen reports whether the session key is still open. A panel action checks it again once its body has
+// arrived: a session closed meanwhile (Close every session, new credentials, an expiry) applies nothing, however
+// slowly the body came.
+func sessionStillOpen(key string) bool {
+	now := time.Now().Unix()
+	open := false
+	withReadLock(func() {
+		expiry, found := signedInTokens[key]
+		open = found && expiry > now
+	})
+	return open
+}
+
 // renewSession extends a session by sessionLifetime from now, if it is still open: a request that found it
 // valid doesn't bring back a session closed meanwhile. Only requests of the panel's own origin renew it (or
 // those without Sec-Fetch-Site, from API clients): a resource of the panel loaded by another page doesn't.
@@ -481,9 +501,7 @@ func consoleActions(actionPath string, responseWriter customNetHttp.ResponseWrit
 			consoleFiles(adminInsideName, request.RequestURI, responseWriter, request)
 			return true
 		}
-		// The same body as always, for the pages that look for it; the GUI looks for the header.
-		responseWriter.Header().Set("X-Turbo-Login", "required")
-		consoleHTMLRedir("/"+adminPathPrefix+":", responseWriter, request)
+		loginRequired(responseWriter, request)
 		return true
 	case "":
 		// Login: only POST /admin:, with the credentials in a small body (never in the URL, which turbo.visits
@@ -542,8 +560,15 @@ func consoleActions(actionPath string, responseWriter customNetHttp.ResponseWrit
 				forgetLoginFailures(clientIP)
 				var token string
 				withGlobalLock(func() { token = openSessionLocked(clientIP) })
-				// The browser panel uses the cookie; API clients send the token in the "ok" header.
+				// The browser panel uses the cookie; API clients send the token in the "ok" header, and get it in the
+				// body. A browser's page gets "ok" alone, as renewCredentialsSessionLocked gives it: its scripts can read
+				// the body, never the cookie (HttpOnly). It is known by Sec-Fetch-Site or, where the browser doesn't send
+				// it (a page that isn't a secure context: the panel by HTTP on another host than localhost), by Origin,
+				// which the POST of a page carries; crossOriginRequest already refused the ones of another origin.
 				responseWriter.Header().Add("Set-Cookie", sessionCookie(token, false, request))
+				if request.Header.Get("Sec-Fetch-Site") != "" || request.Header.Get("Origin") != "" {
+					token = ""
+				}
 				respond(responseWriter, sessionHeaderName+token)
 			} else {
 				finishLoginAttempt(attempt, true)
@@ -861,15 +886,39 @@ func panelHostConflict(list *panelAccessList) string {
 	return ""
 }
 
-// panelHostServedBy returns the host of PA that siteKey serves, or "" if it serves none. Callers hold the global
-// lock.
+// panelHostServedBy returns the host where the panel answers that siteKey serves, or "" if it serves none: a host of
+// PA or, with PA of networks only, where the panel answers on the IP addresses and on localhost (panelAccessProblem),
+// "localhost" or "the IP addresses" (the site *). Callers hold the global lock.
 func panelHostServedBy(siteKey string) string {
-	for hostName := range panelAccess.Load().hosts {
+	list := panelAccess.Load()
+	for hostName := range list.hosts {
 		if servingSite(hostName) == siteKey {
 			return hostName
 		}
 	}
+	if len(list.hosts) == 0 && len(list.networks) > 0 {
+		if servingSite("localhost") == siteKey {
+			return "localhost"
+		}
+		if servingSite("127.0.0.1") == siteKey { // Only the site * serves an IP address (host)
+			return "the IP addresses"
+		}
+	}
 	return ""
+}
+
+// panelAnswersOn reports whether the panel answers on the host name (in lower case): one of PA, or, with PA of networks
+// only, localhost or an IP address.
+func panelAnswersOn(hostName string) bool {
+	list := panelAccess.Load()
+	if list.hosts[hostName] {
+		return true
+	}
+	if len(list.hosts) > 0 || len(list.networks) == 0 {
+		return false
+	}
+	_, notAddress := netip.ParseAddr(strings.TrimSuffix(strings.TrimPrefix(hostName, "["), "]"))
+	return hostName == "localhost" || notAddress == nil
 }
 
 // warnPanelOrigin logs when the panel shares an origin with the sites: PA has no host, or one of its hosts
@@ -878,6 +927,11 @@ func warnPanelOrigin() {
 	list := panelAccess.Load()
 	if len(list.hosts) == 0 && len(list.networks) > 0 {
 		slog.Warn("PA only has networks: the panel answers on IP addresses and localhost, not on host names. Set a host dedicated to the panel in PA to reach it by name.")
+		for _, served := range [][2]string{{"localhost", "localhost"}, {"127.0.0.1", "the IP addresses"}} {
+			if site := servingSite(served[0]); site != "" {
+				slog.Warn("The site " + site + " serves " + served[1] + ", where the panel answers (PA only has networks): its pages share the panel's origin and could use its session. Set a host dedicated to the panel in PA, or serve that site on other hosts")
+			}
+		}
 	} else if len(list.hosts) == 0 {
 		slog.Warn("The panel answers on the same hosts as the sites: a page served by Turbo could use its session. Set a host dedicated to the panel in PA.")
 	} else if conflict := panelHostConflict(list); conflict != "" {
@@ -1243,10 +1297,14 @@ var literalActions = map[string]bool{
 var actionPasswordParams = map[string]string{"addMIME": "c", "addHeader": "c", "delMIME": "b", "delHeader": "b", "addRewrite": "c", "addDenied": "b"}
 
 // externalRewriteTarget reports whether the target of a rewrite, as addRewrite receives it (its validator undoes the
-// character replacements, as here), sends the visitors of the site to another address: "http://" or "https://", in
-// any case. Callers hold the global lock.
+// character replacements, as here), may send the visitors of the site to another address: "http://" or "https://",
+// in any case, or an expression, which may do it for some requests. Callers hold the global lock.
 func externalRewriteTarget(target string) bool {
-	lower := strings.ToLower(replaceURIChars(target))
+	target = replaceURIChars(target)
+	if _, isExpression := expressionSource(target); isExpression {
+		return true
+	}
+	lower := strings.ToLower(target)
 	return strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://")
 }
 
@@ -1276,21 +1334,21 @@ func undoCharReplacements(request *customNetHttp.Request, apiPath string) {
 func formRejected(responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request, err error) {
 	var tooLarge *customNetHttp.MaxBytesError
 	if errors.As(err, &tooLarge) || errors.Is(err, customNetHttp.ErrMessageTooLarge) || strings.Contains(err.Error(), "too large") {
-		responseWriter.WriteHeader(413)
-		respond(responseWriter, "Maximum body size exceeded")
+		respondStatus(responseWriter, 413, "Maximum body size exceeded")
 		return
 	}
 	badReq(responseWriter, request, "Invalid parameters")
 }
 
-// formTextProblem checks every parameter of a panel request with textProblem and returns the first problem.
-func formTextProblem(request *customNetHttp.Request, whitespace bool) string {
+// formTextProblem checks every parameter of a panel request with textProblem and returns the first problem. Those
+// for which spanLines is true may have tabs and line breaks (nil: none).
+func formTextProblem(request *customNetHttp.Request, spanLines func(name string, value string) bool) string {
 	for name, values := range request.Form {
 		if problem := textProblem(name, false); problem != "" {
 			return problem
 		}
 		for _, value := range values {
-			if problem := textProblem(value, whitespace); problem != "" {
+			if problem := textProblem(value, spanLines != nil && spanLines(name, value)); problem != "" {
 				return problem
 			}
 		}
@@ -1361,7 +1419,7 @@ func addSite(domain string, folderMade bool) (bool, string) {
 	constructSiteLocked(domain, "")
 	if panelHost := panelHostServedBy(domain); panelHost != "" { // undone before anything reaches the disk
 		undoSiteCheckLocked(domain, "", domainExisted)
-		return false, "The site would serve the panel host " + panelHost + ": use another host for the panel or for the site"
+		return false, "The site would serve " + panelHost + ", where the panel answers: use another host for the panel (PA) or for the site"
 	}
 	if !folderMade { // Only checked: its folder is made without the global lock
 		undoSiteCheckLocked(domain, "", domainExisted)
@@ -1447,7 +1505,7 @@ func addSubdomain(domain string, subdomain string, folderMade bool) (bool, strin
 	constructSiteLocked(domain, subdomain)
 	if panelHost := panelHostServedBy(subdomain + "." + domain); panelHost != "" { // undone before anything reaches the disk
 		undoSiteCheckLocked(domain, subdomain, true)
-		return false, "The subdomain would serve the panel host " + panelHost + ": use another host for the panel or for the subdomain"
+		return false, "The subdomain would serve " + panelHost + ", where the panel answers: use another host for the panel (PA) or for the subdomain"
 	}
 	if !folderMade { // Only checked: its folder is made without the global lock
 		undoSiteCheckLocked(domain, subdomain, true)
@@ -1739,8 +1797,16 @@ func hardUpload(domain string, subdomain string, siteDir string, files []*custom
 	if err = os.Chmod(stagingDir, publicMode); err != nil { // #nosec G302 -- the public folder of a site, as its previous one
 		slog.Warn("hardUpload: can't give the new public directory the permissions of the previous one", "directory", stagingDir, "error", err)
 	}
+	afterUploadFolderMade()
 	for _, file := range uploads {
-		if err = writeUploadedFile(file.file, stagingDir+file.path); err != nil {
+		if err = writeUploadedFile(file.file, stagingDir, file.path); err != nil {
+			// The site deleted meanwhile, its folder moved aside with the upload's in it: the answer of a site that isn't
+			// there, as when it is deleted once the files are written (below), and no error of the server
+			siteGone := false
+			withReadLock(func() { siteGone = !siteExists(domain, subdomain) })
+			if siteGone {
+				return 400, "Site not found"
+			}
 			slog.Error("hardUpload: can't write the file", "file", file.path, "error", err)
 			return 500, "Error writing " + file.path + "; nothing was changed"
 		}
@@ -1780,18 +1846,18 @@ func hardUpload(domain string, subdomain string, siteDir string, files []*custom
 	return 200, "Data uploaded"
 }
 
-// writeUploadedFile writes an uploaded file to targetPath, creating its folders.
-func writeUploadedFile(uploadedFile *customNetHttp.FileHeader, targetPath string) error {
+// writeUploadedFile writes an uploaded file to base+rel, making the folders of rel under base (mkdirUnder).
+func writeUploadedFile(uploadedFile *customNetHttp.FileHeader, base string, rel string) error {
 	srcFile, err := uploadedFile.Open()
 	if err != nil {
 		return err
 	}
 	defer srcFile.Close() // #nosec G307 -- in memory (P10): closing it can't fail
 
-	if err = os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil { // #nosec G301 -- public web content of a site, served by Turbo
+	if err = mkdirUnder(base, path.Dir(rel)); err != nil {
 		return err
 	}
-	dstFile, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644) // #nosec G302 G304 -- public web content; uploadedFilePath rejects .. and absolute paths, so it stays under the upload folder
+	dstFile, err := os.OpenFile(base+rel, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644) // #nosec G302 G304 -- public web content; uploadedFilePath rejects .. and absolute paths, so it stays under the upload folder
 	if err != nil {
 		return err
 	}
@@ -1802,11 +1868,54 @@ func writeUploadedFile(uploadedFile *customNetHttp.FileHeader, targetPath string
 	return err
 }
 
+// mkdirUnder makes the folders of dir (a path with "/", relative to base; "." for none) under base, which ends with "/".
+// base itself, and what is above it, are never made: an upload folder removed meanwhile (with its site, deleted during
+// the upload) makes the upload fail, instead of making the site's folder again, empty.
+func mkdirUnder(base string, dir string) error {
+	if dir == "." {
+		return nil
+	}
+	made := base
+	for _, segment := range strings.Split(dir, "/") {
+		made += segment + "/"
+		if err := os.Mkdir(made, 0755); err != nil && !errors.Is(err, fs.ErrExist) { // #nosec G301 -- public web content of a site, served by Turbo
+			return err
+		}
+	}
+	return nil
+}
+
 // beforeSessionRenewal runs right before a panel request renews its session (a hook for tests).
 var beforeSessionRenewal = func() {}
 
 // beforeUploadSwap runs right before hardUpload puts the uploaded files in place of @ (a hook for tests).
 var beforeUploadSwap = func() {}
+
+// afterUploadFolderMade runs once hardUpload has made the folder of an upload, before it writes its files (a hook for
+// tests).
+var afterUploadFolderMade = func() {}
+
+// uploadSessionRenewal is how often an upload renews its session while its body arrives.
+var uploadSessionRenewal = time.Minute
+
+// sessionKeptBody is the body of an upload whose current password was already checked. While it arrives, its session
+// is renewed as a request renews it (renewSession: one closed meanwhile stays closed, and none lasts beyond
+// sessionMaxLifetime): an upload isn't a session idle, and one that took longer than sessionLifetime to arrive was
+// dropped, once whole, for a session that had expired while it came (sessionStillOpen).
+type sessionKeptBody struct {
+	io.ReadCloser
+	session string
+	request *customNetHttp.Request
+	renewed time.Time
+}
+
+func (body *sessionKeptBody) Read(p []byte) (int, error) {
+	if time.Since(body.renewed) >= uploadSessionRenewal {
+		body.renewed = time.Now()
+		renewSession(body.session, body.request)
+	}
+	return body.ReadCloser.Read(p)
+}
 
 // lockedCheck runs a validator holding the global write lock, releasing it even if the validator panics.
 func lockedCheck(check func() (bool, string)) (bool, string) {
@@ -1903,12 +2012,14 @@ func setSitesDir(value string, currentSession string) (bool, string) {
 }
 
 // dangerousActionPasswordOK checks the current password that an action able to run programs on the server, to
-// serve the source of a site's scripts, to make a site's file run as a page, to delete a site's files or a
-// certificate, to change what every site serves or what the panel's actions read, or to close every session needs
-// besides the session (addPreprocessor, delPreprocessor, add/del of MIME and Header, hardUpload, delSite, cfgC and
-// cfgPC with a=0, add/del of HttpCodeResponse and CharsReplace, and closeSessions), sent in param of values: missing,
-// 400; wrong, it counts for the session, as in set<KEY> (currentPasswordOK). A stolen session alone can do none of
-// these. It reports whether to go on.
+// serve the source of a site's scripts, to make a site's file run as a page, to send its visitors to another address,
+// to cut the sites off, to delete a site's files, to take a site's HTTPS away or stop its certificate, to change what
+// every site serves or what the panel's actions read, or to close every session needs besides the session
+// (addPreprocessor, delPreprocessor, add/del of MIME and Header, addRewrite to another address or with an expression,
+// addDenied, hardUpload, delSite, what certificatePasswordNeeded says of cfgS, cfgC, cfgPC, cfgE and cfgA, add/del of
+// HttpCodeResponse and CharsReplace, and closeSessions), sent in param of values: missing, 400; wrong, it counts for
+// the session, as in set<KEY> (currentPasswordOK). A stolen session alone can do none of these. It reports whether to
+// go on.
 func dangerousActionPasswordOK(responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request, session string, values map[string][]string, param string) bool {
 	password, sent := values[param]
 	if !sent || len(password) == 0 {
@@ -1916,6 +2027,47 @@ func dangerousActionPasswordOK(responseWriter customNetHttp.ResponseWriter, requ
 		return false
 	}
 	return currentPasswordOK(responseWriter, request, session, password[0])
+}
+
+// certificatePasswordNeeded reports whether cfg<key> with the parameters of form needs the current password besides the
+// session, as what takes a site down does: deleting a certificate (C and PC with a=0), turning a site's HTTPS off (S
+// with a=0; its redirection to HTTPS stops, and its certificate is no longer in use), and what stops a certificate from
+// being renewed, which takes the site down when it expires: removing a site's e-mail (E with an empty a), and changing
+// the DNS adapter of a site (A, or y of C) or of the panel's certificate (y of PC). The validators of C and S take a as
+// the panel writes it, "0" or "1", so that no other way of writing 0 passes for another value here. Callers hold the
+// global lock (the adapters saved).
+func certificatePasswordNeeded(key string, form map[string][]string) bool {
+	value := func(name string) (string, bool) {
+		if values, sent := form[name]; sent && len(values) > 0 {
+			return values[0], true
+		}
+		return "", false
+	}
+	a, _ := value("a")
+	if (key == "C" || key == "PC" || key == "S") && a == "0" {
+		return true
+	}
+	adapter, adapterSent := value("y")
+	if key == "PC" {
+		return adapterSent && adapter != panelCertAdapter
+	}
+	siteKey, _ := value("s")
+	if subdomain, _ := value("d"); subdomain != "" {
+		siteKey = subdomain + "." + siteKey
+	}
+	settings := siteSSLConfig[siteKey]
+	if settings == nil { // No such site: its validator answers
+		return false
+	}
+	switch key {
+	case "E":
+		return a == "" && settings.email != ""
+	case "A":
+		return a != settings.adapter
+	case "C": // An empty y keeps the adapter saved (siteSSLSettingCheckers["C"])
+		return adapterSent && adapter != "" && adapter != settings.adapter
+	}
+	return false
 }
 
 // consoleActionsAPI runs a panel action of the session currentSession, which came in the cookie (viaCookie) or in
@@ -1936,18 +2088,24 @@ func consoleActionsAPI(apiPath string, currentSession string, viaCookie bool, re
 	if len(apiPath) < 4 {
 		return false
 	}
-	// No saved value may have control characters; a response template may span lines. hardUpload reads
-	// its multipart body itself.
+	// No saved value may have control characters; a response template may span lines, and so may the expression of a
+	// header or a rewrite. hardUpload reads its multipart body itself.
 	if apiPath != "hardUpload" {
 		if err := request.ParseForm(); err != nil { // Every action reads its parameters from here on
 			formRejected(responseWriter, request, err)
 			return true
 		}
-		if problem := formTextProblem(request, apiPath == "addHttpCodeResponse"); problem != "" {
+		if problem := formTextProblem(request, func(name string, value string) bool {
+			return apiPath == "addHttpCodeResponse" || name == "b" && (apiPath == "addHeader" || apiPath == "addRewrite") && sentExpression(value)
+		}); problem != "" {
 			badReq(responseWriter, request, problem)
 			return true
 		}
 		undoCharReplacements(request, apiPath)
+		if !sessionStillOpen(currentSession) {
+			loginRequired(responseWriter, request)
+			return true
+		}
 	}
 	switch apiPath[:3] {
 	case "set":
@@ -2033,6 +2191,9 @@ func consoleActionsAPI(apiPath string, currentSession string, viaCookie bool, re
 					if ok && (apiPath == "U" || apiPath == "P") { // New credentials: every session ends, and this client gets a new one
 						renewCredentialsSessionLocked(responseWriter, request, viaCookie)
 					}
+					if ok && apiPath == "PA" { // Where the panel shares its origin with the sites now, as when turbo.config is read
+						warnPanelOrigin()
+					}
 					return ok, msg
 				})
 				if !applied {
@@ -2064,10 +2225,10 @@ func consoleActionsAPI(apiPath string, currentSession string, viaCookie bool, re
 				// A rewrite to another address sends the visitors of the site away (its "/" to any other site): with the
 				// session alone, a copy of it (or a script of the panel's origin) could do that to every site. A rewrite
 				// inside the site still needs only the session.
+				passwordChecked := apiPath != "Rewrite"
 				if apiPath == "Rewrite" {
-					external := false
-					withReadLock(func() { external = externalRewriteTarget(request.Form["b"][0]) })
-					if external && !dangerousActionPasswordOK(responseWriter, request, currentSession, request.Form, "c") {
+					withReadLock(func() { passwordChecked = externalRewriteTarget(request.Form["b"][0]) })
+					if passwordChecked && !dangerousActionPasswordOK(responseWriter, request, currentSession, request.Form, "c") {
 						return true
 					}
 				}
@@ -2095,6 +2256,11 @@ func consoleActionsAPI(apiPath string, currentSession string, viaCookie bool, re
 				}
 				entries := map[string]interface{}{request.Form["a"][0]: request.Form["b"][0]}
 				applied, message := lockedCheckLooking(look, func() (bool, string) {
+					// The character replacements may have changed since the password was asked for: the target is
+					// judged again as its validator will read it.
+					if !passwordChecked && externalRewriteTarget(request.Form["b"][0]) {
+						return false, msgMissingData + ": the current password (c)"
+					}
 					return subdomainContentCheckers[kind](true, entries, false, request.Form["s"][0], request.Form["d"][0])
 				})
 				if !applied {
@@ -2118,8 +2284,8 @@ func consoleActionsAPI(apiPath string, currentSession string, viaCookie bool, re
 				}
 				argumentValues := map[string]interface{}{request.Form["a"][0]: false}
 				applied, message := lockedCheck(func() (bool, string) {
-					if kind == "&" && panelAccess.Load().hosts[strings.ToLower(request.Form["a"][0])] { // The panel's host is never a site's
-						return false, "The alias " + request.Form["a"][0] + " is a panel host: use another host for the panel or for the alias"
+					if kind == "&" && panelAnswersOn(strings.ToLower(request.Form["a"][0])) { // The panel's host is never a site's
+						return false, "The panel answers on " + request.Form["a"][0] + ": use another host for the panel (PA) or for the alias"
 					}
 					return subdomainContentCheckers[kind](true, argumentValues, false, request.Form["s"][0], request.Form["d"][0])
 				})
@@ -2305,9 +2471,9 @@ func consoleActionsAPI(apiPath string, currentSession string, viaCookie bool, re
 				adapter = request.Form["y"][0]
 			}
 			if argumentParamExists && sourceParamExists && destinationParamExists {
-				// Deleting a certificate, and turning a site's HTTPS off (its redirection to HTTPS stops, and its certificate
-				// is no longer in use), need the current password
-				if (apiPath == "C" || apiPath == "PC" || apiPath == "S") && request.Form["a"][0] == "0" && !dangerousActionPasswordOK(responseWriter, request, currentSession, request.Form, "b") {
+				needed := false
+				withReadLock(func() { needed = certificatePasswordNeeded(apiPath, request.Form) })
+				if needed && !dangerousActionPasswordOK(responseWriter, request, currentSession, request.Form, "b") {
 					return true
 				}
 				// The files of a certificate and its state change together: no reload looks at them in between (it holds
@@ -2414,6 +2580,9 @@ func consoleActionsAPI(apiPath string, currentSession string, viaCookie bool, re
 			if answered {
 				return true
 			}
+			if passwordChecked {
+				request.Body = &sessionKeptBody{ReadCloser: request.Body, session: currentSession, request: request, renewed: time.Now()}
+			}
 			// s and d may come in the URL or in the multipart body, which is read only into memory and up to MBB.
 			// A whole site is uploaded at once: up to 10 000 files, each with two headers.
 			request = customNetHttp.TurboWithFormLimits(request, 10000, 20000)
@@ -2424,6 +2593,10 @@ func consoleActionsAPI(apiPath string, currentSession string, viaCookie bool, re
 			if request.MultipartForm != nil {
 				defer request.MultipartForm.RemoveAll()
 			}
+			if !sessionStillOpen(currentSession) {
+				loginRequired(responseWriter, request)
+				return true
+			}
 			_, sourceParamExists := request.Form["s"]
 			_, destinationParamExists := request.Form["d"]
 			if !sourceParamExists || !destinationParamExists {
@@ -2433,7 +2606,7 @@ func consoleActionsAPI(apiPath string, currentSession string, viaCookie bool, re
 			if !passwordChecked && !dangerousActionPasswordOK(responseWriter, request, currentSession, request.PostForm, "b") { // Only in the body: the URL is logged
 				return true
 			}
-			if problem := formTextProblem(request, false); problem != "" {
+			if problem := formTextProblem(request, nil); problem != "" {
 				badReq(responseWriter, request, problem)
 				return true
 			}
@@ -2455,10 +2628,7 @@ func consoleActionsAPI(apiPath string, currentSession string, viaCookie bool, re
 				siteDir += changeWildcards(request.Form["d"][0]) + "/"
 			}
 			status, message := hardUpload(request.Form["s"][0], request.Form["d"][0], siteDir, request.MultipartForm.File["f"])
-			if status != 200 {
-				responseWriter.WriteHeader(status)
-			}
-			respond(responseWriter, message)
+			respondStatus(responseWriter, status, message)
 			return true
 
 		case "closeSessions":

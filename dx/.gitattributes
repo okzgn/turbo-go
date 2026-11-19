@@ -1,0 +1,2 @@
+# Everything with LF, also in a Windows copy: the scripts of the examples and the sources are read the same anywhere.
+* text=auto eol=lf

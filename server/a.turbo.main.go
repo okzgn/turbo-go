@@ -50,6 +50,7 @@ import (
 	"syscall"
 	"time"
 	"turbo/customNetHttp"
+	"turbo/internal/expr"
 )
 
 // Locks: globalMutex guards the maps of this block (signedInTokens, charReplacements, fixedCharReplacements,
@@ -297,6 +298,7 @@ func runMaintenance(stop chan os.Signal, renew <-chan time.Time, config <-chan t
 				cleanLoginFailures()
 				cleanIPReferences()
 			})
+			runRecovering("idlePreprocessorModes", idlePreprocessorModes)
 		}
 	}
 }
@@ -342,7 +344,9 @@ func shutdown(received os.Signal, again <-chan os.Signal) {
 	}
 	wg.Wait()
 	waitCGIsEnded(cgiEndWait)
+	stopPreprocessorModes(cgiEndWait)     // What the modes keep running, once no request uses it
 	errorLines.close()                    // The errors counted and not written yet, and then each one at once
+	scriptLines.close()                   // So do the lines of the scripts
 	serverSetLogState(visitsLogName, nil) // Closed, so the last lines are written
 	serverSetLogState(denialsLogName, nil)
 	slog.Info("Stopped")
@@ -1569,10 +1573,24 @@ type servePlan struct {
 	rewritten     bool              // The path is the target of a rewrite, not the one the request named
 	queryString   string            // Query added by the rewrite (for CGI)
 	indexes       []string          // Index file names
-	headers       map[string]string // Site headers, for the files and CGI responses it serves
+	headers       map[string]string // Site headers written as they are, for the files and CGI responses it serves
 	mimeTypes     map[string]string // MIME types by extension
 	preprocessors map[string]string // Preprocessors by extension
 	precompressed bool              // The site answers with file.br or file.gz to those that accept them ("Z")
+
+	// What the expressions of the site's headers read and need (computeHeaders): the site and the names that led to
+	// it, the rewrite key that matched and the decoded, clean path the request named, whether it came by TLS, and
+	// whether it is the file of an ACME challenge, which is served without them.
+	headerExpressions []headerExpression
+	brokenHeader      string
+	brokenWhy         string
+	vary              []string
+	rewriteVary       []string // What the expression of the rewrite read: also on the answers given before the file
+	site              siteMatch
+	rewriteMatch      string
+	requestPath       string
+	overTLS           bool
+	acmeChallenge     bool
 }
 
 // cloneOrNil copies a site map, or returns nil for an empty one to save the allocation.
@@ -1611,12 +1629,13 @@ func serve(overTLS bool, site siteMatch, responseWriter customNetHttp.ResponseWr
 		return nil
 	}
 
-	var continueServe, rewritten bool
-	var rewrittenPath, queryString string
+	var chosen chosenPath
+	continueServe := false
 	if acmeChallenge { // Neither redirections nor rewrites: the file of the challenge, as it is
-		rewrittenPath, continueServe = cleanRequestPath(cutAt(request.RequestURI, '?'))
+		chosen.path, continueServe = cleanRequestPath(cutAt(request.RequestURI, '?'))
+		chosen.requested = chosen.path
 	} else {
-		rewrittenPath, queryString, rewritten, continueServe = choose(responseWriter, request, site)
+		chosen, continueServe = choose(overTLS, responseWriter, request, site)
 	}
 	if !continueServe {
 		return nil
@@ -1633,15 +1652,25 @@ func serve(overTLS bool, site siteMatch, responseWriter customNetHttp.ResponseWr
 
 	view := siteViewOf(siteKey)
 	return &servePlan{
-		root:          root,
-		path:          rewrittenPath,
-		rewritten:     rewritten,
-		queryString:   queryString,
-		indexes:       view.indexes,
-		headers:       view.headers,
-		mimeTypes:     view.mimeTypes,
-		preprocessors: view.preprocessors,
-		precompressed: view.precompressed,
+		root:              root,
+		path:              chosen.path,
+		rewritten:         chosen.rewritten,
+		queryString:       chosen.query,
+		indexes:           view.indexes,
+		headers:           view.headers,
+		mimeTypes:         view.mimeTypes,
+		preprocessors:     view.preprocessors,
+		precompressed:     view.precompressed,
+		headerExpressions: view.headerExpressions,
+		brokenHeader:      view.brokenHeader,
+		brokenWhy:         view.brokenWhy,
+		vary:              joinedVary(view.vary, chosen.vary),
+		rewriteVary:       chosen.vary,
+		site:              site,
+		rewriteMatch:      chosen.match,
+		requestPath:       chosen.requested,
+		overTLS:           overTLS,
+		acmeChallenge:     acmeChallenge,
 	}
 }
 
@@ -1650,16 +1679,21 @@ func serve(overTLS bool, site siteMatch, responseWriter customNetHttp.ResponseWr
 // even through a symbolic link. The file is opened once and served from that handle.
 func (plan *servePlan) serve(responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request) {
 	rewrittenPath := plan.path
+	// An answer given before the file (a 404, the redirection of a folder) depends on what the expression of the
+	// rewrite read as much as the file does: a shared cache would keep it for everyone.
+	varyEarly := func() { addVary(responseWriter.Header(), plan.rewriteVary) }
 	contentRoot, err := os.OpenRoot(plan.root)
 	if err != nil {
+		varyEarly()
 		reqMsg(responseWriter, 404)
 		return
 	}
 	defer contentRoot.Close()
-	opened := &openedFileFS{root: contentRoot.FS()}
+	opened := &openedFileFS{root: contentRoot}
 	defer opened.close()
 	fileInfo, err := opened.open(rootName(rewrittenPath))
 	if err != nil || (!fileInfo.IsDir() && strings.HasSuffix(rewrittenPath, "/")) { // "x.php/" names no folder: its extension would be lost
+		varyEarly()
 		reqMsg(responseWriter, 404)
 		return
 	}
@@ -1682,12 +1716,14 @@ func (plan *servePlan) serve(responseWriter customNetHttp.ResponseWriter, reques
 		}
 
 		if indexFile != "" {
+			varyEarly()
 			reqMsg(responseWriter, 404)
 			return
 		}
 		// "/docs" for the folder "/docs/": served there, as it was, the relative links of its index led to the folder
 		// above ("/logo.png" for "logo.png"). The target of a rewrite is a path of the site, not the visitor's.
 		if trailingSlash != "" && !plan.rewritten {
+			varyEarly()
 			folderRedirect(responseWriter, request, plan.path)
 			return
 		}
@@ -1700,23 +1736,28 @@ func (plan *servePlan) serve(responseWriter customNetHttp.ResponseWriter, reques
 	// "longname.phtml"), one of its streams ("x.php:$DATA"), or a name that differs in characters the file system
 	// folds or ignores (an extension outside ASCII). Windows refuses the first two for every site (cleanRequestPath).
 	if len(plan.preprocessors) > 0 && ambiguousScriptName(rewrittenPath, extension) {
+		varyEarly()
 		reqMsg(responseWriter, 404)
+		return
+	}
+	computed, answer := plan.computeHeaders(responseWriter, request, rewrittenPath) // Before anything is set or run
+	if !answer {
 		return
 	}
 	responseHeaders := responseWriter.Header()
 	for name, value := range plan.headers { // The site's headers, only for what is served
-		// A Content-Security-Policy of the site goes next to the one already set (panelCSP, on the panel's own host
-		// served by a site), never in its place: browsers apply them all, so it can only restrict more. Set, it
-		// replaced panelCSP, and the session alone could add one that allowed scripts there.
-		if customNetHttp.CanonicalHeaderKey(name) == "Content-Security-Policy" && responseHeaders.Get(name) != "" {
-			responseHeaders.Add(name, value)
-			continue
-		}
-		responseHeaders.Set(name, value)
+		setSiteHeader(responseHeaders, name, value)
+	}
+	for _, header := range computed {
+		setSiteHeader(responseHeaders, header.name, header.value)
+	}
+	vary := plan.vary
+	if plan.acmeChallenge {
+		vary = nil
 	}
 
-	if preprocessor := plan.preprocessors[extension]; preprocessor != "" { // Verify preprocessors
-		executable, problem := preprocessorCommand(preprocessor)
+	if preprocessor := plan.preprocessors[extension]; preprocessor != "" && !plan.acmeChallenge { // Verify preprocessors; an ACME challenge is a file to give as it is, also without an extension
+		mode, executable, problem := preprocessorParts(preprocessor)
 		if problem == "" {
 			if info, err := os.Stat(executable); err != nil || info.IsDir() {
 				problem = "the executable does not exist or is a folder"
@@ -1724,16 +1765,17 @@ func (plan *servePlan) serve(responseWriter customNetHttp.ResponseWriter, reques
 		}
 		if problem != "" { // Fail closed: never serve the source of a preprocessed file
 			if missingPreprocessorLogDue(plan.root + "|" + extension) {
-				slog.Error("Preprocessor unavailable (reported once a minute)", "site", plan.root, "extension", extension, "reason", problem, "preprocessor", strings.TrimPrefix(preprocessor, invalidPreprocessorMark))
+				slog.Error("Preprocessor unavailable (reported once a minute)", "site", plan.root, "extension", extension, "reason", problem, "preprocessor", strings.TrimLeft(preprocessor, invalidPreprocessorMark))
 			}
-			reqMsg(responseWriter, 500)
+			siteErrorMsg(responseWriter, 500)
 			return
 		}
 		opened.close() // The CGI opens the script itself
-		dynamic(plan.root, rewrittenPath, plan.queryString, executable, responseWriter, request)
+		dynamic(mode, plan.root, rewrittenPath, plan.queryString, executable, vary, responseWriter, request)
 		return
 	}
 
+	addVary(responseHeaders, vary)
 	if mimeType, found := plan.mimeTypes[extension]; found {
 		responseHeaders.Set(contentTypeHeader, mimeType)
 	}
@@ -1833,21 +1875,42 @@ func missingPreprocessorLogDue(key string) bool {
 // site's os.Root, so that ServeFileFS doesn't look it up and open it again, and opens any other name through the
 // Root.
 type openedFileFS struct {
-	root fs.FS
+	root *os.Root
 	name string
 	file fs.File
 }
 
-// open opens name through the Root, keeping it (and closing the one kept before), and returns its information.
-func (opened *openedFileFS) open(name string) (fs.FileInfo, error) {
-	opened.close()
-	file, err := opened.root.Open(name)
+// notServedTypes are the types of what a site never serves: a FIFO, a socket or a device isn't content, and reading
+// one waits, or takes what was meant for another program.
+const notServedTypes = fs.ModeNamedPipe | fs.ModeSocket | fs.ModeDevice | fs.ModeCharDevice
+
+// openSiteFile opens name through the Root of a site, and returns it with its information, unless it is one of
+// notServedTypes, which is answered as a name that isn't there. Opening a FIFO waits for a writer, and held a thread of
+// the server for each request: on Unix the name is opened without waiting (siteOpenFlags), and what was opened is
+// looked at, in one walk of its path. Looking at the name before opening it walked the path twice through the Root, for
+// every file: half as long again to serve one on Windows, which has no FIFO in a folder, and a fifth on Linux.
+func openSiteFile(root *os.Root, name string) (*os.File, fs.FileInfo, error) {
+	file, err := root.OpenFile(name, siteOpenFlags, 0)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	info, err := file.Stat()
+	if err == nil && info.Mode()&notServedTypes != 0 {
+		err = fs.ErrNotExist
+	}
 	if err != nil {
-		file.Close() // #nosec G104 -- it is discarded: the error that matters is Stat's
+		file.Close() // #nosec G104 -- it is discarded: the error that matters is the one returned
+		return nil, nil, err
+	}
+	return file, info, nil
+}
+
+// open opens name through the Root, keeping it (and closing the one kept before), and returns its information. Only a
+// file or a folder is opened (openSiteFile).
+func (opened *openedFileFS) open(name string) (fs.FileInfo, error) {
+	opened.close()
+	file, info, err := openSiteFile(opened.root, name)
+	if err != nil {
 		return nil, err
 	}
 	opened.name, opened.file = name, file
@@ -1860,7 +1923,11 @@ func (opened *openedFileFS) Open(name string) (fs.File, error) {
 		opened.file = nil
 		return file, nil
 	}
-	return opened.root.Open(name)
+	file, _, err := openSiteFile(opened.root, name)
+	if err != nil {
+		return nil, err
+	}
+	return file, nil
 }
 
 // close closes the kept file, if it wasn't handed over.
@@ -1971,15 +2038,26 @@ func rewrite(requestURI string, domain string, subdomain string) (string, string
 	return "", ""
 }
 
+// redirectHostStarters are what the host of a redirection can't start with: a browser skips "/" and "\" after the
+// scheme, and "?" and "#" leave it empty.
+const redirectHostStarters = `/\?#`
+
 // rewriteRedirect answers a rewrite to "http(s)://" with a 302: to the exact target when it has a path or
-// a query, or to the target domain followed by the original URI when it is only a domain.
-func rewriteRedirect(secure bool, target string, query string, responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request) {
+// a query, or to the target domain followed by the original URI when it is only a domain. site and source name the
+// rewrite, for the log.
+func rewriteRedirect(secure bool, target string, query string, site string, source string, responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request) {
 	scheme := "http://"
 	if secure {
 		scheme = "https://"
 	}
-	if target == "" || target[0] == '/' { // A placeholder for the host gave nothing (no alias, for example)
-		slog.Warn("Rewrite without a host when responding: 500", "host", request.Host, "path", request.RequestURI)
+	// A placeholder for the host gave nothing (no alias, for example), or the host starts with what a browser skips
+	// ("/", "\"), and would take what follows for it: kept by an earlier version, or given by an expression
+	if target == "" || strings.IndexByte(redirectHostStarters, target[0]) != -1 {
+		// Once a minute for each rewrite, and with nothing of the request: a key of what the client sends (its host, with
+		// any port) wrote a line for each request
+		if logDueOnceAMinute("redirect|" + site + "|" + source) {
+			slog.Warn("Rewrite without a host when responding: 500 (reported once a minute)", "site", site, "source", source)
+		}
 		reqMsg(responseWriter, 500)
 		return
 	}
@@ -1993,24 +2071,56 @@ func rewriteRedirect(secure bool, target string, query string, responseWriter cu
 	customNetHttp.Redirect(responseWriter, request, scheme+target, 302)
 }
 
-// choose returns the path to serve and the query a rewrite adds, whether that path is the target of a rewrite, and
-// whether to go on (false once it has answered: a redirection, or a path that can't be served).
-func choose(responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request, site siteMatch) (string, string, bool, bool) {
+// chosenPath is what choose found for a request: the path to serve and the query a rewrite adds, whether that path is
+// the target of a rewrite, the rewrite key that matched, the decoded, clean path the request named, and the headers
+// that the expression of the rewrite read (Vary).
+type chosenPath struct {
+	path      string
+	query     string
+	rewritten bool
+	match     string
+	requested string
+	vary      []string
+}
+
+// choose returns the path to serve (chosenPath), and whether to go on (false once it has answered: a redirection, or
+// a path that can't be served).
+func choose(overTLS bool, responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request, site siteMatch) (chosenPath, bool) {
 	pathWithoutQuery, ok := cleanRequestPath(cutAt(request.RequestURI, '?')) // Decoded and inside the site
 	if !ok {
 		reqMsg(responseWriter, 404) // The same answer whether the file exists or not
-		return "", "", false, false
+		return chosenPath{}, false
 	}
 	rewriteResult, matchedRewrite := rewrite(pathWithoutQuery, site.siteDomain, site.siteSubdomain)
 	if rewriteResult == "" {
-		return pathWithoutQuery, "", false, true
+		return chosenPath{path: pathWithoutQuery, requested: pathWithoutQuery}, true
 	} // This is for unmatched URIs for rewrite
-	rewriteResult = shortcutWords(request, rewriteResult, site, matchedRewrite, pathWithoutQuery)
+	var vary []string
+	if source, isExpression := strings.CutPrefix(rewriteResult, "X"); isExpression {
+		read := &expressionRequest{request: request, site: site, rewriteMatch: matchedRewrite, requestPath: pathWithoutQuery, overTLS: overTLS}
+		var answered bool
+		if rewriteResult, vary, answered = expressionTarget(responseWriter, read, source); answered {
+			return chosenPath{}, false
+		}
+		if rewriteResult == "" { // The expression gave nothing: no rewrite for this request
+			return chosenPath{path: pathWithoutQuery, requested: pathWithoutQuery, vary: vary}, true
+		}
+	} else if problem := textTargetProblem(rewriteResult); problem != "" { // Refused when added and read: checked again
+		siteName := joinedSite(site.siteSubdomain, site.siteDomain)
+		if logDueOnceAMinute(siteName + "|rewrite|" + matchedRewrite) {
+			slog.Error("Rewrite whose target can't be answered: 500 (reported once a minute)", "site", siteName, "source", matchedRewrite, "reason", problem)
+		}
+		reqMsg(responseWriter, 500)
+		return chosenPath{}, false
+	} else {
+		rewriteResult = shortcutWords(request, rewriteResult, site, matchedRewrite, pathWithoutQuery)
+	}
 	rewriteResult, query, _ := strings.Cut(rewriteResult, "?")
 	switch rewriteResult[0] {
 	case 'H', 'S':
-		rewriteRedirect(rewriteResult[0] == 'S', rewriteResult[1:], query, responseWriter, request)
-		return "", "", false, false
+		addVary(responseWriter.Header(), vary)
+		rewriteRedirect(rewriteResult[0] == 'S', rewriteResult[1:], query, joinedSite(site.siteSubdomain, site.siteDomain), matchedRewrite, responseWriter, request)
+		return chosenPath{}, false
 	case 'N':
 		rewriteResult = rewriteResult[1:]
 	}
@@ -2020,10 +2130,11 @@ func choose(responseWriter customNetHttp.ResponseWriter, request *customNetHttp.
 	// Placeholders may have produced ".." or "\\": the target is cleaned as a request path
 	cleanPath, ok := cleanRequestPath(rewriteResult)
 	if !ok {
+		addVary(responseWriter.Header(), vary)
 		reqMsg(responseWriter, 404)
-		return "", "", false, false
+		return chosenPath{}, false
 	}
-	return cleanPath, query, true, true
+	return chosenPath{path: cleanPath, query: query, rewritten: true, match: matchedRewrite, requested: pathWithoutQuery, vary: vary}, true
 }
 
 // shortcutWords replaces the placeholders of a rewrite target, as stored ("N<path>", or "H"/"S" with the host for
@@ -2033,29 +2144,7 @@ func choose(responseWriter customNetHttp.ResponseWriter, request *customNetHttp.
 // takes the path alone, and in a redirection the request's query is added to the target's (an internal target
 // already gets it). Unknown placeholders give nothing.
 func shortcutWords(request *customNetHttp.Request, input string, site siteMatch, rewriteMatch string, requestPath string) string {
-	const (
-		inHost = iota
-		inPath
-		inQuery
-	)
-	position := inPath
-	redirection := input != "" && (input[0] == 'H' || input[0] == 'S')
-	if redirection {
-		position = inHost
-	}
-	var result strings.Builder
-	addQuery := false
-	write := func(literal string) {
-		for _, char := range literal {
-			switch {
-			case char == '/' && position == inHost:
-				position = inPath
-			case char == '?' && position != inQuery:
-				position = inQuery
-			}
-			result.WriteRune(char)
-		}
-	}
+	writer := newTargetWriter(request, input != "" && (input[0] == 'H' || input[0] == 'S'))
 	remaining := input
 	for {
 		// The first "}" after the "{", as the validator reads a target (unknownPlaceholder): with the first "}" of
@@ -2069,51 +2158,203 @@ func shortcutWords(request *customNetHttp.Request, input string, site siteMatch,
 			break
 		}
 		closeBraceIdx += openBraceIdx
-		write(remaining[:openBraceIdx])
+		writer.text(remaining[:openBraceIdx])
 		placeholder := remaining[openBraceIdx+1 : closeBraceIdx]
 		remaining = remaining[closeBraceIdx+1:]
 		replacer, placeholderExists := shortcutWordReplacers[placeholder]
 		if !placeholderExists {
 			continue
 		}
-		value := replacer(request, site, rewriteMatch, requestPath)
-		switch position {
-		case inHost:
-			result.WriteString(url.QueryEscape(value)) // A host name is left as it is; "/", "?" or "@" can't change the URL
-		case inPath:
-			if placeholder == "REWRITE_COMPLEMENT" { // The path here; a redirection adds the query to the target's
-				// Without the query that the replacer adds: a "?" before it comes from the decoded path (%3F), and is
-				// escaped with the segment
-				if queryStart := strings.IndexByte(request.RequestURI, '?'); queryStart != -1 {
-					value = strings.TrimSuffix(value, request.RequestURI[queryStart:])
-				}
-				addQuery = redirection // An internal target already gets the request's query (CGI, QUERY_STRING)
+		writer.value(placeholder, replacer(request, site, rewriteMatch, requestPath))
+	}
+	writer.text(remaining)
+	return writer.finish()
+}
+
+// textTargetProblem says why a target written as a text (as it is kept: "N/…", or "H" or "S" and the host) can't be
+// answered, or "". As in an expression (§6.3 of the API), the host of a redirection only gets keywords of the names of
+// the site, of its wildcards and of the rewrite's key: a keyword of what the client sends ({FILE}, {FIRST_REQUEST}…)
+// there chose where the visitors go. {SUBDOMAIN} and {FIRST_SUBDOMAIN}, which a wildcard subdomain lets the client
+// choose ("evil.example" of evil.example.mysite.com), only start the host, with a "." and the rest of it after them.
+// And {TURBO_CURRENT_DIR} is never in a target: it put a folder of the server in a URL. Unknown keywords are
+// unknownPlaceholder's.
+func textTargetProblem(target string) string {
+	if target == "" {
+		return ""
+	}
+	inHost := target[0] == 'H' || target[0] == 'S'
+	labels := 0 // In the host: 1 right after labels that the client may choose, 2 after them and a "."
+	text := func(literal string) bool {
+		if !inHost {
+			return true
+		}
+		var ok bool
+		if labels, ok = hostAfterLabels(labels, literal); !ok {
+			return false
+		}
+		inHost = !strings.ContainsAny(literal, "/?") // As targetWriter moves
+		return true
+	}
+	remaining := target[1:]
+	for { // As shortcutWords reads it
+		open := strings.IndexByte(remaining, '{')
+		if open == -1 {
+			break
+		}
+		closing := strings.IndexByte(remaining[open:], '}')
+		if closing == -1 {
+			break
+		}
+		closing += open
+		if !text(remaining[:open]) {
+			return textTargetLabelsAtTheEnd
+		}
+		name := remaining[open+1 : closing]
+		remaining = remaining[closing+1:]
+		if name == currentDirPlaceholder {
+			return "{" + currentDirPlaceholder + "} can't be in a rewrite: it would put a folder of the server in a URL"
+		}
+		if _, known := shortcutWordReplacers[name]; !known || !inHost {
+			continue
+		}
+		switch class, _ := expr.ClassOf(name); class {
+		case expr.Labels:
+			labels = 1
+		case expr.Config, expr.Host:
+			if labels == 1 { // "{SUBDOMAIN}{DOMAIN}": the client's labels would start another name
+				return textTargetLabelsAtTheEnd
 			}
-			segments := strings.Split(value, "/")
-			for i, segment := range segments {
-				segments[i] = url.PathEscape(segment)
-			}
-			result.WriteString(strings.Join(segments, "/"))
+			labels = 0
 		default:
-			result.WriteString(url.QueryEscape(value))
+			return "The host of a redirection can't have {" + name + "}: the client chooses it"
 		}
 	}
-	write(remaining)
-	if _, query, hasQuery := strings.Cut(request.RequestURI, "?"); addQuery && hasQuery && query != "" {
-		if strings.IndexByte(result.String(), '?') == -1 {
-			result.WriteByte('?')
+	if !text(remaining) || inHost && labels != 0 {
+		return textTargetLabelsAtTheEnd
+	}
+	return ""
+}
+
+// labelsBeforeOneLabel reports whether the host of a redirection written as a text (as it is kept: "H" or "S" and the
+// host) has {SUBDOMAIN} or {FIRST_SUBDOMAIN} followed by a "." and one label only, and nothing else: "{SUBDOMAIN}.com"
+// passes textTargetProblem, but under a wildcard subdomain the visitor chooses that label, and so the whole domain
+// (evil.yoursite.net to evil.com). Turbo warns of it (decision D6 of the review of v2.5): a site may want it, with a
+// suffix of its own; the rest of the host is meant to be a domain of the site's.
+func labelsBeforeOneLabel(target string) bool {
+	if target == "" || target[0] != 'H' && target[0] != 'S' {
+		return false
+	}
+	host := target[1:]
+	if end := strings.IndexAny(host, "/?#"); end != -1 {
+		host = host[:end]
+	}
+	for _, keyword := range []string{"{SUBDOMAIN}", "{FIRST_SUBDOMAIN}"} {
+		at := strings.Index(host, keyword)
+		if at == -1 {
+			continue
+		}
+		rest, hasDot := strings.CutPrefix(host[at+len(keyword):], ".")
+		rest, _, _ = strings.Cut(rest, ":")  // Without its port
+		rest = strings.TrimSuffix(rest, ".") // Nor the dot that may end a host, which is no label more
+		if hasDot && rest != "" && !strings.ContainsAny(rest, ".{") {
+			return true
+		}
+	}
+	return false
+}
+
+// textTargetLabelsAtTheEnd is why a host of a redirection can't end with the labels that the client may choose.
+const textTargetLabelsAtTheEnd = "{SUBDOMAIN} and {FIRST_SUBDOMAIN}, which a wildcard lets the client choose, can't end the host of a redirection: write a \".\" and the rest of the host after them"
+
+// targetPosition is where the next piece of a rewrite's target goes: the host of a redirection, the path or the
+// query.
+type targetPosition uint8
+
+const (
+	targetInHost targetPosition = iota
+	targetInPath
+	targetInQuery
+)
+
+// targetWriter writes the target of a rewrite for a request: the texts written in the target as they are, and the
+// values placed in it, each encoded for where it goes, so that no value changes the shape of the URL. A "/" of a
+// text goes from the host to the path, and a "?" to the query. The target starts with its mode ("N" for a path of
+// the site, "H" or "S" for a redirection), which starts it in the path or in the host.
+type targetWriter struct {
+	request     *customNetHttp.Request
+	result      strings.Builder
+	position    targetPosition
+	redirection bool
+	addQuery    bool // The request's query goes at the end (REWRITE_COMPLEMENT in the path of a redirection)
+}
+
+func newTargetWriter(request *customNetHttp.Request, redirection bool) *targetWriter {
+	writer := &targetWriter{request: request, position: targetInPath, redirection: redirection}
+	if redirection {
+		writer.position = targetInHost
+	}
+	return writer
+}
+
+// text writes a text of the target as it is.
+func (writer *targetWriter) text(literal string) {
+	for _, char := range literal {
+		switch {
+		case char == '/' && writer.position == targetInHost:
+			writer.position = targetInPath
+		case char == '?' && writer.position != targetInQuery:
+			writer.position = targetInQuery
+		}
+		writer.result.WriteRune(char)
+	}
+}
+
+// value writes the value of the placeholder name, encoded for where it goes: in the host, so that "/", "?" or "@"
+// can't change the URL; in the path, each segment, keeping "/"; in the query, as one value.
+func (writer *targetWriter) value(name string, value string) {
+	switch writer.position {
+	case targetInHost:
+		writer.result.WriteString(url.QueryEscape(value)) // A host name is left as it is; "/", "?" or "@" can't change the URL
+	case targetInPath:
+		if name == "REWRITE_COMPLEMENT" { // The path here; a redirection adds the query to the target's
+			// Without the query that the replacer adds: a "?" before it comes from the decoded path (%3F), and is
+			// escaped with the segment. In any capitals: an expression may have changed them (lower, upper), and the
+			// query goes on as the request sent it
+			if queryStart := strings.IndexByte(writer.request.RequestURI, '?'); queryStart != -1 {
+				if query := writer.request.RequestURI[queryStart:]; len(value) >= len(query) && strings.EqualFold(value[len(value)-len(query):], query) {
+					value = value[:len(value)-len(query)]
+				}
+			}
+			writer.addQuery = writer.redirection // An internal target already gets the request's query (CGI, QUERY_STRING)
+		}
+		segments := strings.Split(value, "/")
+		for i, segment := range segments {
+			segments[i] = url.PathEscape(segment)
+		}
+		writer.result.WriteString(strings.Join(segments, "/"))
+	default:
+		writer.result.WriteString(url.QueryEscape(value))
+	}
+}
+
+// finish returns the target, with the request's query at its end when a REWRITE_COMPLEMENT in the path of a
+// redirection asked for it.
+func (writer *targetWriter) finish() string {
+	if _, query, hasQuery := strings.Cut(writer.request.RequestURI, "?"); writer.addQuery && hasQuery && query != "" {
+		if strings.IndexByte(writer.result.String(), '?') == -1 {
+			writer.result.WriteByte('?')
 		} else {
-			result.WriteByte('&')
+			writer.result.WriteByte('&')
 		}
 		for i := 0; i < len(query); i++ { // Control characters stay encoded, as in the rest of the target
 			if c := query[i]; c < 0x20 || c == 0x7f {
-				fmt.Fprintf(&result, "%%%02X", c)
+				fmt.Fprintf(&writer.result, "%%%02X", c)
 			} else {
-				result.WriteByte(c)
+				writer.result.WriteByte(c)
 			}
 		}
 	}
-	return result.String()
+	return writer.result.String()
 }
 
 // sortedKeys returns the keys of values in byte order.

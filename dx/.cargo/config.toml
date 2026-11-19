@@ -1,0 +1,7 @@
+# MSVC: LuaJIT is built with the static C runtime (/MT), so the program is too (one runtime, and no DLL of it to
+# install); and LuaJIT exports its functions, so the linker would write a .lib and a .exp beside each program.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-arg=/NOIMPLIB", "-C", "link-arg=/NOEXP"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static", "-C", "link-arg=/NOIMPLIB", "-C", "link-arg=/NOEXP"]

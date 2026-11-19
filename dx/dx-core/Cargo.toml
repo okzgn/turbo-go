@@ -1,0 +1,9 @@
+[package]
+name = "dx-core"
+description = "The worker side of Turbo's preprocessor mode dx (protocol DX 3): the protocol, the loop, and what an engine and a capability are"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]

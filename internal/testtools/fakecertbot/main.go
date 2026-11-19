@@ -1,7 +1,7 @@
 // Simulated certbot: it logs each invocation to $FAKE_CERTBOT_LOG, and its environment to
 // $FAKE_CERTBOT_ENV_LOG, and, with FAKE_CERTBOT_MODE=ok, generates a self-signed certificate
 // where certbot would leave it. With FAKE_CERTBOT_DELAY=<ms>, it takes that long to issue it
-// (to try the GUI by hand; the test suite doesn't use it). With FAKE_CERTBOT_ACCOUNTS=<file>, it
+// (to try the GUI by hand, and for the tests of what is refused while Certbot works). With FAKE_CERTBOT_ACCOUNTS=<file>, it
 // uses the ACME account of its config folder, or makes one as Certbot does, and logs which
 // ("new <id>" or "existing <id>"); with FAKE_CERTBOT_REFUSE_ACCOUNT=<id> too, that account is
 // refused, as a deactivated one. With FAKE_CERTBOT_HOLD=<ms>, it leaves a child that keeps its

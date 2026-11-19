@@ -612,6 +612,28 @@ func reqMsg(responseWriter customNetHttp.ResponseWriter, statusCode int) {
 	customNetHttp.Error(responseWriter, "", statusCode)
 }
 
+// siteErrorMsg is reqMsg for an error page of Turbo once the site's headers are set (for a script, which then doesn't
+// run or doesn't answer): without those of errorPageDroppedHeaders.
+func siteErrorMsg(responseWriter customNetHttp.ResponseWriter, statusCode int) {
+	withoutBodyHeaders(responseWriter.Header())
+	customNetHttp.Error(responseWriter, "", statusCode)
+}
+
+// errorPageDroppedHeaders are the headers that a site's response may carry and that don't belong to an error page of
+// Turbo: they describe how to keep or decode another body. A site's "Cache-Control: max-age=3600" made a 503 of Turbo
+// stay an hour in the caches in front of it, and a "Content-Encoding: gzip" made its text unreadable. The site's other
+// headers (its security headers among them) stay; the panel's, which Turbo sets for its own pages, aren't touched. So
+// go those that tell the cache of a CDN how long to keep it, which it reads before Cache-Control (RFC 9213, and the
+// headers that came before it).
+var errorPageDroppedHeaders = []string{"Cache-Control", "Expires", "Cdn-Cache-Control", "Surrogate-Control", "X-Accel-Expires", "Etag", "Last-Modified", "Content-Encoding", "Content-Disposition"}
+
+// withoutBodyHeaders takes errorPageDroppedHeaders out of header, before an error page of Turbo goes out.
+func withoutBodyHeaders(header customNetHttp.Header) {
+	for _, name := range errorPageDroppedHeaders {
+		header.Del(name)
+	}
+}
+
 // respond writes text as the body of a response, as plain text unless the response already has a type. An error
 // means the client has gone away and there is no one left to tell, so it is not handled.
 func respond(responseWriter customNetHttp.ResponseWriter, text string) {
@@ -631,8 +653,17 @@ func respondJSON(responseWriter customNetHttp.ResponseWriter, document string) {
 }
 
 func badReq(responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request, message string) {
-	responseWriter.WriteHeader(400)
-	respond(responseWriter, message)
+	respondStatus(responseWriter, 400, message)
+}
+
+// respondStatus writes text as the body of a response with status code, as plain text unless the response already has
+// a type: set before the status, which fixes the headers (after it, the server guessed the type from the text).
+func respondStatus(responseWriter customNetHttp.ResponseWriter, code int, text string) {
+	if responseWriter.Header().Get(contentTypeHeader) == "" {
+		responseWriter.Header().Set(contentTypeHeader, "text/plain; charset=utf-8")
+	}
+	responseWriter.WriteHeader(code)
+	_, _ = responseWriter.Write([]byte(text))
 }
 
 // ext returns the extension of a path in lower case (preprocessors and MIME types are saved in lower case: a
@@ -1511,6 +1542,9 @@ func panelCertificateAction(action string, email string, adapter string, setAdap
 		panelCertAdapter = adapter
 	}
 	panelDir := sitesDir.Get() + panelCertDirName + "/"
+	if action == "0" && (currentCertDomain == panelCertDirName || certPending[panelCertDirName]) {
+		return false, certificateBeingIssued
+	}
 	if action == "0" {
 		_, certErr := diskStat(panelDir + certFileName)
 		_, keyErr := diskStat(panelDir + keyFileName)
@@ -1617,6 +1651,10 @@ func panelACMEChallenge(responseWriter customNetHttp.ResponseWriter, request *cu
 	_, _ = io.Copy(responseWriter, file)
 	return true
 }
+
+// certificateBeingIssued is the answer to deleting a certificate while Certbot issues or renews it, or waits to: its
+// files would be installed afterwards, or the certificate put in use without them.
+const certificateBeingIssued = "The certificate is being issued or renewed: delete it once Certbot is done"
 
 // acmeToken is an ACME http-01 token: base64url (RFC 8555).
 var acmeToken = regexp.MustCompile(`^[A-Za-z0-9_-]{1,256}$`)

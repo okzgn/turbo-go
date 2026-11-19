@@ -2,15 +2,25 @@
 
 ## Supported versions
 
-Security fixes go into the latest release. Earlier releases (`v2.4.3`, `v2.4.2`, `v2.4.1`, `v2.4`, `v2.3.rc3` and before) and builds of `main` that are not a release don't get fixes: upgrade, following the notes of [CHANGELOG.md](CHANGELOG.md).
+Security fixes go into the latest release. Earlier releases (`v2.4.4`, `v2.4.3`, `v2.4.2`, `v2.4.1`, `v2.4`, `v2.3.rc3` and before) and builds of `main` that are not a release don't get fixes: upgrade, following the notes of [CHANGELOG.md](CHANGELOG.md).
 
 To know which version you run, look at the first line Turbo writes when it starts (`journalctl -u turbo | grep msg=Starting` under systemd):
 
 ```
-level=INFO msg=Starting server="OKZGN Turbo" version=v2.4.4 commit=<hash> go=go1.26.11
+level=INFO msg=Starting server="OKZGN Turbo" version=v2.5 commit=<hash> go=go1.26.11
 ```
 
 A binary built from the source says `version=development`, and `commit=unknown` if it was built without version-control information (from a source archive, for example).
+
+## The workers of the mode dx
+
+The releases don't include the workers of the mode dx that are in `dx/` (`dx-lua`): whoever uses one builds it from the source (see [dx/README.md](dx/README.md)), so a fix to `dx/` reaches a server only when its worker is built and installed again (Turbo starts the new program once the workers of the old one end, or when it restarts). `dx-lua --version` gives its version and the commit it was built from, to compare with an advisory (`<hash>+modified` if the source in `dx/` wasn't as that commit has it, and `commit unknown` if it was built outside a checkout of Turbo, or where git couldn't tell):
+
+```
+dx-lua 0.3.0 (commit <hash>, protocol DX 3, LuaJIT 2.1.1794386141)
+```
+
+A script that gets out of the sandbox of `dx-lua` (that reads a file, the network, the system or another request, or goes beyond its limits of memory or time) is a vulnerability of Turbo: report it as below.
 
 ## Checking a download
 

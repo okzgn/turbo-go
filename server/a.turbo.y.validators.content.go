@@ -31,8 +31,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"turbo/customNetHttp"
+	"turbo/internal/expr"
 )
 
 // indexPosition reads the position saved for an index, as text ("1", "2"...) or as a JSON number (1, 2...);
@@ -122,6 +124,7 @@ var subdomainContentCheckers = map[string]func(bool, interface{}, bool, ...strin
 				if printErrors {
 					return false, "Invalid rewrite value"
 				}
+				discardedFromFile(isFromFile, "rewrite", joinedSite(siteKeys[1], siteKeys[0]), targetURI, "the target is not a text")
 				continue
 			}
 
@@ -134,22 +137,53 @@ var subdomainContentCheckers = map[string]func(bool, interface{}, bool, ...strin
 				if printErrors {
 					return false, "Invalid relative address"
 				}
+				discardedFromFile(isFromFile, "rewrite", joinedSite(siteKeys[1], siteKeys[0]), targetURI, `the path it takes must start with "/", without "//" nor ".."`)
 				continue
 			}
 			if valueLen > 128 {
 				if printErrors {
 					return false, "Relative address too long"
 				}
+				discardedFromFile(isFromFile, "rewrite", joinedSite(siteKeys[1], siteKeys[0]), targetURI, "the path it takes is longer than 128 bytes")
 				continue
 			}
 			if !isFromFile {
 				strVal = replaceURIChars(strVal)
+			}
+			if source, isExpression := expressionSource(normalizedExpression(strVal)); isExpression {
+				// Kept with the mode X. Compiled now, and what it gives is checked as it is placed (choose). One of
+				// turbo.config that doesn't compile is kept as it is, and the paths it takes answer 500 until it is
+				// fixed: dropped, they would be served as they were named.
+				if _, err := compileExpression(expr.RewriteTarget, "", source); err != nil {
+					if printErrors {
+						return false, err.Error()
+					}
+					if !isFromFile {
+						continue
+					}
+					slog.Warn("turbo.config rewrite whose expression doesn't compile: the paths it takes answer 500", "site", siteKeys[0], "subdomain", siteKeys[1], "source", targetURI, "reason", err.Error())
+				}
+				if isExisting && current == "X"+source {
+					if printErrors {
+						return false, "Rewrite unchanged"
+					}
+					continue
+				}
+				sitesMap[siteKeys[0]][siteKeys[1]][targetURI] = "X" + source
+				if printErrors {
+					if !isExisting {
+						return true, "Rewrite created"
+					}
+					return true, "Rewrite changed"
+				}
+				continue
 			}
 			valueLen = len(strVal)
 			if valueLen < 1 || strings.Contains(strVal, "..") {
 				if printErrors {
 					return false, "Invalid rewrite"
 				}
+				discardedFromFile(isFromFile, "rewrite", joinedSite(siteKeys[1], siteKeys[0]), targetURI, `the target is empty or has ".."`)
 				continue
 			}
 			schemeMode := "N"
@@ -160,12 +194,21 @@ var subdomainContentCheckers = map[string]func(bool, interface{}, bool, ...strin
 				schemeMode = "S"
 				strVal = strVal[8:]
 			}
-			if schemeMode != "N" && (strVal == "" || strVal[0] == '/' || strVal[0] == '?') { // "https://" alone would redirect anywhere
+			if schemeMode != "N" && (strVal == "" || strings.IndexByte(redirectHostStarters, strVal[0]) != -1) { // "https://" alone, or with "/" or "\" after it, would redirect anywhere
 				if printErrors {
 					return false, "The target needs a host"
 				}
 				if isFromFile {
 					slog.Warn("Rewrite discarded: the target has no host", "site", siteKeys[0], "subdomain", siteKeys[1], "source", targetURI)
+				}
+				continue
+			}
+			if problem := textTargetProblem(schemeMode + strVal); problem != "" { // As an expression's, and before unknownPlaceholder: {TURBO_CURRENT_DIR} is no keyword of a rewrite
+				if printErrors {
+					return false, problem
+				}
+				if isFromFile {
+					slog.Warn("Rewrite discarded: "+problem, "site", siteKeys[0], "subdomain", siteKeys[1], "source", targetURI)
 				}
 				continue
 			}
@@ -182,6 +225,7 @@ var subdomainContentCheckers = map[string]func(bool, interface{}, bool, ...strin
 				if printErrors {
 					return false, "Invalid rewrite"
 				}
+				discardedFromFile(isFromFile, "rewrite", joinedSite(siteKeys[1], siteKeys[0]), targetURI, `the target has "//"`)
 				continue
 			}
 			if schemeMode == "N" && strVal[0] != '/' {
@@ -197,7 +241,11 @@ var subdomainContentCheckers = map[string]func(bool, interface{}, bool, ...strin
 				if printErrors {
 					return false, "Rewrite too long"
 				}
+				discardedFromFile(isFromFile, "rewrite", joinedSite(siteKeys[1], siteKeys[0]), targetURI, "the target is longer than 512 bytes")
 				continue
+			}
+			if labelsBeforeOneLabel(schemeMode + strVal) {
+				slog.Warn("Rewrite whose host is {SUBDOMAIN} and one label: under a wildcard subdomain, the visitor chooses the whole domain of the redirection. Write the rest of the host as a domain of the site", "site", joinedSite(siteKeys[1], siteKeys[0]), "source", targetURI)
 			}
 			// Compared as it is kept: decoded, and with its scheme in a letter. It was compared as written, so the
 			// same target answered "Rewrite changed", and a target without its scheme "Rewrite unchanged".
@@ -254,6 +302,7 @@ var subdomainContentCheckers = map[string]func(bool, interface{}, bool, ...strin
 				if printErrors {
 					return false, "Invalid MIME value"
 				}
+				discardedFromFile(isFromFile, "MIME type", siteKeys[1], writtenExt, "the type is not a text")
 				continue
 			}
 
@@ -277,12 +326,14 @@ var subdomainContentCheckers = map[string]func(bool, interface{}, bool, ...strin
 				if printErrors {
 					return false, "Extension too long"
 				}
+				discardedFromFile(isFromFile, "MIME type", siteKeys[1], writtenExt, "the extension is longer than 12 bytes")
 				continue
 			}
 			if extLen > 0 && !extChars(ext) {
 				if printErrors {
 					return false, "Invalid extension"
 				}
+				discardedFromFile(isFromFile, "MIME type", siteKeys[1], writtenExt, `the extension is what follows the last dot of a name, with letters, digits and "-"`)
 				continue
 			}
 			if extLen > 0 && ext[0] == '.' {
@@ -292,6 +343,7 @@ var subdomainContentCheckers = map[string]func(bool, interface{}, bool, ...strin
 				if printErrors {
 					return false, "MIME too long or too short"
 				}
+				discardedFromFile(isFromFile, "MIME type", siteKeys[1], writtenExt, "the type has less than 4 bytes or more than 128")
 				continue
 			}
 			_, _, parseErr := mime.ParseMediaType(mimeType)
@@ -299,6 +351,7 @@ var subdomainContentCheckers = map[string]func(bool, interface{}, bool, ...strin
 				if printErrors {
 					return false, "Invalid MIME"
 				}
+				discardedFromFile(isFromFile, "MIME type", siteKeys[1], writtenExt, "the type isn't a media type: "+parseErr.Error())
 				continue
 			}
 			mimeTypes[siteKeys[1]][ext] = mimeType
@@ -345,6 +398,7 @@ var subdomainContentCheckers = map[string]func(bool, interface{}, bool, ...strin
 				if printErrors {
 					return false, "Invalid header value"
 				}
+				discardedFromFile(isFromFile, "header", siteKeys[1], header, "the value is not a text")
 				continue
 			}
 
@@ -352,6 +406,7 @@ var subdomainContentCheckers = map[string]func(bool, interface{}, bool, ...strin
 			if !isFromFile {
 				value = replaceURIChars(value)
 			}
+			value = normalizedExpression(value)
 			if _, exists := customHeaders[siteKeys[1]][header]; exists {
 				existed = true
 				if customHeaders[siteKeys[1]][header] == value {
@@ -367,18 +422,34 @@ var subdomainContentCheckers = map[string]func(bool, interface{}, bool, ...strin
 				if printErrors {
 					return false, "Invalid header"
 				}
+				discardedFromFile(isFromFile, "header", siteKeys[1], header, "the name has characters a header can't have")
 				continue
 			}
 			if nameLen := len(header); nameLen < 1 || nameLen > maxHeaderKeyLength {
 				if printErrors {
 					return false, "Header too long or too short"
 				}
+				discardedFromFile(isFromFile, "header", siteKeys[1], header, "the name is empty or too long")
 				continue
 			}
-			if valueLen := len(value); valueLen < 1 || valueLen > maxHeaderValueLength {
+			if source, isExpression := expressionSource(value); isExpression {
+				// An expression is compiled now: what it gives is checked for each request. One of turbo.config that
+				// doesn't compile is kept as it is, and what the site serves answers 500 until it is fixed: dropped, the
+				// site would go out without a header that may be what keeps its pages safe.
+				if _, err := compileExpression(expr.HeaderValue, header, source); err != nil {
+					if printErrors {
+						return false, err.Error()
+					}
+					if !isFromFile {
+						continue
+					}
+					slog.Warn("turbo.config header whose expression doesn't compile: what the site serves answers 500. A value that starts with = is an expression: a text that starts with it is written as one, between quotes", "site", siteKeys[1], "header", header, "reason", err.Error())
+				}
+			} else if valueLen := len(value); valueLen < 1 || valueLen > maxHeaderValueLength {
 				if printErrors {
 					return false, "Content too long or too short"
 				}
+				discardedFromFile(isFromFile, "header", siteKeys[1], header, "the value is empty or longer than "+strconv.Itoa(maxHeaderValueLength)+" bytes")
 				continue
 			}
 			if reservedResponseHeaders[customNetHttp.CanonicalHeaderKey(header)] {
@@ -431,6 +502,7 @@ var subdomainContentCheckers = map[string]func(bool, interface{}, bool, ...strin
 			return false, "No preprocessors defined"
 		}
 
+		defer closeIntendedExtensions(siteKeys[1]) // Once every entry is read: one that can be used wins, in any order
 		for _, writtenExt := range sortedKeys(entries) {
 			rawValue := entries[writtenExt]
 			ext := strings.ToLower(writtenExt) // Looked up in lower case (ext): ".PHP" is also preprocessed
@@ -439,14 +511,25 @@ var subdomainContentCheckers = map[string]func(bool, interface{}, bool, ...strin
 				slog.Warn("Preprocessor repeated in turbo.config (in upper or lower case): the first one is kept", "site", site, "extension", writtenExt)
 				continue
 			}
-			// From turbo.config, an entry that can't be used is kept and its extension answers 500: never the
-			// source of the files it should run, and saving doesn't lose it.
+			// From turbo.config, an entry that can't be used is kept, so that saving doesn't lose it, and the extension
+			// it was meant for answers 500: never the source of the files it should run. Kept under its own key, an
+			// entry such as "php " or "blade.php" matched no file, and the files of php were served as text.
 			keepFailing := func(value string, reason string) {
 				if value == "" { // An empty value would mean no preprocessor
 					value = invalidPreprocessorMark
 				}
-				slog.Warn("turbo.config preprocessor that can't be used: the extension will answer 500", "site", site, "extension", ext, "reason", reason)
-				preprocessors[site][strings.TrimPrefix(ext, ".")] = value
+				key := failingPreprocessorKey(ext)
+				preprocessors[site][key] = value
+				closed, closes := key, true // The extension whose files answer 500: its own, if its key is one
+				if !preprocessorKeyIsExtension(key) {
+					closed = intendedExtension(key)
+					closes = closed != ""
+				}
+				if !closes {
+					slog.Warn("turbo.config preprocessor that can't be used, and whose key is no extension: it matches no file", "site", site, "entry", writtenExt, "reason", reason)
+					return
+				}
+				slog.Warn("turbo.config preprocessor that can't be used: the files of its extension answer 500 until it is fixed", "site", site, "entry", writtenExt, "extension", closed, "reason", reason)
 			}
 			value, isString := rawValue.(string) // From the panel, as sent: no character replacements (literalActions)
 			if !isString {
@@ -468,18 +551,13 @@ var subdomainContentCheckers = map[string]func(bool, interface{}, bool, ...strin
 				if printErrors {
 					return false, reason
 				}
-				if dotInside && extLen <= 12 { // Kept, so that saving doesn't lose it, though it matches no file: nothing answers 500 for it
-					slog.Warn("turbo.config preprocessor whose extension has a dot inside: it runs nothing, as the extension of a name is what follows its last dot", "site", site, "extension", ext)
-					preprocessors[site][strings.TrimPrefix(ext, ".")] = invalidPreprocessorMark + value
-					continue
-				}
 				keepFailing(invalidPreprocessorMark+value, reason)
 				continue
 			}
 			ext = strings.TrimPrefix(ext, ".")
 
 			var existed bool
-			if current, exists := preprocessors[site][ext]; exists {
+			if current, exists := preprocessors[site][ext]; exists && current != closedExtensionMark { // Closed by another entry: this one opens it
 				existed = true
 				if current == value {
 					if printErrors {
@@ -554,6 +632,7 @@ var subdomainContentCheckers = map[string]func(bool, interface{}, bool, ...strin
 				if printErrors {
 					return false, "Index file too long or too short"
 				}
+				discardedFromFile(isFromFile, "index", siteKeys[1], name, "the name is empty or longer than 48 bytes")
 				continue
 			}
 			// The rules of the request paths, with those of Windows on every system: there, "index.php." or
@@ -597,6 +676,7 @@ var subdomainContentCheckers = map[string]func(bool, interface{}, bool, ...strin
 				if printErrors {
 					return false, "Wildcards not allowed"
 				}
+				discardedFromFile(isFromFile, "alias", siteKeys[1], alias, "an alias is a host, without wildcards")
 				continue
 			}
 			validHost, hostMsg := hostOk(alias, false)
@@ -604,6 +684,14 @@ var subdomainContentCheckers = map[string]func(bool, interface{}, bool, ...strin
 				if printErrors {
 					return false, hostMsg
 				}
+				discardedFromFile(isFromFile, "alias", siteKeys[1], alias, "it isn't a host name in lower case ("+hostMsg+")")
+				continue
+			}
+			if siteNamedAsIP(alias) { // Only the site * serves an IP address (host), and then the alias is its host
+				if printErrors {
+					return false, "Only the site * serves an IP address: an alias " + alias + " would never be reached"
+				}
+				discardedFromFile(isFromFile, "alias", siteKeys[1], alias, "only the site * serves an IP address")
 				continue
 			}
 			if served, _, _, _ := hostExist(alias); served { // The alias would hide the site (aliases go first)
@@ -773,12 +861,15 @@ var subdomainContentDeleters = map[string]func(bool, interface{}, ...string) (bo
 			return false, "No preprocessors defined"
 		}
 
+		// What an entry of turbo.config that can't be used closed opens again when that entry is deleted: the mark stayed,
+		// and the files of the extension answered 500 for an entry that was nowhere, until Turbo started again.
+		defer closeIntendedExtensions(siteKeys[1])
 		for ext := range entries {
 			ext = strings.ToLower(ext)
-			if len(ext) > 0 && ext[0] == '.' {
-				ext = ext[1:]
+			if _, asKept := preprocessors[siteKeys[1]][ext]; !asKept { // An entry that can't be used may be kept with its dot (".")
+				ext = strings.TrimPrefix(ext, ".")
 			}
-			if _, exists := preprocessors[siteKeys[1]][ext]; !exists {
+			if value, exists := preprocessors[siteKeys[1]][ext]; !exists || value == closedExtensionMark { // Closed by another entry: that one is deleted
 				if printErrors {
 					return false, "Preprocessor not found"
 				}
@@ -903,30 +994,113 @@ func headerSetCaseInsensitive(headers map[string]string, name string) bool {
 	return false
 }
 
+// discardedFromFile logs an entry of turbo.config (or of a site kept without its folder, which comes back) that is
+// dropped because it can't be used: never without a word, as a rewrite that kept a folder private, or a header that
+// kept a site's pages safe, was. From the panel (isFromFile false), the action answers the reason instead.
+func discardedFromFile(isFromFile bool, list string, site string, entry string, reason string) {
+	if !isFromFile {
+		return
+	}
+	if len(entry) > 128 {
+		entry = entry[:128] + "…"
+	}
+	slog.Warn("turbo.config entry discarded: "+reason, "list", list, "site", site, "entry", entry)
+}
+
 // invalidPreprocessorMark starts the value of a preprocessor of turbo.config whose extension or type is wrong: no
 // value written can have a NUL, so it only marks it (the rest is the value as written, kept for saving).
 const invalidPreprocessorMark = "\x00"
 
-// preprocessorCommand returns the executable a preprocessor value runs ("[<protocol>>]<path>", as written in
-// turbo.config or addPreprocessor, with {TURBO_CURRENT_DIR} replaced), or why it can't run. The limit of 128
-// characters is for the path as written, without the protocol.
-func preprocessorCommand(value string) (executable string, problem string) {
-	if strings.HasPrefix(value, invalidPreprocessorMark) {
-		return "", "invalid turbo.config entry"
+// closedExtensionMark is the value of the extension that an entry of turbo.config that can't be used was meant for,
+// when no entry of that extension can be used: its files answer 500. It isn't written: it comes from that entry, which
+// is, each time the site is read (createSubdomainData leaves it out).
+const closedExtensionMark = invalidPreprocessorMark + invalidPreprocessorMark
+
+// intendedExtension is the extension that the key of a preprocessor of turbo.config that can't be used was meant for:
+// what follows its last dot, in lower case, once what isn't a letter or a digit is taken from its ends ("php ", "php.",
+// "php,", "*.PHP", "blade.php" and a php with an invisible character after it are php), or "" if that is no extension
+// either (a space or a letter outside ASCII inside it).
+func intendedExtension(written string) string {
+	edges := func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }
+	ext := strings.TrimFunc(strings.ToLower(written), edges)
+	if dot := strings.LastIndexByte(ext, '.'); dot != -1 {
+		ext = strings.TrimFunc(ext[dot+1:], edges)
 	}
-	protocol, path, hasProtocol := strings.Cut(value, ">")
-	if !hasProtocol {
-		protocol, path = "cgi", value
+	if len(ext) > 12 || !extChars(ext) {
+		return ""
+	}
+	return ext
+}
+
+// preprocessorKeyIsExtension reports whether the key of a preprocessor, as it is kept, is an extension that files
+// have: the empty one, of the files without an extension, among them.
+func preprocessorKeyIsExtension(key string) bool {
+	return key == "" || len(key) <= 12 && key[0] != '.' && extChars(key)
+}
+
+// failingPreprocessorKey is the key under which an entry of turbo.config that can't be used is kept, from its key as
+// written in lower case: without its first dot, as the extensions are kept, unless nothing else is left ("." alone
+// isn't the empty extension: kept as such, it closed the files without an extension, and was saved as "", which the
+// next start took for a preprocessor of all of them).
+func failingPreprocessorKey(ext string) string {
+	if key := strings.TrimPrefix(ext, "."); key != "" || ext == "" {
+		return key
+	}
+	return ext
+}
+
+// closeIntendedExtensions marks, among the preprocessors of site, the extensions that its entries that can't be used
+// were meant for (intendedExtension), when their keys are no extension and no other entry has that extension, and takes
+// the mark from those that no entry closes any more. Callers hold the global lock.
+func closeIntendedExtensions(site string) {
+	entries := preprocessors[site]
+	closing := map[string]bool{}
+	for key, value := range entries {
+		if value == closedExtensionMark {
+			delete(entries, key)
+		} else if !preprocessorKeyIsExtension(key) {
+			if intended := intendedExtension(key); intended != "" {
+				closing[intended] = true
+			}
+		}
+	}
+	for intended := range closing {
+		if _, kept := entries[intended]; !kept {
+			entries[intended] = closedExtensionMark
+		}
+	}
+}
+
+// preprocessorCommand returns the executable a preprocessor value runs ("[<mode>>]<path>", as written in
+// turbo.config or addPreprocessor, with {TURBO_CURRENT_DIR} replaced), or why it can't run. The limit of 128
+// characters is for the path as written, without the mode.
+func preprocessorCommand(value string) (executable string, problem string) {
+	_, executable, problem = preprocessorParts(value)
+	return executable, problem
+}
+
+// preprocessorParts returns the mode a preprocessor value runs its scripts with ("cgi" without one, in any case), and
+// its executable, as preprocessorCommand; or why it can't run, a mode this binary doesn't have among the reasons.
+func preprocessorParts(value string) (mode preprocessorMode, executable string, problem string) {
+	if value == closedExtensionMark {
+		return nil, "", "an entry of turbo.config meant for this extension can't be used"
+	}
+	if strings.HasPrefix(value, invalidPreprocessorMark) {
+		return nil, "", "invalid turbo.config entry"
+	}
+	name, path, hasMode := strings.Cut(value, ">")
+	if !hasMode {
+		name, path = "cgi", value
 	}
 	if pathLen := len(path); pathLen < 1 || pathLen > 128 {
-		return "", "Preprocessor path too long or too short"
+		return nil, "", "Preprocessor path too long or too short"
 	}
-	if strings.ToLower(protocol) != "cgi" { // "dx>" isn't implemented
-		return "", "Invalid preprocessor protocol."
+	if mode = preprocessorModes[strings.ToLower(name)]; mode == nil {
+		return nil, "", "Invalid preprocessor protocol."
 	}
 	placeholder := "{" + currentDirPlaceholder + "}"
 	if !strings.Contains(path, placeholder) {
-		return path, "" // Most values: the working directory isn't asked for on each request to a CGI
+		return mode, path, "" // Most values: the working directory isn't asked for on each request to a CGI
 	}
-	return strings.Replace(path, placeholder, currentDir(), 1), ""
+	return mode, strings.Replace(path, placeholder, currentDir(), 1), ""
 }

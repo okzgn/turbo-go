@@ -48,7 +48,7 @@ var defaultSettingsResetFallbacks = map[string]map[string]func(){ // Default set
 		"CIS": func() { serverRequestLimits.CIS.Store(1000 * int64(time.Millisecond)) },
 		"CII": func() { serverRequestLimits.CII.Store(100) },
 		"CGL": func() { globalRequestLimit.Store(0) },
-		"CGP": func() { cgiProcesses.Store(0) },
+		"CGP": func() { cgiProcesses.Store(0); cgiSlotsLimitChanged() },
 		"RT":  func() { setTimeLimits(func(limits *customNetHttp.Timeouts) { limits.RT = 5 * time.Second }) },
 		"RHT": func() { setTimeLimits(func(limits *customNetHttp.Timeouts) { limits.RHT = 1 * time.Second }) },
 		"WT":  func() { setTimeLimits(func(limits *customNetHttp.Timeouts) { limits.WT = 10 * time.Second }) },
@@ -372,6 +372,7 @@ var defaultSettingValidators = map[string]map[string]func(...string) (bool, stri
 				return false, "Must be 0 (automatic) or from 1 to 100000"
 			}
 			cgiProcesses.Store(value)
+			cgiSlotsLimitChanged()
 			if value == 0 {
 				return true, "Concurrent CGI processes: automatic (" + strconv.FormatInt(cgiProcessLimit(), 10) + " on this machine)"
 			}

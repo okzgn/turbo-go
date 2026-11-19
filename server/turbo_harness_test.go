@@ -47,12 +47,12 @@ func TestMain(m *testing.M) {
 	}
 	toolsDir, _ = filepath.Abs(toolsDir)
 	os.Setenv("TOOLS_BIN", toolsDir)
-	for _, tool := range []string{"cgiecho", "certbot"} {
+	for _, tool := range []string{"cgiecho", "certbot", "dxecho"} {
 		out := filepath.Join(toolsDir, tool)
 		if runtime.GOOS == "windows" {
 			out += ".exe"
 		}
-		cmd := exec.Command("go", "build", "-o", out, programPackage+"/internal/testtools/"+map[string]string{"cgiecho": "cgiecho", "certbot": "fakecertbot"}[tool])
+		cmd := exec.Command("go", "build", "-o", out, programPackage+"/internal/testtools/"+map[string]string{"cgiecho": "cgiecho", "certbot": "fakecertbot", "dxecho": "dxecho"}[tool])
 		if b, err := cmd.CombinedOutput(); err != nil {
 			fmt.Fprintf(os.Stderr, "could not build %s: %v\n%s", tool, err, b)
 			os.Exit(1)
@@ -87,13 +87,16 @@ func resetTestState(dir string) {
 	// A certificate issuance from the previous test would write into the maps
 	// just created.
 	waitIdle()
+	stopPreprocessorModes(time.Second) // The workers of the previous test's programs end with it
 
 	serverSetLogState(visitsLogName, nil)
 	serverSetLogState(denialsLogName, nil)
 	errorLines.reopen() // Grouped again, as at the start, also after a test that ran the shutdown
+	scriptLines.reopen()
 
 	panelUser.Set("Turbo")
 	setPanelPassword("Admin")
+	panelCertEmail, panelCertAdapter = "", "" // Only a turbo.config read changes them otherwise (loadPanelCertSettings)
 	userFromEnv, passwordFromEnv = false, false
 	sitesDir.Set(dir)
 	sitesDirValue.Set(dir)
@@ -202,6 +205,8 @@ func notedTestHooks() []testHook {
 		hookOf("beforeFollowing", &beforeFollowing), hookOf("beforeMissingSitesDeleted", &beforeMissingSitesDeleted),
 		hookOf("beforeSessionRenewal", &beforeSessionRenewal), hookOf("beforeSitesScan", &beforeSitesScan),
 		hookOf("beforeUploadSwap", &beforeUploadSwap), hookOf("certificateFileRead", &certificateFileRead),
+		hookOf("afterUploadFolderMade", &afterUploadFolderMade), hookOf("uploadSessionRenewal", &uploadSessionRenewal),
+		hookOf("foldNormalizes", &foldNormalizes),
 		hookOf("certificatePairLoad", &certificatePairLoad), hookOf("createTempFile", &createTempFile),
 		hookOf("derivePasswordKey", &derivePasswordKey), hookOf("keptViewCheck", &keptViewCheck),
 		hookOf("monotonicNow", &monotonicNow), hookOf("renameFile", &renameFile), hookOf("siteDirMake", &siteDirMake),
@@ -213,6 +218,7 @@ func notedTestHooks() []testHook {
 		hookOf("http2WriteByteTimeout", &http2WriteByteTimeout), hookOf("httpsAddr", &httpsAddr),
 		hookOf("httpsRetryDelay", &httpsRetryDelay), hookOf("ipReferenceLimit", &ipReferenceLimit),
 		hookOf("passwordHashSlots", &passwordHashSlots), hookOf("shutdownGrace", &shutdownGrace),
+		hookOf("dxGreetingWait", &dxGreetingWait), hookOf("dxIdleAfter", &dxIdleAfter), hookOf("dxStartBackoffMin", &dxStartBackoffMin),
 	}
 }
 

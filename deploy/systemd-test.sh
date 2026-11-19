@@ -20,6 +20,11 @@
 # service (service.d), which would change what is tested. It needs curl,
 # openssl and ss. Ports 80 and 443 must be free.
 #
+# With DXECHO=<dxecho binary> (internal/testtools/dxecho, built for Linux), it
+# also installs it as a worker of the mode dx, owned by root outside /home, as
+# the unit says, and checks that the worker gets no capability and that
+# systemctl stop ends it.
+#
 # With CERTBOT_WRAPPER=<folder> and CERTBOT_DOMAIN=<domain>, it also requests
 # from the panel a certificate for that domain with the certbot executable of
 # that folder, which is copied whole (for example, a wrapper of the apt Certbot
@@ -53,6 +58,10 @@ uninstall() {
 	userdel turbo 2>/dev/null
 	rm -f /usr/local/bin/turbo
 	rm -rf /etc/turbo
+	if [ -n "${DX_INSTALLED:-}" ]; then # Made by this run: without DXECHO, a folder of that name is someone else's
+		rm -rf /opt/turbo-dx-test
+		check "folder of the worker" "$([ -e /opt/turbo-dx-test ] && echo exists || echo no)" "no"
+	fi
 	[ "$SITES" = /home/server ] && rm -rf /home/server
 	check "credentials" "$([ -e /etc/turbo ] && echo exists || echo no)" "no"
 	check "turbo user" "$(id turbo >/dev/null 2>&1 && echo exists || echo no)" "no"
@@ -70,6 +79,10 @@ trap uninstall EXIT
 for tool in curl openssl ss useradd systemctl journalctl; do
 	command -v "$tool" >/dev/null || { echo "Missing $tool" >&2; exit 2; }
 done
+if [ -n "${DXECHO:-}" ] && { [ ! -x "$DXECHO" ] || [ -e /opt/turbo-dx-test ]; }; then
+	echo "DXECHO is not an executable, or /opt/turbo-dx-test exists: it is not touched" >&2
+	exit 2
+fi
 if id turbo >/dev/null 2>&1 || [ -e /usr/local/bin/turbo ] || [ -e /home/server ] || [ -e /etc/turbo ] ||
 	[ "$(systemctl show -p LoadState --value turbo)" != not-found ]; then
 	echo "There is already a Turbo installation (turbo user, a turbo.service unit, /usr/local/bin/turbo, /home/server or /etc/turbo): it is not touched" >&2
@@ -119,7 +132,15 @@ fi
 echo "umask: $(umask)"
 CGI
 chmod 0755 /home/server/cgi/test.sh
-printf '{"^":{"v":"2"},"localhost":{"":{"?":{"test":"/home/server/cgi/test.sh","slow":"/home/server/cgi/slow.sh"},"-":{"index.html":"1"},"!":{"S":"1"}}}}' >/home/server/turbo.config
+DX_ENTRY=""
+if [ -n "${DXECHO:-}" ]; then
+	DX_INSTALLED=1
+	install -d -o root -g root -m 0755 /opt/turbo-dx-test
+	install -o root -g root -m 0755 "$DXECHO" /opt/turbo-dx-test/dxecho
+	echo "x" >/home/server/localhost/@/x.dx
+	DX_ENTRY=',"dx":"dx>/opt/turbo-dx-test/dxecho"'
+fi
+printf '{"^":{"v":"2"},"localhost":{"":{"?":{"test":"/home/server/cgi/test.sh","slow":"/home/server/cgi/slow.sh"%s},"-":{"index.html":"1"},"!":{"S":"1"}}}}' "$DX_ENTRY" >/home/server/turbo.config
 openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=localhost -addext subjectAltName=DNS:localhost \
 	-keyout /home/server/localhost/privkey.pem -out /home/server/localhost/fullchain.pem >/dev/null 2>&1
 if [ -n "${CERTBOT_WRAPPER:-}" ]; then
@@ -169,6 +190,20 @@ check "the CGI sees only /home/server in /home" "$(echo "$OUTPUT" | grep '^home:
 check "the CGI can't create a user namespace" "$(echo "$OUTPUT" | grep '^namespace:')" "namespace: refused.*"
 check "umask of the CGI" "$(echo "$OUTPUT" | grep '^umask:')" "umask: 0027"
 
+WORKER_PID=""
+if [ -n "${DXECHO:-}" ]; then
+	echo "== Worker of the mode dx"
+	WORKER_PID="$(curl -sk 'https://localhost/x.dx?pid=1' | sed -n 's/^PID=//p')"
+	check "the worker answers" "${WORKER_PID:-none}" "[0-9]+"
+	if [ -n "$WORKER_PID" ]; then
+		check "user of the worker" "$(ps -o user= -p "$WORKER_PID" | tr -d ' ')" "turbo"
+		for cap in CapInh CapPrm CapEff CapAmb; do
+			check "$cap of the worker" "$(awk -v c="$cap:" '$1 == c {print $2}' /proc/"$WORKER_PID"/status)" "0000000000000000"
+		done
+		check "the same worker for the next request" "$(curl -sk 'https://localhost/x.dx?pid=1' | sed -n 's/^PID=//p')" "$WORKER_PID"
+	fi
+fi
+
 if [ -n "${CERTBOT_WRAPPER:-}" ]; then
 	echo "== Certbot with NoNewPrivileges ($CERTBOT_DOMAIN)"
 	# localhost has a certificate: the panel is used over HTTPS, with the credentials of /etc/turbo/credentials.
@@ -197,6 +232,11 @@ check "exposure level at most 3.0" "$(awk -v e="${EXPOSURE:-99}" 'BEGIN { print 
 
 echo "== Restart after a crash"
 kill -9 "$PID"
+if [ -n "$WORKER_PID" ]; then # Its group goes with the cgroup of the unit when systemd restarts it
+	for _ in $(seq 50); do kill -0 "$WORKER_PID" 2>/dev/null || break; sleep 0.1; done
+	check "the worker after the crash of Turbo" "$(kill -0 "$WORKER_PID" 2>/dev/null && echo running || echo ended)" "ended"
+	WORKER_PID=""
+fi
 sleep 7 # RestartSec=5
 NEW_PID="$(systemctl show -p MainPID --value turbo)"
 check "state" "$(systemctl is-active turbo)" "active"
@@ -205,6 +245,11 @@ for _ in $(seq 50); do curl -sk -o /dev/null https://localhost/ && break; sleep 
 check "answers" "$(curl -sk https://localhost/)" "hello-systemd"
 
 echo "== Stop"
+STOP_WORKER=""
+if [ -n "${DXECHO:-}" ]; then # A worker of the Turbo that runs now, for the stop to end: it starts with its first request
+	STOP_WORKER="$(curl -sk 'https://localhost/x.dx?pid=1' | sed -n 's/^PID=//p')"
+	check "a worker before the stop" "${STOP_WORKER:-none}" "[0-9]+"
+fi
 # With a CGI in progress (it takes 3 s): systemd sends SIGTERM only to Turbo (KillMode=mixed), which lets it end.
 SLOW_OUT="$(mktemp)"
 curl -sk https://localhost/x.slow >"$SLOW_OUT" &
@@ -218,6 +263,12 @@ check "the CGI in progress at the stop answers whole" "$(cat "$SLOW_OUT")" "slow
 rm -f "$SLOW_OUT"
 check "exit code" "$(systemctl show -p ExecMainStatus --value turbo)" "0"
 check "state" "$(systemctl is-active turbo)" "inactive"
+if [ -n "$STOP_WORKER" ]; then
+	check "the worker after systemctl stop" "$(kill -0 "$STOP_WORKER" 2>/dev/null && echo running || echo ended)" "ended"
+fi
+if [ -n "${DXECHO:-}" ]; then
+	check "workers after systemctl stop" "$(pgrep -f /opt/turbo-dx-test/dxecho >/dev/null && echo running || echo none)" "none"
+fi
 
 trap - EXIT
 uninstall

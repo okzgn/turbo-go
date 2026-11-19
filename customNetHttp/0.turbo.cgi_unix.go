@@ -84,6 +84,21 @@ func (g *turboCGIGroup) wait(cmd *exec.Cmd) {
 	turboCGIWaitExit(cmd)
 }
 
+// exited follows the end of the leader of a group kept running (TurboProcess),
+// once wait has seen it. Where wait reaped it (outside Linux), its ID may soon be
+// another process's group: what it left is killed now, and the group never
+// again. A kill long after, when a worker that ended while it waited is found,
+// could reach that other group.
+func (g *turboCGIGroup) exited() {
+	if turboCGIKeepsLeader {
+		return
+	}
+	g.kill()
+	g.mutex.Lock()
+	g.reaped = true
+	g.mutex.Unlock()
+}
+
 // release ends the group's watch: on Linux, it reaps the leader, which
 // turboCGIWaitExit left as a zombie, and from then on the group is never
 // killed again.

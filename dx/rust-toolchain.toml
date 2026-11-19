@@ -1,0 +1,7 @@
+# The Rust that dx/ is built and checked with in the continuous integration (format, clippy, tests): a new lint of
+# another Rust doesn't make it fail without a change of the code. Moved by hand: change the version, run the checks of
+# dx/README.md, and commit. The crates still build with Rust 1.88 (rust-version in Cargo.toml; the job dx-msrv).
+[toolchain]
+channel = "1.98.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

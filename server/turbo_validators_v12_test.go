@@ -47,7 +47,7 @@ func TestR6_V12a_EmptyEmailStopsTheRenewal(t *testing.T) {
 	if before == 0 {
 		t.Fatal("the certificate wasn't renewed with the e-mail: the test proves nothing")
 	}
-	if code, body := send("/admin:inside:cfgE?s=localhost&d=&a="); code != 200 || body != "E-mail removed" {
+	if code, body := send("/admin:inside:cfgE?s=localhost&d=&a=&b=Admin"); code != 200 || body != "E-mail removed" { // It needs the current password (v2.5 review S-9)
 		t.Errorf("cfgE with an empty value: %d %q; expected 200 \"E-mail removed\"", code, body)
 	}
 	globalMutex.RLock()

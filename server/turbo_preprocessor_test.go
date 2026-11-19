@@ -66,7 +66,7 @@ func TestN07_PreprocessorPathMeasuredAsWritten(t *testing.T) {
 func TestN07_InvalidPreprocessorAnswers500(t *testing.T) {
 	dir := initForTest(t)
 	logs := captureLog(t)
-	cases := map[string]string{"num": `5`, "empty": `""`, "dx": `"dx>/bin/x"`, "abcdefghijklm": `"` + filepath.ToSlash(toolPath("cgiecho")) + `"`, "long": `"` + strings.Repeat("r", 129) + `"`}
+	cases := map[string]string{"num": `5`, "empty": `""`, "dx": `"xx>/bin/x"`, "abcdefghijklm": `"` + filepath.ToSlash(toolPath("cgiecho")) + `"`, "long": `"` + strings.Repeat("r", 129) + `"`}
 	var entries []string
 	for ext, value := range cases {
 		os.WriteFile(dir+"localhost/@/x."+ext, []byte("source-"+ext), 0644)
@@ -132,11 +132,15 @@ func TestR6_V10_ExtensionWithADotInside(t *testing.T) {
 	if code, body, _ := post(base, "/admin:inside:addMIME?"+url.Values{"s": {"localhost"}, "d": {""}, "a": {"tar.gz"}, "b": {"application/gzip"}, "c": {"Admin"}}.Encode(), tok); code != 400 {
 		t.Errorf("addMIME tar.gz: %d %q; expected 400", code, body)
 	}
-	// From turbo.config it is kept, with a warning that says what it does: nothing
+	// From turbo.config it is kept, with a warning, and the extension it was meant for answers 500 (v2.5 review E-2):
+	// the files of php were served as text
 	logs := captureLog(t)
 	loadConfig(t, dir, `{"localhost":{"":{"-":{"index.html":"1"},"?":{"blade.php":"`+toolPath("cgiecho")+`"}}}}`)
-	if !strings.Contains(logs.String(), "has a dot inside") {
+	if !strings.Contains(logs.String(), "the files of its extension answer 500") || !strings.Contains(logs.String(), "extension=php") {
 		t.Errorf("no warning for the extension of turbo.config:\n%s", logs.String())
+	}
+	if code, body, _ := get(base, "/view.blade.php", nil); code != 500 || strings.Contains(body, "SOURCE") {
+		t.Errorf("a file of php with blade.php in turbo.config: %d %q; expected 500", code, body)
 	}
 	if !strings.Contains(createDefaultConfig(true, false, true), "blade.php") {
 		t.Error("saving loses the entry of turbo.config")

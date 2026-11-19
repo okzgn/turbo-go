@@ -35,7 +35,7 @@ jobs:
             echo "go.dev/dl lists no stable release of $series"; exit 1
           fi
           if [ "$latest" -gt "${pinned##*.}" ]; then
-            echo "$series.$latest is out and customNetHttp is $pinned: regenerate it (customNetHttp/PATCHES.md, \"Updating Go\")"; exit 1
+            echo "$series.$latest is out and customNetHttp is $pinned: regenerate it (customNetHttp/PATCHES.md, \"Updating to another Go version\")"; exit 1
           fi
           echo "customNetHttp is $pinned, the latest $series release"
       - name: The series of UPSTREAM still gets fixes
@@ -55,7 +55,50 @@ jobs:
           if series(pinned) not in supported:
               sys.exit('%s is of a series that Go no longer fixes (it fixes %s): move customNetHttp to one of them (customNetHttp/PATCHES.md, "Updating to another Go version")' % (pinned, names))
           print("%s is of a series that Go still fixes (%s)" % (pinned, names))
+          if series(pinned) == supported[0]:
+              # Fixed until the next series comes out: a warning ahead, as moving the fork takes time
+              print('::warning::%s is of the older series that Go fixes: it gets no fixes once the next one is out. Plan the move of customNetHttp to go%d.%d (customNetHttp/PATCHES.md, "Updating to another Go version")' % (pinned, *supported[1]))
           EOF
+
+  rust:
+    # The workers of the mode dx (dx/Cargo.lock): advisories of RustSec for the crates they use, which a week without
+    # pushes wouldn't see, and newer versions of mlua and of LuaJIT (luajit-src), whose fixes come by updating them.
+    name: Advisories and updates of the crates of dx/
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: The Rust of dx/rust-toolchain.toml
+        working-directory: dx
+        run: |
+          channel="$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$channel" --profile minimal
+      - name: cargo deny check advisories
+        working-directory: dx
+        # The version of cargo-deny that the advisories were last checked with by hand; a newer one, when it is needed
+        # to read the database, is put here.
+        run: |
+          cargo install cargo-deny --locked --version 0.20.2
+          cargo deny check advisories
+      - name: Newer mlua and luajit-src
+        working-directory: dx
+        shell: bash # With pipefail: a cargo that fails isn't hidden by the tee after it
+        run: |
+          cargo update --dry-run --verbose 2>&1 | tee update.txt
+          if grep -E 'Updating (mlua|mlua-sys|luajit-src) ' update.txt; then
+            echo "::warning::Newer versions of mlua or LuaJIT for dx/: update dx/Cargo.lock (cargo update) and run its tests"
+          fi
+          for crate in mlua luajit-src; do
+            locked="$(cargo pkgid "$crate" | sed 's/.*[@#]//')"
+            latest="$(cargo search "$crate" --limit 1 | sed -n 's/^'"$crate"' = "\([^"]*\)".*/\1/p')"
+            echo "$crate: $locked in Cargo.lock, $latest the latest"
+            if [ -n "$latest" ] && [ "$latest" != "$locked" ]; then
+              echo "::warning::$crate $latest is out, and dx/Cargo.lock has $locked"
+            fi
+          done
 
   govulncheck:
     name: Vulnerabilities of the code as it is

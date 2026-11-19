@@ -31,6 +31,7 @@ func TestN33_RewritePlaceholderEncoding(t *testing.T) {
 		{"N/app.cgi?q={FIRST_QUERY}", "/", "/x?a=1&b=2", "N/app.cgi?q=a%3D1%26b%3D2"},
 		{"Sexample.test/x/{FILE}?f={FILE}", "/", "/a?b.txt", "Sexample.test/x/a?f=a"},
 		{"S{SITE}/{FILE}", "/", "/a%3Fb", "Sfoo.example.com/a%3Fb"},
+		// Refused when added and when answering (textTargetProblem): placed all the same, it can't change the URL
 		{"S{FILE}/x", "/", "/evil.test%40x%3Fy", "Sevil.test%40x%3Fy/x"},
 	} {
 		req := &customNetHttp.Request{RequestURI: c.uri, Header: customNetHttp.Header{}}
@@ -133,7 +134,7 @@ func FuzzRewriteTarget(f *testing.F) {
 			}
 		case 'H', 'S':
 			recorder := &responseRecorder{}
-			rewriteRedirect(template[0] == 'S', targetPath[1:], strings.TrimPrefix(got[len(targetPath):], "?"), recorder, req)
+			rewriteRedirect(template[0] == 'S', targetPath[1:], strings.TrimPrefix(got[len(targetPath):], "?"), "localhost", "/x", recorder, req)
 			if loc := recorder.Header().Get("Location"); strings.HasPrefix(loc, "https:///") || strings.HasPrefix(loc, "http:///") {
 				t.Fatalf("redirect to %q", loc)
 			}

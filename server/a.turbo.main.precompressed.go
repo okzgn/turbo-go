@@ -143,13 +143,11 @@ func (plan *servePlan) servePrecompressed(responseWriter customNetHttp.ResponseW
 		if encoding == "" {
 			break
 		}
-		variant, err := opened.root.Open(rootName(filePath) + precompressedSuffixes[encoding])
+		variant, info, err := openSiteFile(opened.root, rootName(filePath)+precompressedSuffixes[encoding]) // Never a FIFO
 		if err != nil {
 			continue
 		}
-		info, err := variant.Stat()
-		content, canSeek := variant.(io.ReadSeeker)
-		if err != nil || !canSeek || !info.Mode().IsRegular() || info.Size() == 0 {
+		if !info.Mode().IsRegular() || info.Size() == 0 {
 			variant.Close() // #nosec G104 -- read-only file
 			continue
 		}
@@ -162,7 +160,7 @@ func (plan *servePlan) servePrecompressed(responseWriter customNetHttp.ResponseW
 		}
 		header.Set("Content-Encoding", encoding)
 		header.Set("Etag", `"`+strconv.FormatInt(info.ModTime().UnixNano(), 36)+"-"+strconv.FormatInt(info.Size(), 36)+"-"+encoding+`"`)
-		customNetHttp.ServeContent(&variantResponse{ResponseWriter: responseWriter, length: info.Size()}, request, name, info.ModTime(), content)
+		customNetHttp.ServeContent(&variantResponse{ResponseWriter: responseWriter, length: info.Size()}, request, name, info.ModTime(), variant)
 		variant.Close() // #nosec G104 -- read-only file
 		return true
 	}

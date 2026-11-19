@@ -751,6 +751,8 @@ func createSubdomainData(domain string, subdomain string) string {
 			scheme = "http://"
 		case 'S':
 			scheme = "https://"
+		case 'X': // An expression, as it is written: after its mark
+			scheme = expressionMark
 		}
 		jsonBuilder.WriteString(delimiter + jsonString(routeKey) + ":" + jsonString(scheme+rewrites[routeKey][1:]))
 		delimiter = ","
@@ -771,6 +773,9 @@ func createSubdomainData(domain string, subdomain string) string {
 	jsonBuilder.WriteString("},\"?\":{")
 	delimiter = ""
 	for _, extension := range sortedKeys(preprocessors[siteKey]) {
+		if preprocessors[siteKey][extension] == closedExtensionMark { // It comes from another entry, which is written
+			continue
+		}
 		jsonBuilder.WriteString(delimiter + jsonString(extension) + ":" + jsonString(strings.TrimPrefix(preprocessors[siteKey][extension], invalidPreprocessorMark)))
 		delimiter = ","
 	}
@@ -936,29 +941,43 @@ func (e configSettingError) Error() string { return `"` + e.key + `" can't be us
 type configSiteError struct {
 	domain, where string
 	list          string   // The list written in the site, outside its sections ("?"…), if that is the problem
+	name          string   // Why the key isn't the name of a site or of a subdomain, if that is the problem
 	keys          []string // The keys that lead to what can't be used, from the site (configKeyOffset)
 }
 
 func (e configSiteError) Error() string {
+	if e.name != "" {
+		return e.where + ` can't be used: it isn't the name of a site (` + e.name + `). A site, or a subdomain, is named as its folder, with "*" where the folder has "#": in lower case, with letters, digits and "-" between dots, and without spaces nor a final dot`
+	}
 	if e.list != "" {
 		return e.where + ` can't be used: the lists of a site go inside its "" section, as in ` + jsonString(e.domain) + `: {"": {` + jsonString(e.list) + `: {…}}}, and those of a subdomain inside the subdomain's section`
 	}
 	return e.where + ` can't be used: a JSON object is expected (a site, and its lists "!", "=", "$", ".", "?", "-" and "&", are objects)`
 }
 
-// siteSectionsProblem checks that every site of turbo.config, each of its subdomains and each of their lists is a
-// JSON object, and that a site has no list outside its sections (configSiteError). No list name is a host, and
-// Turbo never writes one there: skipped, a site's preprocessors written in it by hand were lost without a word.
+// siteSectionsProblem checks that every site of turbo.config and each of its subdomains has the name of one, that they
+// and each of their lists are JSON objects, and that a site has no list outside its sections (configSiteError). No
+// list name is a host, and Turbo never writes one there: skipped, a site's preprocessors written in it by hand were
+// lost without a word. A key that isn't a site's name ("Example.com", "example.com.") was skipped without a word too,
+// and its folder came from the disk with the defaults: its scripts served as text.
 func siteSectionsProblem(raw map[string]map[string]interface{}) error {
 	for _, domain := range sortedKeys(raw) {
 		switch domain {
 		case "_", "@", "#", ".", "^": // Not sites
 			continue
 		}
+		if valid, reason := hostOk(domain, false); !valid {
+			return configSiteError{domain: domain, where: strconv.Quote(domain), name: reason, keys: []string{domain}}
+		}
 		for _, subdomain := range sortedKeys(raw[domain]) {
 			where := strconv.Quote(domain) + " > " + strconv.Quote(subdomain)
 			if _, isList := subdomainContentCheckers[subdomain]; isList {
 				return configSiteError{domain: domain, where: where, list: subdomain, keys: []string{domain, subdomain}}
+			}
+			if subdomain != "" { // As siteExistenceCheckers["/"] checks it: the wildcards of the domain stand for a label
+				if valid, reason := hostOk(subdomain+"."+changeWildcards(domain, "x"), false); !valid {
+					return configSiteError{domain: domain, where: where, name: reason, keys: []string{domain, subdomain}}
+				}
 			}
 			section, isMap := raw[domain][subdomain].(map[string]interface{})
 			if !isMap {
@@ -1032,22 +1051,28 @@ func plainPassword(value interface{}) (string, bool) {
 
 // dropControlChars removes from a turbo.config read from disk the keys and values with control characters or
 // invalid UTF-8, which the panel doesn't accept, logging where they were. Response templates ("#") may
-// have tabs and line breaks. The program of a site's preprocessor ("?") is kept, with those characters replaced by
-// U+FFFD: a path that doesn't exist makes its extension answer 500, while without the entry its files would be
-// served as text, their source included.
+// have tabs and line breaks, and so may the expressions of a site's headers (".") and rewrites ("="). The program of
+// a site's preprocessor ("?") is kept, with those characters replaced by U+FFFD: a path that doesn't exist makes its
+// extension answer 500, while without the entry its files would be served as text, their source included.
 func dropControlChars(raw map[string]map[string]interface{}) {
-	var walk func(values map[string]interface{}, where string, whitespace bool, depth int, preprocessors bool)
-	walk = func(values map[string]interface{}, where string, whitespace bool, depth int, preprocessors bool) {
+	var walk func(values map[string]interface{}, where string, whitespace bool, depth int, preprocessors bool, expressions bool)
+	walk = func(values map[string]interface{}, where string, whitespace bool, depth int, preprocessors bool, expressions bool) {
 		for key, value := range values {
 			text, isString := value.(string)
-			if textAllowed(key, false) && isString && preprocessors && !textAllowed(text, false) {
+			// An expression is kept whatever it has: one that doesn't compile answers 500 for what it covers, while without
+			// it the site would go out without a header that may be what keeps it safe
+			if _, isExpression := expressionSource(text); isString && expressions && isExpression && textAllowed(key, false) {
+				continue
+			}
+			if preprocessors && (!textAllowed(key, false) || isString && !textAllowed(text, false)) {
+				// The key too: dropped, an entry "php\t" left the files of php without a preprocessor. With U+FFFD in it, it
+				// is an entry that can't be used, which closes the extension it was meant for (intendedExtension).
 				slog.Warn("turbo.config preprocessor with control characters or invalid UTF-8: its extension answers 500 until it is fixed", "where", strconv.Quote(where+key))
-				values[key] = strings.Map(func(r rune) rune {
-					if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) {
-						return utf8.RuneError
-					}
-					return r
-				}, strings.ToValidUTF8(text, string(utf8.RuneError)))
+				delete(values, key)
+				if isString {
+					value = withoutControlChars(text)
+				}
+				values[withoutControlChars(key)] = value
 				continue
 			}
 			if !textAllowed(key, false) || (isString && !textAllowed(text, whitespace)) {
@@ -1056,7 +1081,7 @@ func dropControlChars(raw map[string]map[string]interface{}) {
 				continue
 			}
 			if nested, isMap := value.(map[string]interface{}); isMap {
-				walk(nested, where+key+" > ", whitespace, depth+1, preprocessors || (depth == 2 && key == "?"))
+				walk(nested, where+key+" > ", whitespace, depth+1, preprocessors || (depth == 2 && key == "?"), expressions || (depth == 2 && (key == "." || key == "=")))
 			}
 		}
 	}
@@ -1071,8 +1096,18 @@ func dropControlChars(raw map[string]map[string]interface{}) {
 		case "_", "@", "#", ".", "^": // Not sites: no preprocessors in them
 			depth = 0
 		}
-		walk(values, section+" > ", section == "#", depth, false)
+		walk(values, section+" > ", section == "#", depth, false, false)
 	}
+}
+
+// withoutControlChars is text with U+FFFD in the place of each control character, and of what isn't UTF-8.
+func withoutControlChars(text string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) {
+			return utf8.RuneError
+		}
+		return r
+	}, strings.ToValidUTF8(text, string(utf8.RuneError)))
 }
 
 // describeConfigError explains where a turbo.config is wrong, so that it can be fixed by hand: the path, the

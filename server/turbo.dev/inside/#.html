@@ -162,7 +162,22 @@ article.modal-wide div {
 }
 article div > * { margin-top: 1rem; }
 article p, article button { color: #fff; }
-article input, article button { padding: 0.5rem 1rem; }
+article input, article button, article select, article textarea { padding: 0.5rem 1rem; }
+article textarea {
+	font-family: monospace;
+	min-height: 8rem;
+	resize: vertical;
+}
+article [data-dialog-help] { color: #fff; }
+article [data-dialog-problem] {
+	color: #fff;
+	background: #c00;
+	padding: 0.5rem 1rem;
+}
+i[data-expression]::before {
+	content: '= ';
+	font-weight: bold;
+}
 article button { cursor: pointer; }
 article button:hover, article button:active, article button:focus {
 	background: #000 !important;
@@ -259,6 +274,7 @@ document.addEventListener('DOMContentLoaded', function(){
 		REWRITES: '=',
 		HEADERS: '.'
 	});
+	const EXPRESSION_MARK = '=', EXPRESSIONS_HELP = 'https://turbo-server.github.io/#expressions', PREPROCESSOR_MODES_HELP = 'https://turbo-server.github.io/#preprocessor-modes';
 	let tempEditValues = [], charReplacementMap = {}, ambiguousValues = [],
 		charsReplaceSection, deniedIpsSection, httpCodeResponsesSection, dormantSitesSection,
 		requestLimitsFieldset, siteActionButtonsList, generalSettingsFieldset,
@@ -364,7 +380,7 @@ document.addEventListener('DOMContentLoaded', function(){
 				if((hrefValue = clickEvent.getAttribute('href').slice(basePath.length)) && hrefValue in settingsDefs && typeof settingsDefs[hrefValue] == 'object'){ settingsDefs[hrefValue].element = clickEvent; }
 			});
 		}
-		return function(clickEvent, hrefValue, basePathIndex, dialogSteps, settingKey, isConfirmType, extraQueryString, extraFieldKey, extraFieldDef, promptValue, dialogQueue, emptyActions){
+		return function(clickEvent, hrefValue, basePathIndex, dialogSteps, settingKey, isConfirmType, extraQueryString, extraFieldKey, extraFieldDef, promptValue, dialogQueue, emptyActions, emptyPassword){
 			clickEvent.preventDefault();
 			var clickTarget = (clickEvent.target.closest ? clickEvent.target.closest('a') : clickEvent.target); // The <i> inside a link counts as the link
 			if(!clickTarget || clickTarget.nodeName != 'A' || !(hrefValue = clickTarget.href) || (basePathIndex = hrefValue.indexOf(basePath)) == -1){ return; }
@@ -374,7 +390,7 @@ document.addEventListener('DOMContentLoaded', function(){
 				if(settingsDefs[settingKey].extra){
 					settingsDefs[settingKey].extra = (settingsDefs[settingKey].extra && typeof settingsDefs[settingKey].extra == 'object' ? settingsDefs[settingKey].extra : {});
 					if(settingsDefs[settingKey].extra[0]){
-						extraQueryString = '', emptyActions = [];
+						extraQueryString = '', emptyActions = [], emptyPassword = '';
 						for(extraFieldKey in settingsDefs[settingKey].extra){
 							extraFieldDef = settingsDefs[settingKey].extra[extraFieldKey];
 							extraFieldDef.tmpValue = (extraFieldDef.value || ''); // What this site has now, not what was typed for another one
@@ -398,9 +414,15 @@ document.addEventListener('DOMContentLoaded', function(){
 									secret: extraFieldDef.secret,
 									abortOnCancel: true, // Cancelling any step sends nothing
 									okFn: function(o, promptValue){
-										if(promptValue){ return (extraFieldDef.tmpValue = (extraFieldDef.secret ? '' : promptValue), extraQueryString += '&' + extraFieldDef.param + '=' + encodeURIComponent(extraFieldDef.literal ? promptValue : applyCharReplacements(promptValue))); }
+										// A value that needs the current password when it changes (passwordOnChange) asks for it right after: sent
+										// with the action, or with the one that empties the saved value first
+										var askPassword = function(step, emptied){
+											if(!extraFieldDef.passwordOnChange || promptValue == (extraFieldDef.value || '')){ return; }
+											step.next = { type: 'prompt', secret: true, required: true, abortOnCancel: true, text: extraFieldDef.passwordOnChange, okFn: function(z, password){ (emptied ? (emptyPassword = password) : (extraQueryString += '&b=' + encodeURIComponent(password))); }, next: step.next };
+										};
+										if(promptValue){ return (extraFieldDef.tmpValue = (extraFieldDef.secret ? '' : promptValue), extraQueryString += '&' + extraFieldDef.param + '=' + encodeURIComponent(extraFieldDef.literal ? promptValue : applyCharReplacements(promptValue)), askPassword(o)); }
 										if(extraFieldDef.value && extraFieldDef.emptyConfirm){ // Emptied: ask before dropping the saved value
-											o.next = { type: 'confirm', text: extraFieldDef.emptyConfirm, abortOnCancel: true, okFn: function(){ extraFieldDef.tmpValue = '', emptyActions.push(extraFieldDef.emptyAction); }, next: o.next };
+											o.next = { type: 'confirm', text: extraFieldDef.emptyConfirm, abortOnCancel: true, okFn: function(c){ extraFieldDef.tmpValue = '', emptyActions.push(extraFieldDef.emptyAction), askPassword(c, true); }, next: o.next };
 										}
 									}
 								});
@@ -447,7 +469,7 @@ document.addEventListener('DOMContentLoaded', function(){
 								return;
 							}
 							if(!emptyActions || !emptyActions.length){ return send(); }
-							apiRequest(emptyActions[0] + getCurrentContext().request + '&a=', send, function(e){ statusMessageEl.dataset.error = e; }); // A saved value emptied first (back to webroot: cfgA with an empty value)
+							apiRequest(emptyActions[0] + getCurrentContext().request + '&a=' + (!emptyPassword ? '' : '&b=' + encodeURIComponent(emptyPassword)), send, function(e){ statusMessageEl.dataset.error = e; }); // A saved value emptied first (back to webroot: cfgA with an empty value, which needs the current password)
 						}
 					}
 				});
@@ -502,10 +524,12 @@ document.addEventListener('DOMContentLoaded', function(){
 		else { mainPanel.prepend(siteActionButtonsListMoveRef), mainPanel.prepend(siteBreadcrumbLink), deleteSiteOrSubdomainLink.innerText = deleteSiteOrSubdomainLink.dataset.siteText; }
 		$q('[href="/admin:inside:cfgW"], [href="/admin:inside:cfgR"]').forEach(function(link){ link.parentNode.hidden = !isSiteMode; }); // www <-> root redirections are set at the site's root (D7)
 	}
-	function createKeyValueEntry(container, keyValue, propertyName, contentValue, valueFn, linkEl, labelSpan, contentItalic){
+	function createKeyValueEntry(container, keyValue, propertyName, contentValue, valueFn, linkEl, labelSpan, contentItalic, source){
 		linkEl = document.createElement('a'), linkEl.href = ('#' + keyValue), linkEl[propertyName] = (typeof valueFn != 'function' ? function(j, k){ return { from: k, to: j } } : valueFn).call(linkEl, contentValue, keyValue),
 		labelSpan = document.createElement('span'), labelSpan.innerText = keyValue,
-		contentItalic = document.createElement('i'), contentItalic.innerText = contentValue,
+		contentItalic = document.createElement('i'), contentItalic.innerText = contentValue;
+		// An expression of a header or a rewrite, marked, on one line; whole when the pointer is on it
+		if((propertyName == 'header' || propertyName == 'rewrite') && (source = expressionOf(contentValue)) != null){ contentItalic.dataset.expression = '', contentItalic.innerText = source.replace(/\s+/g, ' '), contentItalic.title = source; }
 		container.appendChild(linkEl), linkEl.append(labelSpan), linkEl.append(contentItalic);
 	}
 	function createSiteEntry(container, name, siteData, isHttps, linkEl){
@@ -673,9 +697,12 @@ document.addEventListener('DOMContentLoaded', function(){
 		okButton = document.createElement('button'), okButton.innerText = dialogConfig.okText || (!isPromptType ? 'Yes' : 'OK'), okButton.dataset.primaryBtn = '', buttonsWrapperSpan.appendChild(okButton);
 		if(dialogConfig.assign && typeof dialogConfig.assign == 'object'){ for(assignKey in dialogConfig.assign){ articleEl[assignKey] = dialogConfig.assign[assignKey]; } }
 		if(dialogConfig.text){ messageParagraph = document.createElement('p'), messageParagraph.innerText = dialogConfig.text, contentDiv.prepend(messageParagraph), articleEl.setAttribute('aria-label', dialogConfig.text); }
-		if(isPromptType){
-			textInput = document.createElement('input'),
-			textInput.type = (dialogConfig.secret ? 'password' : 'text'),
+		if(isPromptType && dialogConfig.choices){ textInput = choiceField(dialogConfig, contentDiv, messageParagraph, buttonsWrapperSpan, dialogConfig.choices); }
+		else if(isPromptType){
+			// Over lines (lines), a text area, where Enter is a new line and Ctrl+Enter sends it: an input drops the line
+			// breaks of the value it is given
+			textInput = document.createElement(dialogConfig.lines ? 'textarea' : 'input'),
+			(dialogConfig.lines ? (textInput.rows = 6, textInput.spellcheck = false) : (textInput.type = (dialogConfig.secret ? 'password' : 'text'))),
 			textInput.placeholder = dialogConfig.placeholder || '',
 			textInput.setAttribute('aria-label', dialogConfig.text || dialogConfig.placeholder || 'Value'),
 			textInput.value = dialogConfig.value || '',
@@ -687,10 +714,70 @@ document.addEventListener('DOMContentLoaded', function(){
 			(!dialogConfig.required && !dialogConfig.abortOnCancel && dialogConfig.next && typeof dialogConfig.next == 'object' ? (dialogConfig.next.previous = dialogConfig, dialogConfig.next.previous.finalValue = textInput, showDialog(dialogConfig.next.type, dialogConfig.next)) : 0);
 		}
 		okButton.onclick = function(){
-			if(textInput && dialogConfig.required && !textInput.value && dialogConfig.strict !== false){ return textInput.focus(); }
+			if(textInput && dialogConfig.required && !(textInput.typed != null ? textInput.typed : textInput.value) && dialogConfig.strict !== false){ return textInput.focus(); }
+			if(textInput && typeof textInput.problem == 'function' && textInput.problem()){ return; } // Said in the dialog, which stays open
 			textInput = (!textInput ? null : textInput.value), (typeof dialogConfig.okFn == 'function' ? dialogConfig.okFn.call(articleEl, dialogConfig, textInput) : 0), document.body.removeChild(articleEl);
 			(dialogConfig.next && typeof dialogConfig.next == 'object' ? (dialogConfig.next.previous = dialogConfig, dialogConfig.next.previous.finalValue = textInput, showDialog(dialogConfig.next.type, dialogConfig.next)) : 0);
 		}
+	}
+	// A value of a header or the target of a rewrite is an expression when it starts with EXPRESSION_MARK: the panel adds
+	// it and takes it away, by what the dialog's choice says. Only these functions know it.
+	function expressionOf(value){ return (typeof value == 'string' && value.charAt(0) == EXPRESSION_MARK ? value.slice(1) : null); }
+	function asExpression(source){ return EXPRESSION_MARK + source; }
+	// shortValue is a value for a sentence: an expression on one line, and at most 80 characters.
+	function shortValue(value, source){
+		source = expressionOf(value), value = (source == null ? String(value) : 'expression ' + source).replace(/\s+/g, ' ');
+		return (value.length > 80 ? value.slice(0, 79) + '…' : value);
+	}
+	// The ways of writing a value that a dialog lets choose (choiceField): each says how its value is sent (wrap), what
+	// it takes of one sent that way (unwrap: the text, or null if it isn't one of it; the fallback takes any), whether it
+	// is written over lines, the reference it links to, and why a text can't be sent (problem: '' if it can).
+	const EXPRESSION_CHOICES = [
+		{ value: 'text', label: 'Text', fallback: true, wrap: function(t){ return t; }, unwrap: function(v){ return v; }, problem: function(t){
+			return (expressionOf(t) == null ? '' : 'A text can\'t start with "' + EXPRESSION_MARK + '": choose Expression, or write it as one between quotes (\'' + t.replace(/\\/g, '\\\\').replace(/'/g, '\\\'') + '\')');
+		} },
+		{ value: 'expression', label: 'Expression', lines: true, help: [EXPRESSIONS_HELP, 'Variables and functions of the expressions'], wrap: asExpression, unwrap: expressionOf }
+	], PREPROCESSOR_MODES = [ // The modes of a preprocessor: "<mode>>" before its program, but CGI's, which needs none
+		{ value: 'cgi', label: 'CGI: a process for each request', fallback: true, wrap: function(t){ return t; }, unwrap: function(v){ return v.replace(/^cgi>/i, ''); } },
+		{ value: 'dx', label: 'DX: a worker kept running', help: [PREPROCESSOR_MODES_HELP, 'The modes of the preprocessors'], wrap: function(t){ return 'dx>' + t; }, unwrap: function(v){ return (/^dx>/i.test(v) ? v.slice(3) : null); } }
+	];
+	// choiceField puts in a dialog a choice among ways of writing a value (choices), and the field of the one chosen: a
+	// line, or a text area for one written over lines. value is what is sent (wrapped as the choice says), typed what was
+	// written, and problem says in the dialog why it can't be sent, if it can't.
+	function choiceField(dialogConfig, contentDiv, messageParagraph, buttonsWrapperSpan, choices, select, field, help, problemParagraph, chosen, text, option){
+		text = dialogConfig.value || '';
+		chosen = choices.filter(function(c){ return !c.fallback; }).concat(choices.filter(function(c){ return c.fallback; })).find(function(c){ return c.unwrap(text) != null; }),
+		text = chosen.unwrap(text),
+		select = document.createElement('select'), select.setAttribute('aria-label', dialogConfig.choiceLabel || 'Kind of value');
+		choices.forEach(function(c){ option = document.createElement('option'), option.value = c.value, option.innerText = c.label, select.appendChild(option); });
+		select.value = chosen.value,
+		(!messageParagraph ? contentDiv.prepend(select) : messageParagraph.insertAdjacentElement('afterend', select)),
+		help = document.createElement('a'), help.target = '_blank', help.rel = 'noopener noreferrer', help.dataset.dialogHelp = '',
+		problemParagraph = document.createElement('p'), problemParagraph.dataset.dialogProblem = '', problemParagraph.hidden = true,
+		contentDiv.insertBefore(help, buttonsWrapperSpan), contentDiv.insertBefore(problemParagraph, buttonsWrapperSpan);
+		var current = function(){ return choices.find(function(c){ return c.value == select.value; }); },
+		place = function(text, next, choice){
+			choice = current(), next = document.createElement(choice.lines ? 'textarea' : 'input');
+			if(next.nodeName == 'INPUT'){ next.type = 'text'; }
+			else { next.spellcheck = false, next.setAttribute('autocapitalize', 'off'), next.setAttribute('autocomplete', 'off'), next.rows = 6; }
+			next.setAttribute('aria-label', dialogConfig.text || 'Value'), next.value = text,
+			(field ? field.replaceWith(next) : select.insertAdjacentElement('afterend', next)),
+			field = next, help.hidden = !choice.help, problemParagraph.hidden = true;
+			if(choice.help){ help.href = choice.help[0], help.innerText = choice.help[1]; }
+			field.focus();
+		};
+		select.onchange = function(){ place(field.value); };
+		place(text);
+		return {
+			get value(){ return current().wrap(field.value); },
+			get typed(){ return field.value; },
+			focus: function(){ field.focus(); },
+			problem: function(problem){
+				if(!current().problem || !(problem = current().problem(field.value))){ return false; }
+				problemParagraph.innerText = problem, problemParagraph.hidden = false, field.focus();
+				return true;
+			}
+		};
 	}
 	function showDialogSequence(){
 		var a = 0;
@@ -780,7 +867,7 @@ document.addEventListener('DOMContentLoaded', function(){
 			deleteBtn = createDeleteButton(newLinkEl, '/admin:inside:delRewrite'), fromOrName = newLinkEl.rewrite.from, toOrContent = newLinkEl.rewrite.to,
 			deleteBtn.onclick = function(event){
 				event.preventDefault();
-			showDialog('confirm', { text: 'Delete the rewrite "' + fromOrName + '" to "' + toOrContent + '"?', okFn: function(){ apiRequest((deleteBtn.href + getCurrentContext().request + '&a=' + encodeURIComponent(applyCharReplacements(fromOrName))), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.REWRITES][fromOrName]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
+			showDialog('confirm', { text: 'Delete the rewrite "' + fromOrName + '" to "' + shortValue(toOrContent) + '"?', okFn: function(){ apiRequest((deleteBtn.href + getCurrentContext().request + '&a=' + encodeURIComponent(applyCharReplacements(fromOrName))), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.REWRITES][fromOrName]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
 			}, newLinkEl.onclick = function(event){ event.preventDefault(), tempEditValues[0] = fromOrName, tempEditValues[1] = toOrContent, addRewriteLink.onclick.call(this); };
 		},
 		'box-mime': function handleNewMimeEntry(container, newLinkEl, deleteBtn, fromOrName, toOrContent){
@@ -794,7 +881,7 @@ document.addEventListener('DOMContentLoaded', function(){
 			deleteBtn = createDeleteButton(newLinkEl, '/admin:inside:delHeader'), fromOrName = newLinkEl.header.name, toOrContent = newLinkEl.header.content,
 			deleteBtn.onclick = function(event){
 				event.preventDefault();
-				showDialogSequence({ type: 'confirm', text: 'Delete the header "' + fromOrName + '" with "' + toOrContent + '"?', abortOnCancel: true }, { text: 'Current password:', secret: true, required: true, okFn: function(z, password){ apiRequest((deleteBtn.href + getCurrentContext().request + '&a=' + encodeURIComponent(fromOrName) + '&b=' + encodeURIComponent(password)), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.HEADERS][fromOrName]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
+				showDialogSequence({ type: 'confirm', text: 'Delete the header "' + fromOrName + '" with "' + shortValue(toOrContent) + '"?', abortOnCancel: true }, { text: 'Current password:', secret: true, required: true, okFn: function(z, password){ apiRequest((deleteBtn.href + getCurrentContext().request + '&a=' + encodeURIComponent(fromOrName) + '&b=' + encodeURIComponent(password)), function(r){ statusMessageEl.dataset.ok = r, (delete subdomainPanel.subdomain[CONFIG_KEYS.HEADERS][fromOrName]), container.removeChild(newLinkEl), container.removeChild(deleteBtn), resetTempEditValues(); }, function(e){ statusMessageEl.dataset.error = e, resetTempEditValues(); }); }});
 			}, newLinkEl.onclick = function(event){ event.preventDefault(), tempEditValues[0] = fromOrName, tempEditValues[1] = toOrContent, addHeaderLink.onclick.call(this); };
 		},
 		'box-preprocessors': function handleNewPreprocessorEntry(container, newLinkEl, deleteBtn, fromOrName, toOrContent){
@@ -877,6 +964,7 @@ document.addEventListener('DOMContentLoaded', function(){
 			text: 'Adapter (optional [dns-route53, etc.]):',
 			emptyConfirm: 'Back to webroot (no adapter)?',
 			emptyAction: '/admin:inside:cfgA',
+			passwordOnChange: 'Current password (another adapter changes how the certificate is renewed):',
 			tmpValue: ''
 		},
 		'C': {
@@ -1072,6 +1160,7 @@ document.addEventListener('DOMContentLoaded', function(){
 			type: 'prompt',
 			text: 'Response:',
 			required: true,
+			lines: true, // A template may span lines
 			value: d || '',
 			abortOnCancel: true,
 			okFn: function(z, value){ c = (!c ? z.previous.finalValue : c), d = value; },
@@ -1152,7 +1241,7 @@ document.addEventListener('DOMContentLoaded', function(){
 			});
 		}, 5000);
 	}
-	panelCertLink.onclick = function(a, email, adapter){
+	panelCertLink.onclick = function(a, email, adapter, password){
 		a.preventDefault();
 		if(panelCertState.status === 'WAIT'){ return (statusMessageEl.dataset.ok = 'Panel certificate in process'); }
 		if(panelCertState.status === true){
@@ -1162,12 +1251,21 @@ document.addEventListener('DOMContentLoaded', function(){
 		}
 		showDialogSequence(
 			{ text: 'E-mail for the panel certificate (expiry notices):', value: panelCertState.email, required: 1, abortOnCancel: true, okFn: function(c, v){ email = v; } },
-			{ text: 'Adapter (optional [dns-route53, etc.]; empty: Certbot validates over HTTP on the panel hosts):', value: panelCertState.adapter, abortOnCancel: true, okFn: function(c, v){ adapter = v; } },
+			{ text: 'Adapter (optional [dns-route53, etc.]; empty: Certbot validates over HTTP on the panel hosts):', value: panelCertState.adapter, abortOnCancel: true, okFn: function(c, v){
+				adapter = v, password = null;
+				if(v != panelCertState.adapter){ c.next = { type: 'prompt', secret: true, required: true, abortOnCancel: true, text: 'Current password (another adapter changes how the certificate is renewed):', okFn: function(z, p){ password = p; }, next: c.next }; }
+			} },
 			{ type: 'confirm', text: 'Create the certificate for the hosts of "Where the panel answers"?', okFn: function(){
-				panelCertState.email = email, panelCertState.adapter = adapter;
-				apiRequest('/admin:inside:cfgPC?a=1&z=' + encodeURIComponent(email) + '&y=' + encodeURIComponent(adapter) /* cfg<KEY> takes its values as sent */, function(r){ statusMessageEl.dataset.ok = r, panelCertState.status = true, updatePanelCertificate(); }, function(e, s){
-					if(s !== 'WAIT'){ return (statusMessageEl.dataset.error = e); }
-					statusMessageEl.dataset.ok = e, panelCertState.status = 'WAIT', updatePanelCertificate(), pollPanelCertificate(0);
+				// The e-mail and the adapter sent are the saved ones once the server takes them (its answer, or a WAIT).
+				// Refused, what it kept is read from it: the adapter typed, noted as saved before the answer, was offered
+				// by the next dialog, which then didn't ask for the password that another adapter needs.
+				apiRequest('/admin:inside:cfgPC?a=1&z=' + encodeURIComponent(email) + '&y=' + encodeURIComponent(adapter) /* cfg<KEY> takes its values as sent */ + (password == null ? '' : '&b=' + encodeURIComponent(password)), function(r){ panelCertState.email = email, panelCertState.adapter = adapter, statusMessageEl.dataset.ok = r, panelCertState.status = true, updatePanelCertificate(); }, function(e, s){
+					if(s === 'WAIT'){ return (panelCertState.email = email, panelCertState.adapter = adapter, statusMessageEl.dataset.ok = e, panelCertState.status = 'WAIT', updatePanelCertificate(), pollPanelCertificate(0)); }
+					statusMessageEl.dataset.error = e;
+					apiRequest.call(parseProxyResponse, '/admin:inside:sites', function(r){
+						if(typeof (r = parseJsonResponse(r)) == 'string' || !r[CONFIG_KEYS.GENERAL_CONFIG]){ return; }
+						panelCertState.email = r[CONFIG_KEYS.GENERAL_CONFIG].PCE || '', panelCertState.adapter = r[CONFIG_KEYS.GENERAL_CONFIG].PCA || '';
+					}, function(){});
 				});
 			} }
 		);
@@ -1179,8 +1277,8 @@ document.addEventListener('DOMContentLoaded', function(){
 	siteEmailLink.onclick = function(a, context, saved, send){
 		a.preventDefault(), a.stopPropagation();
 		context = getCurrentContext(), saved = siteSettingsDefs['E'].value || '',
-		send = function(email){
-			apiRequest(siteEmailLink.getAttribute('href') + context.request + '&a=' + encodeURIComponent(email) /* cfg<KEY> takes its values as sent */, function(r){
+		send = function(email, password){
+			apiRequest(siteEmailLink.getAttribute('href') + context.request + '&a=' + encodeURIComponent(email) /* cfg<KEY> takes its values as sent */ + (password == null ? '' : '&b=' + encodeURIComponent(password)), function(r){
 				statusMessageEl.dataset.ok = r;
 				if(getCurrentContext().request != context.request){ // Another site is open by now: that one is read again when it is opened
 					return (mainPanel.loaded ? ((delete mainPanel.loaded[context.domain]), (delete mainPanel.loaded[context.subdomain + '.' + context.domain])) : 0);
@@ -1192,7 +1290,9 @@ document.addEventListener('DOMContentLoaded', function(){
 			email = (email || '').trim();
 			if(email == saved){ return; }
 			if(email){ return send(email); }
-			o.next = { type: 'confirm', text: 'Remove the e-mail?\n\nThe certificate stays, and Turbo no longer renews it.', okFn: function(){ send(''); } };
+			o.next = { type: 'confirm', text: 'Remove the e-mail?\n\nThe certificate stays, and Turbo no longer renews it.', okFn: function(c){ // It needs the current password: the certificate expires without renewals
+				c.next = { type: 'prompt', secret: true, required: true, text: 'Current password (to stop renewing the certificate):', okFn: function(z, password){ send('', password); } };
+			} };
 		} });
 	};
 	uploadFilesLink.onclick = function(a){
@@ -1256,10 +1356,14 @@ document.addEventListener('DOMContentLoaded', function(){
 			text: 'Rewrite (/...) or redirect (https://...) to:',
 			value: tempEditValues[1] || '',
 			required: true,
+			choices: EXPRESSION_CHOICES,
+			choiceLabel: 'Text or expression',
+			assign: { className: 'modal-wide' },
 			okFn: function(z, c){
+				var isExpression = expressionOf(c) != null;
 				b = z.previous.finalValue,
 				b = ((b.charAt(0) != '/' ? '/' : '') + b),
-				c = ((c.charAt(0) != '/' ? (!/https?\:\/\//.test(c) ? '/' : '') : '') + c),
+				c = (isExpression ? c : ((c.charAt(0) != '/' ? (!/^https?:\/\//i.test(c) ? '/' : '') : '') + c)), // An expression goes as written; a scheme, in any case, as the server takes it
 				e = 'rewrite';
 				var send = function(password){
 					apiRequest((addRewriteLink.href + getCurrentContext().request + '&a=' + encodeURIComponent(applyCharReplacements(b)) + '&b=' + encodeURIComponent(applyCharReplacements(c)) + (password == null ? '' : '&c=' + encodeURIComponent(password))), function(r, s, t, u){
@@ -1273,9 +1377,10 @@ document.addEventListener('DOMContentLoaded', function(){
 						resetTempEditValues();
 					}, function(g){ statusMessageEl.dataset.error = g, resetTempEditValues(); });
 				};
-				if(!/^https?:\/\//i.test(c)){ return send(); }
-				// A redirect to another address sends the visitors of the site away: it needs the current password
-				z.next = { type: 'prompt', text: 'Current password (the redirect leads to another address):', required: true, secret: true, abortOnCancel: true, cancelFn: resetTempEditValues, okFn: function(y, password){ send(password); } };
+				if(!isExpression && !/^https?:\/\//i.test(c)){ return send(); }
+				// A redirect to another address sends the visitors of the site away, and an expression may do it for some
+				// requests: they need the current password
+				z.next = { type: 'prompt', text: (isExpression ? 'Current password (the expression may lead to another address):' : 'Current password (the redirect leads to another address):'), required: true, secret: true, abortOnCancel: true, cancelFn: resetTempEditValues, okFn: function(y, password){ send(password); } };
 			},
 			cancelFn: resetTempEditValues
 		});
@@ -1329,6 +1434,9 @@ document.addEventListener('DOMContentLoaded', function(){
 			text: 'Content:',
 			value: tempEditValues[1] || '',
 			required: true,
+			choices: EXPRESSION_CHOICES,
+			choiceLabel: 'Text or expression',
+			assign: { className: 'modal-wide' },
 			okFn: function(z, c){ d.headerContent = c; },
 			cancelFn: resetTempEditValues
 		},{
@@ -1364,6 +1472,8 @@ document.addEventListener('DOMContentLoaded', function(){
 			text: 'Preprocessor path:',
 			value: tempEditValues[1] || '',
 			required: true,
+			choices: PREPROCESSOR_MODES,
+			choiceLabel: 'Mode of the preprocessor',
 			okFn: function(z, c){ d.executable = c; },
 			cancelFn: resetTempEditValues
 		},{
@@ -1438,6 +1548,8 @@ document.addEventListener('DOMContentLoaded', function(){
 				// With the focus on a button of the dialog ("No", reached with the tabulator), Enter is that button's, which the
 				// browser clicks by itself: the primary one was clicked instead, and "No" deleted what was asked about
 				if(document.activeElement && document.activeElement.nodeName == 'BUTTON' && b.parentNode.contains(document.activeElement)){ return; }
+				// In the text area of an expression, Enter is a new line; Ctrl+Enter sends it
+				if(document.activeElement && document.activeElement.nodeName == 'TEXTAREA' && !a.ctrlKey && !a.metaKey){ return; }
 				a.preventDefault(), b.focus(), b.click();
 			break;
 		}

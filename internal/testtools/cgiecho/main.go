@@ -9,9 +9,12 @@
 // that many bytes, in chunks (a large streaming output, for the tests of the
 // CGIs' output and the manual stability test). With child=<ms> it leaves a child
 // that inherits its output, waits that long and creates the file childmark=<path>;
-// with childstdin=<ms>, one that inherits its input (not its output). With
+// with childstdin=<ms>, one that inherits its input (not its output); with
+// childstderr=<ms>, one that inherits its standard error alone, and writes a line
+// to it before the file. With
 // procstatus=1 it writes the Cap* lines of /proc/self/status (Linux). With
-// env=<NAME,NAME…> it also writes those variables.
+// env=<NAME,NAME…> it also writes those variables. With stderr=<n> it writes n
+// lines to its standard error, as a PHP with log_errors.
 package main
 
 import (
@@ -29,6 +32,9 @@ import (
 func main() {
 	if ms, err := strconv.Atoi(os.Getenv("CGIECHO_CHILD")); err == nil { // The child of child=: it keeps stdout open
 		time.Sleep(time.Duration(ms) * time.Millisecond)
+		if os.Getenv("CGIECHO_CHILDSTDERR") != "" { // On a pipe closed meanwhile, the line ends the process (SIGPIPE)
+			fmt.Fprintln(os.Stderr, "cgiecho: a line of the process that the CGI left")
+		}
 		if mark := os.Getenv("CGIECHO_CHILDMARK"); mark != "" {
 			os.WriteFile(mark, nil, 0644)
 		}
@@ -62,6 +68,12 @@ func main() {
 		child.Stdout = os.Stdout
 		child.Start()
 	}
+	if ms := q.Get("childstderr"); ms != "" { // Leaves a child that inherits stderr alone, sleeps ms, writes a line to it and then childmark
+		child := exec.Command(os.Args[0])
+		child.Env = append(os.Environ(), "CGIECHO_CHILD="+ms, "CGIECHO_CHILDMARK="+q.Get("childmark"), "CGIECHO_CHILDSTDERR=1")
+		child.Stderr = os.Stderr
+		child.Start()
+	}
 	if ms := q.Get("childstdin"); ms != "" { // Leaves a child that inherits stdin (not stdout), sleeps ms and then writes childmark
 		child := exec.Command(os.Args[0])
 		child.Env = append(os.Environ(), "CGIECHO_CHILD="+ms, "CGIECHO_CHILDMARK="+q.Get("childmark"))
@@ -88,6 +100,11 @@ func main() {
 			if strings.HasPrefix(line, "Cap") {
 				fmt.Println(line)
 			}
+		}
+	}
+	if n, err := strconv.Atoi(q.Get("stderr")); err == nil { // Lines on the standard error, as a PHP with log_errors
+		for i := 0; i < n; i++ {
+			fmt.Fprintf(os.Stderr, "PHP Warning:  Undefined variable $x%d in /site/x.php on line %d\n", i, i)
 		}
 	}
 	keys := []string{"QUERY_STRING", "REDIRECT_STATUS", "SCRIPT_FILENAME", "SCRIPT_NAME", "DOCUMENT_ROOT", "REQUEST_URI", "CONTENT_LENGTH", "HTTP_HOST", "PATH_INFO", "HTTP_COOKIE"}

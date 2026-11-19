@@ -256,13 +256,13 @@ func TestW_ErrorHeaders(t *testing.T) {
 	}
 }
 
-// #12: the dx> prefix is not implemented and is rejected when a preprocessor
-// is added.
+// #12: a mode that this binary doesn't have (dx> was one, until it was implemented) is rejected when a
+// preprocessor is added.
 func TestP12_PreprocessorDxRejected(t *testing.T) {
 	initForTest(t)
-	ok, msg := subdomainContentCheckers["?"](true, map[string]interface{}{"php": "dx>" + toolPath("cgiecho")}, false, "localhost", "")
+	ok, msg := subdomainContentCheckers["?"](true, map[string]interface{}{"php": "xx>" + toolPath("cgiecho")}, false, "localhost", "")
 	if ok {
-		t.Fatalf("dx> accepted: %q", msg)
+		t.Fatalf("xx> accepted: %q", msg)
 	}
 	ok, msg = subdomainContentCheckers["?"](true, map[string]interface{}{"php": "cgi>" + toolPath("cgiecho")}, false, "localhost", "")
 	if !ok {
@@ -342,7 +342,7 @@ func TestC_IndexOrderMigration(t *testing.T) {
 	check("after reloading")
 }
 
-// #12: read from turbo.config, a preprocessor without an executable or with dx>
+// #12: read from turbo.config, a preprocessor without an executable or with a mode it doesn't have (xx>)
 // doesn't let the source code be served, doesn't keep the others from loading
 // and isn't lost when saving.
 func TestP12_PreprocessorFailClosedFromConfig(t *testing.T) {
@@ -350,7 +350,7 @@ func TestP12_PreprocessorFailClosedFromConfig(t *testing.T) {
 	os.WriteFile(dir+"localhost/@/a.php", []byte("<?php $secret = 'key'; ?>"), 0644)
 	os.WriteFile(dir+"localhost/@/b.dx", []byte("secret dx"), 0644)
 	os.WriteFile(dir+"localhost/@/x.cgi", []byte("x"), 0644)
-	cfg := `{"localhost":{"":{"?":{"php":"cgi>` + dir + `missing.exe","dx":"dx>` + dir + `something","cgi":"` + toolPath("cgiecho") + `"}}}}`
+	cfg := `{"localhost":{"":{"?":{"php":"cgi>` + dir + `missing.exe","dx":"xx>` + dir + `something","cgi":"` + toolPath("cgiecho") + `"}}}}`
 	resetSettings()
 	loadConfig(t, dir, cfg)
 	base := startServer(t)

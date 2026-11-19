@@ -50,14 +50,33 @@ if [ -n "$HIDDEN" ]; then
 	echo "Remove the mark (git update-index --no-skip-worktree --no-assume-unchanged <file>) and review the tree." >&2
 	exit 1
 fi
+# The Go environment, fixed before the first go command (the folders of the packages, below, are the ones of the
+# build): neither the go env file (GOENV=off) nor what whoever runs it has exported (GOFLAGS with -tags or -ldflags,
+# GOEXPERIMENT, GOWORK, another GOAMD64 level...) changes the binaries.
+export GOENV=off GOFLAGS= GOEXPERIMENT= GOWORK=off GOTOOLCHAIN=local GOAMD64=v1 GOARM64=v8.0
+unset GODEBUG GOROOT_FINAL CGO_CFLAGS CGO_LDFLAGS 2>/dev/null || true
+
 # //go:embed also takes the files git ignores (.gitignore, .git/info/exclude or the global one), which
-# git status doesn't show, and go build compiles the ignored .go, .s and .syso files of the packages and
-# reads go.work: the binary would carry something that is not in the repository. The folders Go doesn't
-# look at (those starting with "_" or "." and testdata) don't count.
+# git status doesn't show, and go build compiles the ignored .go, .s and .syso files of the folders of its
+# packages and reads go.work: the binary would carry something that is not in the repository. Only the
+# folders of the packages that go build compiles count (go list): what other builds leave elsewhere, such
+# as the assembly files of LuaJIT that building dx/ leaves in dx/target, isn't Turbo's.
+MODULE="$(go list -m)" # By their import paths, which say the same on every system (the folders of go list, on Windows, don't)
+PACKAGE_DIRS="$(go list -deps -f '{{if not .Standard}}{{.ImportPath}}{{end}}' . | sed "s|^$MODULE\$|.|; s|^$MODULE/||")"
+# Without grep in the pipeline: with pipefail, a grep that finds nothing (a clean tree) would end the script. The
+# names as they are (core.quotePath=false): git writes one with a character outside ASCII in quotes, with escapes,
+# and neither its extension nor its folder was seen.
 IGNORED="$(
-	git ls-files --others --ignored --exclude-standard -- server/turbo.dev
-	git ls-files --others --ignored --exclude-standard | grep -E '(\.(go|s|S|sx|syso)|(^|/)go\.work(\.sum)?)$' |
-		grep -vE '(^|/)(_|\.)[^/]*/|(^|/)testdata/' || true
+	git -c core.quotePath=false ls-files --others --ignored --exclude-standard -- server/turbo.dev go.work go.work.sum
+	git -c core.quotePath=false ls-files --others --ignored --exclude-standard | while IFS= read -r file; do
+		case "$file" in
+		*.go | *.s | *.S | *.sx | *.syso)
+			if grep -qxF "$(dirname "$file")" <<<"$PACKAGE_DIRS"; then
+				printf '%s\n' "$file"
+			fi
+			;;
+		esac
+	done
 )"
 if [ -n "$IGNORED" ]; then
 	echo "There are files ignored by git that would go into the binary:" >&2
@@ -73,11 +92,6 @@ if [ "$(git rev-parse "refs/tags/$VERSION^{commit}")" != "$(git rev-parse HEAD)"
 	echo "The tag $VERSION doesn't point to HEAD." >&2
 	exit 1
 fi
-
-# The Go environment, fixed: neither the go env file (GOENV=off) nor what whoever runs it has exported
-# (GOFLAGS with -tags or -ldflags, GOEXPERIMENT, GOWORK, another GOAMD64 level...) changes the binaries.
-export GOENV=off GOFLAGS= GOEXPERIMENT= GOWORK=off GOTOOLCHAIN=local GOAMD64=v1 GOARM64=v8.0
-unset GODEBUG GOROOT_FINAL CGO_CFLAGS CGO_LDFLAGS 2>/dev/null || true
 
 echo "Go: $(go env GOVERSION) (go.mod: $(go list -m -f '{{.GoVersion}}'))"
 

@@ -100,6 +100,8 @@ func FuzzValidators(f *testing.F) {
 	f.Add(".", "X-A", "v")
 	f.Add("-", "index.html", "")
 	f.Add("&", "alias.test", "")
+	f.Add(".", "Cache-Control", "=EXT in ['js'] ? 'public' : 'no-cache'")
+	f.Add("=", "/x", "='/y/' + FILE")
 	initFuzz(f)
 	f.Fuzz(func(t *testing.T, kind, k, v string) {
 		chk, ok := subdomainContentCheckers[kind]
@@ -122,6 +124,7 @@ func FuzzAdminHandlers(f *testing.F) {
 	f.Add("@", "::", "9999999999")
 	f.Add("#", "404", "<h1>{TURBO_RESPONSE_CODE}</h1>")
 	f.Add("_", ";", "-.-")
+	f.Add("_", "=", "~e~")
 	initFuzz(f)
 	f.Fuzz(func(t *testing.T, kind, key, value string) {
 		add, ok := adminAddHandlers[kind]

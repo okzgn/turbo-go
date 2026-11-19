@@ -73,7 +73,21 @@ var configValueKinds = []struct {
 	{"replacement", false,
 		func(v string) (bool, string) { return adminAddHandlers["_"]("~", "r"+v) },
 		func() (string, bool) { v, ok := charReplacements["~"]; return strings.TrimPrefix(v, "r"), ok }},
+	// The value as a text of an expression, over lines: the expression is what is kept
+	{"header expression", false,
+		func(v string) (bool, string) {
+			return subdomainContentCheckers["."](true, map[string]interface{}{"X-Expression": "=HTTPS\n\t? '" + expressionText(v) + "'\n\t: ''"}, false, "localhost", "")
+		},
+		func() (string, bool) { v, ok := customHeaders["localhost"]["X-Expression"]; return v, ok }},
+	{"rewrite expression", false,
+		func(v string) (bool, string) {
+			return subdomainContentCheckers["="](true, map[string]interface{}{"/expression": "='/" + expressionText(v) + "'"}, false, "localhost", "")
+		},
+		func() (string, bool) { v, ok := sitesMap["localhost"][""]["/expression"]; return v, ok }},
 }
+
+// expressionText is v as a text of an expression, between single quotes: its \ and ' escaped.
+func expressionText(v string) string { return strings.NewReplacer(`\`, `\\`, `'`, `\'`).Replace(v) }
 
 // storeAndReload stores value as a value of configValueKinds[kind] the way
 // the panel would (the API's character check and the validator), saves
@@ -164,6 +178,8 @@ func FuzzConfigRoundTrip(f *testing.F) {
 	f.Add(uint8(2), "<h1>{TURBO_RESPONSE_CODE}</h1>\n")
 	f.Add(uint8(3), "us\"e\\r")
 	f.Add(uint8(6), "\xff")
+	f.Add(uint8(7), "it's \\ a \"text\"")
+	f.Add(uint8(8), "es/{FILE}")
 	dir := filepath.ToSlash(f.TempDir()) + "/"
 	resetTestState(dir)
 	os.MkdirAll(dir+"localhost/@", 0755)
