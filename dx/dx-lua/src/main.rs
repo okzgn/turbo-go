@@ -5,10 +5,12 @@
 
 mod engine;
 
-/// The stack reserved for the thread that runs the scripts. Measured with string.gsub nested until LuaJIT's limit, the
-/// path that takes the most of it (a buffer of BUFSIZ in each call): 16 MiB are enough on Windows, and on Linux 96 MiB
-/// are and 64 MiB aren't.
-const STACK: usize = 128 << 20;
+/// The stack reserved for the thread that runs the scripts. What takes the most of it is string.gsub with a function
+/// that calls it again, until LuaJIT's limit of its own stack, each call with a buffer of BUFSIZ: deepest as a tail
+/// call (`return string.gsub(s, p, f)`, 5 slots of LuaJIT's stack a level, some 13 000 levels), it takes some 116 MiB
+/// on Linux x86_64 with glibc, and with 96 or 112 MiB the worker ended; on Windows 16 MiB are enough. Only reserved:
+/// what a script doesn't reach is never memory.
+const STACK: usize = 256 << 20;
 
 fn main() {
     if std::env::args().nth(1).as_deref() == Some("--version") {

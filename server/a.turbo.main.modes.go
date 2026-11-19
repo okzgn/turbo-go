@@ -43,7 +43,7 @@ type dynamicJob struct {
 	basePath    string                       // The content folder of the site (DOCUMENT_ROOT)
 	requestPath string                       // The path of the script in the site, after the rewrite (SCRIPT_NAME)
 	queryString string                       // The client's query without the parameters the rewrite's sets, then the rewrite's
-	requestURI  string                       // REQUEST_URI: the path the client asked for, with queryString where a rewrite's query changed it
+	requestURI  string                       // REQUEST_URI: what the client asked for, without the parameters that a rewrite's query sets
 	timeout     time.Duration                // WT: how long the script may run; 0, without a limit
 }
 

@@ -82,7 +82,8 @@ func TestN04_PanelCertificateHandshake(t *testing.T) {
 	}
 }
 
-// HSTS only over HTTPS and on a host in PA.
+// HSTS only over HTTPS: a year on a host in PA that a certificate covers, none on another that one covers, and
+// max-age=0 on any that none covers (v2.5.2, PN-1: it may have been in PA before, and had the year).
 func TestN04_PanelHSTS(t *testing.T) {
 	panelHTTPSSetup(t)
 	serve := func(host string) customNetHttp.Header {
@@ -95,8 +96,11 @@ func TestN04_PanelHSTS(t *testing.T) {
 		t.Errorf("HSTS over HTTPS on the host in PA: %q", got)
 	}
 	panelAccess.Store(&panelAccessList{}) // Without a host of its own, the panel answers on a site's
-	if got := serve("localhost").Get("Strict-Transport-Security"); got != "" {
-		t.Errorf("HSTS on a host that is not in PA: %q", got)
+	if got := serve("localhost").Get("Strict-Transport-Security"); got != "max-age=0" {
+		t.Errorf("HSTS on a host that is not in PA, without a certificate: %q; expected max-age=0", got)
+	}
+	if got, sent := serve("panel.test")["Strict-Transport-Security"]; sent {
+		t.Errorf("HSTS on a host that is not in PA, with a certificate: %q; expected none", got)
 	}
 }
 

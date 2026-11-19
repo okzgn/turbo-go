@@ -113,7 +113,7 @@ func TestR250_CT5_StopWaitsForAReloadThatHangs(t *testing.T) {
 	stop := make(chan os.Signal, 1)
 	config := make(chan time.Time, 1)
 	done := make(chan struct{})
-	go func() { runMaintenance(stop, nil, config, nil); close(done) }()
+	go func() { runMaintenance(stop, nil, nil, config, nil); close(done) }()
 	config <- time.Now()
 	<-entered
 	stop <- os.Interrupt

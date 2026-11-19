@@ -94,7 +94,11 @@ func evaluateText(n *node, r Request) ([]Part, error) {
 		if err != nil {
 			return nil, err
 		}
-		return single(urlEncode(value), Clean, "")
+		parts, err := single(urlEncode(value), Clean, "")
+		for i := range parts {
+			parts[i].Encoded = true // Placed as it is in a target: encoded again, "%20" was "%2520"
+		}
+		return parts, err
 	case opLower, opUpper:
 		parts, err := evaluateText(n.args[0], r)
 		if err != nil {
@@ -107,7 +111,7 @@ func evaluateText(n *node, r Request) ([]Part, error) {
 			} else {
 				part.Text = asciiUpper(part.Text)
 			}
-			changed[i] = part // With its name: a rewrite places REWRITE_COMPLEMENT by it, in any capitals
+			changed[i] = part // With its name and whether urlencode made it: a rewrite places them by those, in any capitals
 		}
 		return changed, nil
 	}

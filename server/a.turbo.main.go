@@ -249,6 +249,10 @@ func Main(version string) {
 		slog.Error("Invalid TURBO_HTTPS_ADDR", "error", err)
 		os.Exit(1)
 	}
+	if sameListenAddress(httpAddr, httpsAddr) {
+		slog.Error("TURBO_HTTP_ADDR and TURBO_HTTPS_ADDR are the same address: Turbo does not start", "http", httpAddr, "https", httpsAddr)
+		os.Exit(1)
+	}
 
 	setHTTPResponses(func(responses map[int]string) { responses[0] = serverName + `\n{TURBO_RESPONSE_CODE}` })
 	fixedHTTPResponses = map[int]bool{0: true}
@@ -272,22 +276,27 @@ func Main(version string) {
 	servers[1] = createHTTPServer()
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM) // Ctrl+C, and what systemd sends to stop the service
-	runRecovering("renewCertificates", renewCertificates)
 	renewTicker := time.NewTicker(24 * time.Hour)
-	runMaintenance(stop, renewTicker.C, configCheckTicker.C, cleanupTicker.C)
+	// The renewals due at start are checked first in the goroutine of the periodic work: checked here, a disk that
+	// didn't answer right at the start held the signal, caught already and with no one to read it
+	renewAtStart := func() { runRecovering("renewCertificates", renewCertificates) }
+	runMaintenance(stop, renewAtStart, renewTicker.C, configCheckTicker.C, cleanupTicker.C)
 }
 
-// runMaintenance does the periodic work of Turbo until a signal arrives in stop, which shuts the servers down: with
-// each tick of renew, the certificates that are due are renewed; of config, turbo.config and the sites directory
-// are read again; of cleanup, what has expired is forgotten (sessions, denied IPs, failed logins, the limiter's
-// entries). A panic in one of them is logged, and the rest goes on (runRecovering).
+// runMaintenance does the periodic work of Turbo until a signal arrives in stop, which shuts the servers down: first
+// atStart, if it isn't nil; then, with each tick of renew, the certificates that are due are renewed; of config,
+// turbo.config and the sites directory are read again; of cleanup, what has expired is forgotten (sessions, denied
+// IPs, failed logins, the limiter's entries). A panic in one of them is logged, and the rest goes on (runRecovering).
 //
 // The periodic work has a goroutine of its own, one thing at a time, and the signal is waited for here: a reload or a
 // check of the renewals that hung (a disk that doesn't answer) held the signal with it, and Turbo didn't stop until
 // it came back, nor heard a second signal.
-func runMaintenance(stop chan os.Signal, renew <-chan time.Time, config <-chan time.Time, cleanup <-chan time.Time) {
+func runMaintenance(stop chan os.Signal, atStart func(), renew <-chan time.Time, config <-chan time.Time, cleanup <-chan time.Time) {
 	stopping := make(chan struct{})
 	go func() {
+		if atStart != nil && !maintenanceStopping(stopping) {
+			atStart()
+		}
 		for {
 			select {
 			case <-stopping:
@@ -668,12 +677,12 @@ var (
 	httpsAddr = ":443"
 )
 
-// listenAddress returns the address in the environment variable name ("host:port", ":port" or just
-// the port), or def if it isn't set.
 // sitesDirFromEnv says that TURBO_DIR chose the start directory: the "M" of its turbo.config written with
 // {TURBO_CURRENT_DIR} then means that directory, not the working one (updateSettingsFollowing). Set at start.
 var sitesDirFromEnv bool
 
+// listenAddress returns the address in the environment variable name ("host:port", ":port" or just
+// the port), or def if it isn't set.
 func listenAddress(name, def string) (string, error) {
 	value := os.Getenv(name)
 	if value == "" {
@@ -692,6 +701,29 @@ func listenAddress(name, def string) (string, error) {
 	}
 	// The port as a number writes it: "+443" or "0443" listened on 443, and went as they came into the redirections
 	return net.JoinHostPort(host, strconv.Itoa(portNumber)), nil
+}
+
+// sameListenAddress reports whether two addresses that listenAddress returned take the same port on a same
+// interface: the same port, and the same host, or either of them on every interface (no host, 0.0.0.0 or ::).
+// TURBO_HTTP_ADDR and TURBO_HTTPS_ADDR so were accepted, and the HTTPS address, which HTTP had opened first, was
+// tried again every 30 s for good.
+func sameListenAddress(a, b string) bool {
+	hostA, portA, errA := net.SplitHostPort(a)
+	hostB, portB, errB := net.SplitHostPort(b)
+	if errA != nil || errB != nil || portA != portB {
+		return false
+	}
+	everyInterface := func(host string) bool {
+		ip := net.ParseIP(host)
+		return host == "" || ip != nil && ip.IsUnspecified()
+	}
+	if everyInterface(hostA) || everyInterface(hostB) {
+		return true
+	}
+	if ipA, ipB := net.ParseIP(hostA), net.ParseIP(hostB); ipA != nil || ipB != nil {
+		return ipA != nil && ipB != nil && ipA.Equal(ipB)
+	}
+	return strings.EqualFold(hostA, hostB)
 }
 
 // httpServerStart serves on httpAddr (:80). Without it Turbo can't work, so it ends with an error instead of
@@ -1343,7 +1375,9 @@ func probeNameFolding(baseDir string, sites []diskSite) bool {
 }
 
 // probeNameFoldingKnown is probeNameFolding, and whether it could look: not without a site whose name has letters and
-// whose folder is there. A reload that can't look keeps what the one before found.
+// whose folder is there, and whose name in capitals is found or "not found". Another error for it (an I/O error of a
+// share, a loop of links) is no answer: it was taken as a sure "doesn't fold", and the protections of the systems
+// that ignore case were left off. A reload that can't look keeps what the one before found.
 func probeNameFoldingKnown(baseDir string, sites []diskSite) (folds bool, known bool) {
 	for _, site := range sites {
 		name := changeWildcards(site.site)
@@ -1351,11 +1385,14 @@ func probeNameFoldingKnown(baseDir string, sites []diskSite) (folds bool, known 
 		if site.subdomain != "" || upper == name {
 			continue
 		}
-		lowerInfo, err := os.Stat(baseDir + name)
+		lowerInfo, err := siteDirStat(baseDir + name)
 		if err != nil {
 			continue
 		}
-		upperInfo, err := os.Stat(baseDir + upper)
+		upperInfo, err := siteDirStat(baseDir + upper)
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
 		return err == nil && os.SameFile(lowerInfo, upperInfo), true
 	}
 	return false, false
@@ -2045,6 +2082,12 @@ func rewriteFolds(domain string, subdomain string) map[string]string {
 // that contains it, longest first, then "/". It returns the target and the key that matched. What doesn't depend on
 // the key is found once: a site without rewrites, as most are, has nothing to look for, and whether names fold is the
 // same for every key of a request, asked once its path isn't a rewrite as it is written.
+//
+// Where names fold, the path is folded once (foldedPath), and each folder is looked up in folded as the start of
+// that, up to its own "/": folding goes character by character, none folds to "/", and "/" composes with nothing in
+// NFC, so the key of a folder is the start of the key of the path. Each folder was folded by itself, a text as long
+// as it for each one: a path of 10 KiB in capitals made thousands, with the global lock held. If both don't have as
+// many "/" (which no folding should do), each folder is folded by itself, as before.
 func rewrite(requestURI string, domain string, subdomain string) (string, string) {
 	rewrites := sitesMap[domain][subdomain]
 	if len(rewrites) == 0 {
@@ -2054,8 +2097,10 @@ func rewrite(requestURI string, domain string, subdomain string) (string, string
 		return target, requestURI
 	}
 	folded := rewriteFolds(domain, subdomain)
+	foldedPath := ""
 	if folded != nil {
-		if key, found := folded[foldKey(requestURI)]; found {
+		foldedPath = foldKey(requestURI)
+		if key, found := folded[foldedPath]; found {
 			return rewrites[key], key
 		}
 	}
@@ -2063,22 +2108,51 @@ func rewrite(requestURI string, domain string, subdomain string) (string, string
 		return "", ""
 	}
 	if !strings.HasSuffix(requestURI, "/") {
-		if key, found := rewriteKey(rewrites, folded, requestURI+"/"); found {
-			return rewrites[key], key
+		withSlash := requestURI + "/"
+		if _, found := rewrites[withSlash]; found {
+			return rewrites[withSlash], withSlash
+		}
+		if folded != nil {
+			if key, found := folded[foldedPath+"/"]; found {
+				return rewrites[key], key
+			}
 		}
 	}
 	path := requestURI // Each folder is its beginning, up to a "/": no text is made for it
-	requestURI = requestURI[1:]
-	for {
-		slash := strings.LastIndexByte(requestURI, '/')
-		if slash == -1 {
-			break
+	if folded != nil && strings.Count(foldedPath, "/") != strings.Count(path, "/") {
+		for rest := path[1:]; ; { // Each folder folded by itself
+			slash := strings.LastIndexByte(rest, '/')
+			if slash == -1 {
+				break
+			}
+			if key, found := rewriteKey(rewrites, folded, path[:slash+2]); found {
+				return rewrites[key], key
+			}
+			rest = rest[:slash]
 		}
-		slash++
-		if key, found := rewriteKey(rewrites, folded, path[:slash+1]); found {
-			return rewrites[key], key
+	} else {
+		rest, foldedRest := path[1:], ""
+		if folded != nil {
+			foldedRest = foldedPath[1:]
 		}
-		requestURI = requestURI[:slash-1]
+		for {
+			slash := strings.LastIndexByte(rest, '/')
+			if slash == -1 {
+				break
+			}
+			folder := path[:slash+2]
+			if target, found := rewrites[folder]; found {
+				return target, folder
+			}
+			if folded != nil { // The same folder, up to the same "/" of the folded path
+				foldedSlash := strings.LastIndexByte(foldedRest, '/')
+				if key, found := folded[foldedPath[:foldedSlash+2]]; found {
+					return rewrites[key], key
+				}
+				foldedRest = foldedRest[:foldedSlash]
+			}
+			rest = rest[:slash]
+		}
 	}
 	if key, found := rewriteKey(rewrites, folded, "/"); found {
 		return rewrites[key], key
@@ -2331,6 +2405,9 @@ func textTargetProblem(target string) string {
 		if _, known := shortcutWordReplacers[name]; !known || !inHost {
 			continue
 		}
+		if name == "REWRITE" { // A key of a rewrite always starts with "/": encoded in the host, it gave no URL
+			return textTargetRewriteInTheHost
+		}
 		switch class, _ := expr.ClassOf(name); class {
 		case expr.Labels:
 			labels = 1
@@ -2380,6 +2457,9 @@ func labelsBeforeOneLabel(target string) bool {
 // textTargetLabelsAtTheEnd is why a host of a redirection can't end with the labels that the client may choose.
 const textTargetLabelsAtTheEnd = "{SUBDOMAIN} and {FIRST_SUBDOMAIN}, which a wildcard lets the client choose, can't end the host of a redirection: write a \".\" and the rest of the host after them"
 
+// textTargetRewriteInTheHost is why {REWRITE} can't be in the host of a redirection (as REWRITE in an expression).
+const textTargetRewriteInTheHost = `{REWRITE} starts with "/": it can't be in the host of a redirection; write the host alone (the path asked for is added) or the path after it`
+
 // targetPosition is where the next piece of a rewrite's target goes: the host of a redirection, the path or the
 // query.
 type targetPosition uint8
@@ -2424,10 +2504,15 @@ func (writer *targetWriter) text(literal string) {
 }
 
 // value writes the value of the placeholder name, encoded for where it goes: in the host, so that "/", "?" or "@"
-// can't change the URL; in the path, each segment, keeping "/"; in the query, as one value.
+// can't change the URL, and an IPv6 address between brackets; in the path, each segment, keeping "/"; in the query,
+// as one value.
 func (writer *targetWriter) value(name string, value string) {
 	switch writer.position {
 	case targetInHost:
+		if ip := net.ParseIP(value); ip != nil && strings.IndexByte(value, ':') != -1 { // {DOMAIN} of the site * served by one
+			writer.result.WriteString("[" + value + "]") // Encoded, "::1" was "%3A%3A1": no URL
+			return
+		}
 		writer.result.WriteString(url.QueryEscape(value)) // A host name is left as it is; "/", "?" or "@" can't change the URL
 	case targetInPath:
 		if name == "REWRITE_COMPLEMENT" { // The path here; a redirection adds the query to the target's
@@ -2449,6 +2534,12 @@ func (writer *targetWriter) value(name string, value string) {
 	default:
 		writer.result.WriteString(url.QueryEscape(value))
 	}
+}
+
+// encoded writes, in the path or the query, a text that urlencode made: only the characters that a URL never encodes
+// and %XX, which change neither where it goes nor the shape of the URL. Written as a value, it was encoded again.
+func (writer *targetWriter) encoded(text string) {
+	writer.result.WriteString(text)
 }
 
 // finish returns the target, with the request's query at its end when a REWRITE_COMPLEMENT in the path of a

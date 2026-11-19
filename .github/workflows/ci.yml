@@ -20,6 +20,25 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  scripts:
+    # A job of its own: as the first step of the analysis, a commit that lost the bit skipped gofmt, vet, staticcheck,
+    # govulncheck and gosec with it.
+    name: Executable scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: The scripts are executable in the repository
+        # release.sh and the scripts of deploy/ are run as their usage lines say: a commit that loses the bit (one made
+        # by copying the files on Windows) fails here.
+        run: |
+          lost="$(git ls-files -s release.sh 'deploy/*.sh' | awk '$1 != "100755" {print $4}')"
+          if [ -n "$lost" ]; then
+            echo "Not executable in the repository (git update-index --chmod=+x):"; echo "$lost"; exit 1
+          fi
+
   analysis:
     name: Format, analysis and fork
     runs-on: ubuntu-latest
@@ -35,14 +54,6 @@ jobs:
         with:
           go-version: ${{ steps.go.outputs.version }}
           cache: false
-      - name: The scripts are executable in the repository
-        # release.sh and the scripts of deploy/ are run as their usage lines say: a commit that loses the bit (one made
-        # by copying the files on Windows) fails here.
-        run: |
-          lost="$(git ls-files -s release.sh 'deploy/*.sh' | awk '$1 != "100755" {print $4}')"
-          if [ -n "$lost" ]; then
-            echo "Not executable in the repository (git update-index --chmod=+x):"; echo "$lost"; exit 1
-          fi
       - name: gofmt
         run: |
           unformatted="$(gofmt -l .)"

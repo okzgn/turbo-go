@@ -58,9 +58,10 @@ In the panel, a site's **Add preprocessor**: the extension (`lua`), the mode **D
 "?": { "lua": "dx>/opt/turbo-dx/dx-lua" }
 ```
 
-A worker of `dx-lua` reserves 128 MiB for the stack of its scripts, besides the 16 MiB at most of the state of a
-request: reserved only (memory as far as a script recurses into it), but counted for each worker where the system
-counts what is reserved (Linux with `vm.overcommit_memory=2`). See [its guide](dx-lua/README.md#the-sandbox).
+A worker of `dx-lua` reserves 256 MiB for the stack of its scripts (the deepest recursion reaches some 116 MiB of it
+on Linux), besides the 16 MiB at most of the state of a request and the scripts it keeps in memory (up to 16 MiB):
+reserved only (memory as far as a script recurses into it), but counted for each worker where the system counts what
+is reserved (Linux with `vm.overcommit_memory=2`). See [its guide](dx-lua/README.md#the-sandbox).
 
 Turbo starts a worker when a request needs one, keeps up to one per request being served at once (never more than its
 turns, `CGP`, in use or starting), and ends a worker that has been idle for 60 seconds (within the next minute: the
@@ -131,3 +132,5 @@ The continuous integration of Turbo does both, on Linux, Windows and macOS (with
 ## License
 
 AGPL-3.0-or-later, as Turbo (`LICENSE` at the root of the repository).
+
+Third-party: `dx-lua` links LuaJIT and mlua (MIT): their notices go with a `dx-lua` that you distribute.

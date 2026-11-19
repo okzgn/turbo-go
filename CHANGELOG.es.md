@@ -2,9 +2,24 @@
 
 [English](CHANGELOG.md)
 
-v2.5.1 es la versión siguiente a v2.5. Si actualiza desde **v2.5**, lea [Actualizar desde v2.5](#actualizar-desde-v25). Desde una versión anterior, lea antes lo que este párrafo indica para ella, y después también [Actualizar desde v2.5](#actualizar-desde-v25). Si actualiza desde **v2.4.4**, lea [Actualizar desde v2.4.4](#actualizar-desde-v244). Si actualiza desde **v2.4.3**, lea solo esa también: v2.4.4 no cambió nada de lo que hace Turbo ([Actualizar desde v2.4.3](#actualizar-desde-v243)). Si actualiza desde **v2.4.2**, lea antes [Actualizar desde v2.4.2](#actualizar-desde-v242), y después [Actualizar desde v2.4.4](#actualizar-desde-v244). Si actualiza desde **v2.4.1**, también se aplica v2.4.2: lea [Actualizar desde v2.4.1](#actualizar-desde-v241), y después [Actualizar desde v2.4.2](#actualizar-desde-v242) y [Actualizar desde v2.4.4](#actualizar-desde-v244). Si actualiza desde **v2.4**, lea [Actualizar desde v2.4](#actualizar-desde-v24), y después esas tres. Si actualiza desde **v2.3.rc3**, se aplican todas las etapas de v2.4 y todas las versiones posteriores: lea antes [Actualizar desde v2.3.rc3](#actualizar-desde-v23rc3), y después las otras cuatro.
+v2.5.2 es la versión siguiente a v2.5.1. Si actualiza desde **v2.5.1**, lea [Actualizar desde v2.5.1](#actualizar-desde-v251). Si actualiza desde **v2.5**, lea antes [Actualizar desde v2.5](#actualizar-desde-v25), y después esa. Desde una versión anterior, lea antes lo que este párrafo indica para ella, y después también esas dos. Si actualiza desde **v2.4.4**, lea [Actualizar desde v2.4.4](#actualizar-desde-v244). Si actualiza desde **v2.4.3**, lea solo esa también: v2.4.4 no cambió nada de lo que hace Turbo ([Actualizar desde v2.4.3](#actualizar-desde-v243)). Si actualiza desde **v2.4.2**, lea antes [Actualizar desde v2.4.2](#actualizar-desde-v242), y después [Actualizar desde v2.4.4](#actualizar-desde-v244). Si actualiza desde **v2.4.1**, también se aplica v2.4.2: lea [Actualizar desde v2.4.1](#actualizar-desde-v241), y después [Actualizar desde v2.4.2](#actualizar-desde-v242) y [Actualizar desde v2.4.4](#actualizar-desde-v244). Si actualiza desde **v2.4**, lea [Actualizar desde v2.4](#actualizar-desde-v24), y después esas tres. Si actualiza desde **v2.3.rc3**, se aplican todas las etapas de v2.4 y todas las versiones posteriores: lea antes [Actualizar desde v2.3.rc3](#actualizar-desde-v23rc3), y después las otras cuatro.
 
 Los binarios publicados son estáticos y se compilan con el último parche de Go 1.26. Compruebe la descarga con `SHA256SUMS`, en la carpeta de la descarga: `sha256sum -c --ignore-missing SHA256SUMS` (`--ignore-missing` comprueba solo los binarios que descargó; sin él, `sha256sum` falla por los demás). Una versión firmada trae además `SHA256SUMS.sig`: [SECURITY.md](SECURITY.md) dice cómo comprobarla.
+
+## Actualizar desde v2.5.1
+
+v2.5.2 corrige lo que encontró una revisión de v2.5.1, nada de ello de gravedad alta ni media: entre ello, una regresión de v2.5.1 en las páginas del panel, y una redirección al host que elige el cliente, a través de una cabecera que el administrador escribe con `SUBDOMAIN`.
+
+Sustituya el binario (o su compilación), y compile de nuevo `dx-lua` si lo usa (0.3.2). Lo configurado sigue haciendo lo mismo, con estas excepciones:
+- **`Refresh`, `Location` y `Content-Location` no admiten `SUBDOMAIN` ni `FIRST_SUBDOMAIN`** en una expresión, tampoco a través de `token`, `urlencode`, `quoted`, `lower`, `upper` ni de una rama de `? :` (`oneOf` y las condiciones sí): un navegador va adonde dice su valor, y un subdominio comodín deja elegirlos al cliente. Una de `turbo.config` se conserva, el log lo dice, y el sitio responde 500 hasta que se cambie: redirija con una reescritura, cuyo host se comprueba.
+- **`REQUEST_URI` vuelve a ser lo que pidió el cliente, sin los parámetros que fija la consulta de la reescritura** (v2.5.1 ponía ahí todo `QUERY_STRING`): `/x?role=admin&z=1` a través de `/x` → `/app.cgi?role=user` da `REQUEST_URI=/x?z=1` y `QUERY_STRING=z=1&role=user`, para un CGI y para un worker del modo dx. Una aplicación que lo comparaba con su URL canónica podía redirigir sin fin. Un CGI que lee sus parámetros de `REQUEST_URI` (uno de Go) encuentra los de la reescritura en `QUERY_STRING`.
+- **`{REWRITE}` y una `\` se rechazan en el host de una redirección** (también `REWRITE`, en una expresión): `{REWRITE}` siempre empieza por `/`, y ahí no daba una URL; un navegador termina el host en una `\`. De `turbo.config`, un destino escrito como texto se descarta con un aviso, y una expresión se conserva y responde 500.
+- **`urlencode` en el destino de una reescritura ya no se codifica dos veces:** lo que da va a la ruta o a la consulta tal cual.
+- **`dx-lua` 0.3.2:** cada worker reserva 256 MiB de pila (la recursión más profunda ocupa unos 116 MiB de ella en Linux); `table.insert` con una posición que no es un entero de 1 a `#t + 1` es un error; un `Content-Length` que devuelve un script se descarta. Compílelo de nuevo.
+- **Turbo no arranca si `TURBO_HTTP_ADDR` y `TURBO_HTTPS_ADDR` son la misma dirección** (el mismo puerto, y el mismo host o uno de ellos en todas las interfaces): la dirección HTTPS se reintentaba cada 30 s para siempre.
+- **El panel:** por HTTPS, un host que ningún certificado cubre recibe `max-age=0` también cuando ya no está en `PA` (tras un `setM`); `hardUpload` responde 400 y no sustituye nada si el directorio de sitios cambió durante la subida; las páginas vuelven a enviar la extensión de un preprocesador que tiene dentro el token de un reemplazo.
+
+Volver a v2.5.1 no necesita nada: lee el `turbo.config` que guarda v2.5.2.
 
 ## Actualizar desde v2.5
 
@@ -71,7 +86,7 @@ Antes de actualizar, haga una copia de la carpeta de sitios, con `turbo.config`,
 
 ## Actualizar desde v2.4.1
 
-**Recomendación: actualice cuanto antes.** v2.4.2 corrige fallos de seguridad: el panel de un Turbo recién instalado, o cuya unidad de systemd perdió su archivo de credenciales, dejaba entrar con las credenciales por defecto a cualquiera que llegara a él; una sesión del panel robada aún podía hacer que un archivo de un sitio se ejecutara como página en el origen del panel, o dejar fuera al administrador con contraseñas erróneas; otra página podía bloquear la IP del administrador en el panel; y las peticiones con un `Host` mal formado llegaban a los CGI. Los detalles están en el aviso de seguridad del repositorio, publicado junto con esta versión.
+**Recomendación: actualice cuanto antes.** v2.4.2 corrige fallos de seguridad: el panel de un Turbo recién instalado, o cuya unidad de systemd perdió su archivo de credenciales, dejaba entrar con las credenciales por defecto a cualquiera que llegara a él; una sesión del panel robada aún podía hacer que un archivo de un sitio se ejecutara como página en el origen del panel, o dejar fuera al administrador con contraseñas erróneas; otra página podía bloquear la IP del administrador en el panel; y las peticiones con un `Host` mal formado llegaban a los CGI. Los detalles estarán en los avisos de seguridad del repositorio, que se publican con la primera release que lleve estas correcciones.
 
 Antes de actualizar, haga una copia de la carpeta de sitios, `turbo.config` incluido, y revise los cambios incompatibles de v2.4.2, sobre todo:
 - la contraseña por defecto (`Admin`) solo abre sesión desde la propia máquina, en `localhost` (o una dirección de loopback) y sin un proxy delante: ponga su propia contraseña antes de actualizar (o `TURBO_PASSWORD`), o entre después por un túnel SSH; un proxy en la misma máquina debe enviar `X-Forwarded-For`, `Forwarded` o `X-Real-IP`;
@@ -85,7 +100,7 @@ Antes de actualizar, haga una copia de la carpeta de sitios, `turbo.config` incl
 
 ## Actualizar desde v2.4
 
-**Recomendación: actualice cuanto antes.** v2.4.1 corrige fallos de seguridad: un cliente podía ocupar todas las plazas CGI y dejar el PHP de todos los sitios respondiendo 503, una sesión del panel robada podía cambiar lo que el administrador confirma después con la contraseña o llegar al panel con una plantilla de error, y un sitio podía perder sus ajustes cuando su carpeta no se podía leer, y servirse luego sus scripts como texto. Los detalles están en el aviso de seguridad del repositorio, que se publica junto con esta versión.
+**Recomendación: actualice cuanto antes.** v2.4.1 corrige fallos de seguridad: un cliente podía ocupar todas las plazas CGI y dejar el PHP de todos los sitios respondiendo 503, una sesión del panel robada podía cambiar lo que el administrador confirma después con la contraseña o llegar al panel con una plantilla de error, y un sitio podía perder sus ajustes cuando su carpeta no se podía leer, y servirse luego sus scripts como texto. Los detalles estarán en los avisos de seguridad del repositorio, que se publican con la primera release que lleve estas correcciones.
 
 Antes de actualizar, haga una copia de la carpeta de sitios, incluido `turbo.config`, y revise los cambios incompatibles de v2.4.1, sobre todo:
 - las plantillas de respuesta y los reemplazos de caracteres piden la contraseña actual, las acciones que la piden toman sus valores tal como llegan (un cliente de la API los envía codificados para URL, sin los tokens de los reemplazos), y un reemplazo no puede ser de letras ni dígitos;
@@ -103,7 +118,7 @@ El commit "v2.4." `57cbb3c` de `main` es v2.4; no tenía la etapa 6 (la tercera 
 
 ## Actualizar desde v2.3.rc3
 
-**Recomendación: actualice cuanto antes.** Esta versión corrige fallos de seguridad y de estabilidad: algunos podían exponer archivos de fuera de un sitio o dejar el servidor sin servicio o colgado, y otros afectaban al panel, a los certificados y a la configuración de TLS. Los detalles están en el aviso de seguridad del repositorio, que se publica junto con esta versión.
+**Recomendación: actualice cuanto antes.** Esta versión corrige fallos de seguridad y de estabilidad: algunos podían exponer archivos de fuera de un sitio o dejar el servidor sin servicio o colgado, y otros afectaban al panel, a los certificados y a la configuración de TLS. Los detalles estarán en los avisos de seguridad del repositorio, que se publican con la primera release que lleve estas correcciones.
 
 Antes de actualizar:
 
@@ -141,9 +156,29 @@ Antes de actualizar:
 
 ---
 
+## v2.5.2
+
+Sin publicar todavía: la versión siguiente a v2.5.1, con lo que encontró una revisión de v2.5.1 tal como se publicó. Cada corrección tiene una prueba que fallaba antes de ella.
+
+### Correcciones
+- **Las cabeceras que sigue un navegador:** `Refresh`, `Location` y `Content-Location` no admiten `SUBDOMAIN` ni `FIRST_SUBDOMAIN` (arriba): `'0; url=https://' + SUBDOMAIN + '.' + FIRST_DOMAIN` enviaba al visitante de una petición sin alias al host que escribió el cliente, como hacía una reescritura antes de v2.5.1.
+- **Los destinos de las reescrituras:** lo que da `urlencode` se coloca tal cual (`a%20b` era `a%2520b`); `{REWRITE}`, `REWRITE` y una `\` se rechazan en el host de una redirección; una dirección IPv6 en el host (`{DOMAIN}` del sitio `*`) va entre corchetes (`https://[::1]/x`; era `%3A%3A1`). El aviso de un host que es `SUBDOMAIN` y una sola etiqueta también ve esa etiqueta con un punto final o un puerto, como para un texto; el aviso de `SUBDOMAIN` antes de `FIRST_DOMAIN` o `FIRST_SITE` se da también para una expresión; y ninguno se escribe otra vez para una reescritura enviada de nuevo sin cambios.
+- **CGIs:** `REQUEST_URI` es lo que pidió el cliente (arriba). Un cuerpo cortado antes de la longitud que dijo es un error también en memoria, como lo era en un archivo temporal.
+- **Donde los nombres no distinguen mayúsculas** (Windows, macOS, un directorio de sitios que no las distingue), la ruta de una petición se pliega una sola vez para buscar su reescritura: una ruta de 10 KiB en mayúsculas costaba unos 130 ms y 27 MiB, con el bloqueo global tomado, y cuesta lo que cualquier otra.
+- **El panel:** un `setM` que saca el host del panel de `PA` y lo deja sin certificado responde `max-age=0` (conservaba el año de HSTS fijado al entrar), y en un host que cubre un certificado y no está en `PA` la respuesta no lleva `Strict-Transport-Security`. `hardUpload` no sustituye nada si un `setM` cambió el directorio de sitios durante la subida: sustituía la `@` del directorio que se dejaba. Las páginas vuelven a enviar la extensión de `addPreprocessor` y `delPreprocessor` tal como se escribe: el servidor lee esas dos tal como llegan, y con un reemplazo cuyo token estaba en la extensión (`!` → `hp`, y `php`) las páginas de v2.5.1 no las enviaban. La línea `login denial` de `turbo.denials` se escribe cuando los inicios de sesión ya no esperan por ella.
+- **El ciclo de vida:** la sonda de si el directorio de sitios distingue mayúsculas solo toma "no existe" del nombre en mayúsculas por un "no" (otro error, de un recurso compartido o de un bucle de enlaces, se tomaba por uno, y se dejaban de aplicar las protecciones de los sistemas que no las distinguen); las renovaciones pendientes al arrancar se miran en la gorutina del trabajo periódico, así que una señal detiene Turbo mientras un disco no responde; un certificado conservado tras una recarga se avisa una sola vez; y Turbo no arranca con la misma dirección en `TURBO_HTTP_ADDR` y `TURBO_HTTPS_ADDR` (arriba).
+- **`dx-lua` 0.3.2:** una pila de 256 MiB, `table.insert` y `Content-Length` (arriba); `O_NONBLOCK` viene de `libc`.
+- **Documentación:** `REQUEST_URI` y `QUERY_STRING` como son, en la API; el 503 de los cuerpos de las peticiones de los CGI, en la tabla de la API; los límites de 128 bytes, no caracteres; qué cuenta como un nivel de anidamiento; el error de `setM` para un directorio que lleva de vuelta; un `z` de `cfgC` que se guarda antes de un error; un certificado del panel puesto a mano que caducó; un `M` que espera a su directorio; la memoria de un worker de `dx-lua`, con su caché; las licencias de lo que enlaza `dx-lua`.
+
+### En el repositorio
+- **Pruebas:** `TestR251_…`, en `server/turbo_review_v251_<tema>_test.go`, y en `dx/dx-lua`; `FuzzExpressionTargetHost`, `FuzzTextTargetHost` y `FuzzFoldKeyPrefixes`. Las pruebas de los nombres plegados comparaban solo con `strings.EqualFold`, y fallaban solo en macOS, donde `foldKey` toma por uno un nombre en NFC y en NFD: comparan como lo hace el sistema de archivos, y se ejecutan de las dos formas en todos los sistemas.
+- **Integración continua:** la comprobación de los scripts ejecutables es un trabajo propio: como paso del análisis, un commit que perdía el bit se saltaba con él todos los análisis.
+
+---
+
 ## v2.5.1
 
-La versión siguiente a v2.5, con lo que encontró una revisión de v2.5 tal como se publicó. Cada corrección tiene una prueba que fallaba antes de ella.
+Publicada como commit de `main` (`fb3a595`), sin binarios: la versión siguiente a v2.5, con lo que encontró una revisión de v2.5 tal como se publicó. Cada corrección tiene una prueba que fallaba antes de ella.
 
 ### Correcciones
 - **Un cliente no puede ocupar la memoria y los archivos de los cuerpos de las peticiones de los scripts:** un cuerpo seguía contado en sus presupuestos, que son para todos los sitios, hasta que su respuesta había llegado al cliente, con su CGI ya terminado, y nada acotaba lo que ocupaba un cliente: uno que enviaba cuerpos y no leía sus respuestas los llenaba, y toda otra petición con cuerpo para un script recibía 503. Un cuerpo se devuelve cuando su script termina, cada cliente tiene una parte de los dos presupuestos (arriba), el presupuesto se toma según llega el cuerpo (se tomaba un megabyte por una petición que solo había enviado sus cabeceras), y una petición sin cuerpo no toma nada ni necesita un archivo temporal (con la memoria ocupada, cada `GET` a un script creaba uno, y respondía 500 donde no se podía crear).
@@ -169,7 +204,7 @@ La versión siguiente a v2.5, con lo que encontró una revisión de v2.5 tal com
 
 ## v2.5
 
-Publicada como commit de `main`, sin binarios: la versión siguiente a v2.4.4.
+Publicada como commit de `main` (`0d6d7a7`), sin binarios: la versión siguiente a v2.4.4.
 
 ### Novedades
 - **Expresiones en cabeceras y reescrituras:** el valor de una cabecera de un sitio y el destino de una reescritura pueden calcularse en cada petición ([§6.3 de la API](API_SPECIFICATION.es.md#63-expresiones-en-cabeceras-y-reescrituras)): `Cache-Control` según la extensión del archivo que se sirve, el `Access-Control-Allow-Origin` de un origen elegido de una lista, una página en el idioma del visitante, una redirección a un host elegido de una lista. El lenguaje es un subconjunto de CEL sin bucles. En el panel, los diálogos de cabeceras y reescrituras eligen "Text" o "Expression", y una expresión se escribe en un área de texto, que puede ocupar varias líneas. Lo que envía el cliente nunca llega tal cual a una cabecera ni al host de una redirección, y una expresión que falla responde 500: Turbo lo comprueba al añadir la expresión, y otra vez en cada petición. Las cabeceras que lee una expresión se añaden al `Vary` de la respuesta. El `turbo.config` de ejemplo tiene una cabecera calculada según la extensión.
@@ -202,7 +237,7 @@ Publicada como commit de `main`, sin binarios: la versión siguiente a v2.4.4.
 
 ## v2.4.4
 
-Publicada como commit de `main`, sin binarios: la versión siguiente a v2.4.3. El servidor es el mismo, sin cambios en lo que hace: esta versión trae su isotipo nuevo y, en el repositorio, el código en una carpeta y dos pruebas que ya no dependen de lo rápida que sea la máquina.
+Publicada como commit de `main` (`0e1668c`), sin binarios: la versión siguiente a v2.4.3. El servidor es el mismo, sin cambios en lo que hace: esta versión trae su isotipo nuevo y, en el repositorio, el código en una carpeta y dos pruebas que ya no dependen de lo rápida que sea la máquina.
 
 ### Novedades
 - **Isotipo nuevo:** el panel y el sitio de ejemplo muestran el isotipo nuevo de Turbo, y los iconos del repositorio (`turbo.icon.png`, `turbo.icon.small.png`, `turbo.icon.nano.png`) también son el nuevo. Una copia de `turbo.dev` en el directorio de sitios sigue mostrando su propio `admin/i.png`.
@@ -214,7 +249,7 @@ Publicada como commit de `main`, sin binarios: la versión siguiente a v2.4.3. E
 
 ## v2.4.3
 
-Publicada como commit de `main`, sin binarios: la versión siguiente a v2.4.2, con lo que encontró una revisión completa de su código. Cada corrección tiene una prueba que fallaba antes de ella.
+Publicada como commit de `main` (`c82106e`), sin binarios: la versión siguiente a v2.4.2, con lo que encontró una revisión completa de su código. Cada corrección tiene una prueba que fallaba antes de ella.
 
 ### Novedades
 - **Archivos precomprimidos (`cfgZ`):** un sitio, o un subdominio, puede responder la petición de un archivo con el `<archivo>.br` o el `<archivo>.gz` que hay junto a él, para las peticiones cuyo `Accept-Encoding` lo acepta, con el tipo del archivo, la longitud de la copia, un `ETag` propio y `Vary: Accept-Encoding`. Está apagado hasta que se enciende para un sitio: "Precompressed" en el panel, `cfgZ` en la API, `"Z"` entre los ajustes del sitio en `turbo.config`. Turbo no comprime: quien despliega el sitio genera las copias, y sus fechas no se comparan con la del archivo. Las peticiones con `Range`, los archivos que ejecuta un preprocesador y las URL que terminan en `/index.html` se sirven como siempre (especificación de la API, §8.4).
@@ -288,7 +323,7 @@ Publicada como commit de `main`, sin binarios: la versión siguiente a v2.4.2, c
 
 ## v2.4.2
 
-Publicada como commit de `main`, sin binarios: la versión siguiente a v2.4.1, con las correcciones encontradas después de ella.
+Publicada como commits de `main` (`ac63977` y `15dcff2`, los dos "v2.4.2."), sin binarios: la versión siguiente a v2.4.1, con las correcciones encontradas después de ella.
 
 ### Correcciones
 - **Un sitio de `turbo.config` sin sección propia:** un sitio que el archivo nombraba solo por sus subdominios (`"example.com": {"www": {…}}`), o como `{}` o `null`, se construía sin nada, y su `/` respondía 404, mientras que el mismo sitio encontrado en el disco tiene `index.html` como índice. Ahora recibe lo mismo que un sitio encontrado en el disco: `index.html` como índice y el estado de su certificado. Un sitio con sección `""` conserva exactamente lo que dice la sección: `"": {}` lo deja sin índice. Un sitio que se guardó mientras tanto ya tiene su sección, con `"-": {}`, y sigue sin índice: añada el índice desde el panel.

@@ -266,6 +266,7 @@ func TestTextTargetsFollowTheRulesOfExpressions(t *testing.T) {
 		"https://{SUBDOMAIN}m/x":                   "can't end the host",
 		"/x/{TURBO_CURRENT_DIR}":                   "{TURBO_CURRENT_DIR} can't be in a rewrite",
 		"https://x.example/?d={TURBO_CURRENT_DIR}": "{TURBO_CURRENT_DIR} can't be in a rewrite",
+		"https://x.example{REWRITE}":               "{REWRITE} starts with", // Always "/": no URL in the host (review of v2.5.1, XP-3)
 	} {
 		if ok, message := add(target); ok || !strings.Contains(message, want) {
 			t.Errorf("%s: %v %q; expected %q", target, ok, message, want)
@@ -273,7 +274,7 @@ func TestTextTargetsFollowTheRulesOfExpressions(t *testing.T) {
 	}
 	for _, target := range []string{
 		"https://{SUBDOMAIN}.example.org/{REWRITE_COMPLEMENT}", "https://{SUBDOMAIN}.{DOMAIN}/x", "https://{DOMAIN}/x",
-		"https://{FIRST_SITE}/a", "/x/{FILE}", "https://x.example/{FILE}?f={FIRST_QUERY}", "https://x.example{REWRITE}",
+		"https://{FIRST_SITE}/a", "/x/{FILE}", "https://x.example/{FILE}?f={FIRST_QUERY}", "https://x.example/new{REWRITE}",
 	} {
 		if ok, message := add(target); !ok {
 			t.Errorf("%s refused: %q", target, message)

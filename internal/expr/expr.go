@@ -59,11 +59,14 @@ const (
 )
 
 // Part is a piece of the text an expression gives, with its class. Name is the variable it is, or that lower or upper
-// changed, as it came: a rewrite places some by their names (REWRITE_COMPLEMENT); "" otherwise.
+// changed, as it came: a rewrite places some by their names (REWRITE_COMPLEMENT); "" otherwise. Encoded says that
+// urlencode made it (also once lower or upper changed it): it has only the characters that a URL never encodes and
+// %XX, and a rewrite places it in a path or a query as it is.
 type Part struct {
-	Text  string
-	Class Class
-	Name  string
+	Text    string
+	Class   Class
+	Name    string
+	Encoded bool
 }
 
 // Variable is a value of the request that an expression reads by its name.
@@ -168,6 +171,12 @@ type Options struct {
 	// NoQuoted refuses quoted in the value of a header whose grammar doesn't keep a quoted text together, where a ";"
 	// or a space inside the quotes would still end the value (Set-Cookie, Content-Security-Policy).
 	NoQuoted bool
+	// NoLabels refuses, in the value of a header whose URL a browser follows (Refresh, Location, Content-Location),
+	// the variables of the class Labels (SUBDOMAIN, FIRST_SUBDOMAIN), which a wildcard subdomain lets the client
+	// choose: also through token, urlencode, quoted, lower and upper, and in either branch of ? :. oneOf still takes
+	// them (it gives a text of its list), and so does a condition. The host of a redirection has its rule only in
+	// the targets of the rewrites; in such a header the client chose where its visitors went.
+	NoLabels bool
 }
 
 // The limits of an expression.
@@ -216,6 +225,8 @@ type Program struct {
 	cookies bool
 	// The host of a redirection may be SUBDOMAIN or FIRST_SUBDOMAIN, a "." and one label of a text of the expression
 	labelsOneLabel bool
+	// The host of a redirection may be SUBDOMAIN or FIRST_SUBDOMAIN, a "." and FIRST_DOMAIN or FIRST_SITE
+	labelsAliasName bool
 }
 
 // LabelsBeforeOneLabel reports whether the target of a rewrite may have, as the host of a redirection, SUBDOMAIN or
@@ -223,6 +234,12 @@ type Program struct {
 // visitor chooses that label's domain whole (evil.yoursite.net to evil.com). It compiles, as a site may want it with
 // a suffix of its own; the caller may warn of it.
 func (p *Program) LabelsBeforeOneLabel() bool { return p.labelsOneLabel }
+
+// LabelsBeforeAnAliasName reports whether the target of a rewrite may have, as the host of a redirection, SUBDOMAIN
+// or FIRST_SUBDOMAIN, a "." and FIRST_DOMAIN or FIRST_SITE, which give nothing for a request that comes through no
+// alias and no wildcard domain: such a request answers 500, as the client's labels and a "." would be the host. It
+// compiles, as through an alias it is what is meant; the caller may warn of it, as for a target written as a text.
+func (p *Program) LabelsBeforeAnAliasName() bool { return p.labelsAliasName }
 
 // Source is the expression as it was written.
 func (p *Program) Source() string { return p.source }
@@ -270,7 +287,7 @@ func Compile(source string, options Options) (*Program, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Program{source: source, target: options.Target, root: root, headers: c.headers, cookies: c.cookies, labelsOneLabel: c.labelsOneLabel}, nil
+	return &Program{source: source, target: options.Target, root: root, headers: c.headers, cookies: c.cookies, labelsOneLabel: c.labelsOneLabel, labelsAliasName: c.labelsAliasName}, nil
 }
 
 // Header evaluates a header expression for r: the value of the header, without the spaces and tabs at its ends, or

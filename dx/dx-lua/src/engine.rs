@@ -43,24 +43,39 @@ const ALLOWED_GLOBALS: &[&str] = &[
     "bit",
 ];
 
-/// When the time of the request is over, an error caught by `pcall` or `xpcall` is raised again: a script can't catch
-/// its own end. The handler of `xpcall` isn't called then: LuaJIT would run it without the hook, since the error comes
-/// from the hook, and a handler that doesn't end would hold the worker.
-const PRELUDE: &str = r#"
+/// What runs before each script. When the time of the request is over (`over`, nil without a time), an error caught by
+/// `pcall` or `xpcall` is raised again: a script can't catch its own end. The handler of `xpcall` isn't called then:
+/// LuaJIT would run it without the hook, since the error comes from the hook, and a handler that doesn't end would hold
+/// the worker. And `table.insert` with a position that isn't an integer of 1 to `#t + 1` is an error, as in Lua 5.3:
+/// LuaJIT moves the elements up to it in a loop of C, which the hook doesn't stop, and a position of 2^31 (or -2^31)
+/// held the worker some 18 s past the time of its request. The originals are kept as upvalues, where no script reaches.
+const PRELUDE: &str = r##"
 local over, raw_pcall, raw_xpcall, error = ...
-local function rethrow(ok, ...)
-  if not ok and over() then error("the time of the request is over", 0) end
-  return ok, ...
-end
-pcall = function(f, ...) return rethrow(raw_pcall(f, ...)) end
-xpcall = function(f, handler, ...)
-  local function guarded(...)
-    if over() then return "the time of the request is over" end
-    return handler(...)
+if over then
+  local function rethrow(ok, ...)
+    if not ok and over() then error("the time of the request is over", 0) end
+    return ok, ...
   end
-  return rethrow(raw_xpcall(f, guarded, ...))
+  pcall = function(f, ...) return rethrow(raw_pcall(f, ...)) end
+  xpcall = function(f, handler, ...)
+    local function guarded(...)
+      if over() then return "the time of the request is over" end
+      return handler(...)
+    end
+    return rethrow(raw_xpcall(f, guarded, ...))
+  end
 end
-"#;
+local insert, select, type, tonumber, floor = table.insert, select, type, tonumber, math.floor
+table.insert = function(t, ...)
+  if select("#", ...) == 2 and type(t) == "table" then
+    local position = tonumber((...))
+    if position and (position ~= floor(position) or position < 1 or position > #t + 1) then
+      error("bad argument #2 to 'insert' (position out of bounds)", 2)
+    end
+  end
+  return insert(t, ...)
+end
+"##;
 
 /// The limits of a script: the worker's own, which Turbo doesn't set.
 pub struct Config {
@@ -128,41 +143,9 @@ fn file_identity(meta: &std::fs::Metadata) -> u64 {
 #[cfg(unix)]
 fn open_script(path: &Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
-    std::fs::OpenOptions::new().read(true).custom_flags(O_NONBLOCK).open(path)
+    // O_NONBLOCK, which std doesn't name, as the system has it (libc): it was written by hand for each system
+    std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(path)
 }
-
-/// O_NONBLOCK, which std doesn't name: the one of Linux (but on the architectures where it is another), and the one
-/// of macOS and the BSDs. Elsewhere 0: the open may wait there, as it did.
-#[cfg(all(
-    any(target_os = "linux", target_os = "android"),
-    not(any(target_arch = "mips", target_arch = "mips64", target_arch = "sparc", target_arch = "sparc64"))
-))]
-const O_NONBLOCK: i32 = 0o4000;
-#[cfg(any(
-    target_os = "macos",
-    target_os = "ios",
-    target_os = "freebsd",
-    target_os = "dragonfly",
-    target_os = "netbsd",
-    target_os = "openbsd"
-))]
-const O_NONBLOCK: i32 = 0x0004;
-#[cfg(all(
-    unix,
-    not(any(
-        all(
-            any(target_os = "linux", target_os = "android"),
-            not(any(target_arch = "mips", target_arch = "mips64", target_arch = "sparc", target_arch = "sparc64"))
-        ),
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "freebsd",
-        target_os = "dragonfly",
-        target_os = "netbsd",
-        target_os = "openbsd"
-    ))
-))]
-const O_NONBLOCK: i32 = 0;
 
 /// On Windows no open of what is inside the folder of a site waits (a named pipe isn't a file of a folder); a folder is
 /// opened as one (FILE_FLAG_BACKUP_SEMANTICS), so that its handle tells what it is, as on Unix.
@@ -377,7 +360,8 @@ pub fn lua_version() -> String {
     lua.load("return jit and jit.version or _VERSION").eval::<String>().unwrap_or_else(|_| "Lua".into())
 }
 
-/// Takes out every global but the allowed ones, replaces `print` and wraps `pcall` and `xpcall`.
+/// Takes out every global but the allowed ones, replaces `print` and wraps `pcall`, `xpcall` and `table.insert`
+/// (PRELUDE).
 fn sandbox(lua: &Lua, deadline: Option<Instant>, name: &str, max_print: usize, write: fn(&str)) -> mlua::Result<()> {
     let globals = lua.globals();
     let mut remove = Vec::new();
@@ -414,13 +398,15 @@ fn sandbox(lua: &Lua, deadline: Option<Instant>, name: &str, max_print: usize, w
         Ok(())
     })?;
     globals.raw_set("print", print)?;
-    if let Some(deadline) = deadline {
-        let over = lua.create_function(move |_, ()| Ok(Instant::now() >= deadline))?;
-        let pcall: Value = globals.raw_get("pcall")?;
-        let xpcall: Value = globals.raw_get("xpcall")?;
-        let error: Value = globals.raw_get("error")?;
-        lua.load(PRELUDE).set_name("=dx-lua").set_mode(ChunkMode::Text).call::<()>((over, pcall, xpcall, error))?;
-    }
+    // The PRELUDE: pcall and xpcall wrapped only with a time, table.insert always
+    let over = match deadline {
+        Some(deadline) => Value::Function(lua.create_function(move |_, ()| Ok(Instant::now() >= deadline))?),
+        None => Value::Nil,
+    };
+    let pcall: Value = globals.raw_get("pcall")?;
+    let xpcall: Value = globals.raw_get("xpcall")?;
+    let error: Value = globals.raw_get("error")?;
+    lua.load(PRELUDE).set_name("=dx-lua").set_mode(ChunkMode::Text).call::<()>((over, pcall, xpcall, error))?;
     Ok(())
 }
 
@@ -737,6 +723,11 @@ fn to_response(lua: &Lua, value: Value) -> Result<Response, String> {
                             return Err(too_large());
                         }
                         let name = lua_bytes(lua, &name)?.ok_or("a header without a text for its name")?;
+                        if name.eq_ignore_ascii_case(b"Content-Length") {
+                            // The worker's: the length of the body. One of the script that wasn't cut the answer, and
+                            // the connection was closed
+                            continue;
+                        }
                         match value {
                             // Raw, as everything read of what a script returns: no metamethod of it runs after it ended.
                             Value::Table(values) => {

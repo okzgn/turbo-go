@@ -61,6 +61,9 @@ type checker struct {
 	// A text of the expression may leave a "." and one label alone after Labels, to the end of the host
 	// ("SUBDOMAIN + '.com'"): allowed, and worth a warning of the caller (Program.LabelsBeforeOneLabel)
 	labelsOneLabel bool
+	// FIRST_DOMAIN or FIRST_SITE may come right after Labels and a ".": allowed, and worth a warning of the caller
+	// (Program.LabelsBeforeAnAliasName)
+	labelsAliasName bool
 }
 
 func (c *checker) errorAt(pos int, message string) *Error { return errorAt(c.source, pos, message) }
@@ -269,17 +272,19 @@ func describe(n *node) string {
 }
 
 // headerParts checks the rules of a header: no text of the request as it came reaches the value (it could carry
-// what the client wants into a header: a reflected origin, a parameter of its own). Only what reaches the result is
-// looked at: a condition reads anything.
+// what the client wants into a header: a reflected origin, a parameter of its own), and with NoLabels, no labels
+// that the client chose either (noLabelsIn). Only what reaches the result is looked at: a condition reads anything.
 func (c *checker) headerParts(n *node) *Error {
 	switch n.op {
-	case opText, opOneOf, opToken, opURLEncode:
+	case opText, opOneOf:
 		return nil
+	case opToken, opURLEncode:
+		return c.noLabelsIn(n.args[0])
 	case opQuoted:
 		if c.options.NoQuoted {
 			return c.errorAt(n.pos, "quoted can't be used in this header: what reads it doesn't keep a quoted text as one value (a \";\" or a space inside still ends it, or the quotes are dropped); use token, urlencode or oneOf")
 		}
-		return nil
+		return c.noLabelsIn(n.args[0])
 	case opConcat:
 		if err := c.headerParts(n.args[0]); err != nil {
 			return err
@@ -293,12 +298,46 @@ func (c *checker) headerParts(n *node) *Error {
 	case opLower, opUpper:
 		return c.headerParts(n.args[0])
 	case opVariable:
-		if variables[n.variable].class != Raw {
+		if class := variables[n.variable].class; class == Labels {
+			return c.noLabelsIn(n)
+		} else if class != Raw {
 			return nil
 		}
 	}
 	return c.errorAt(n.pos, "a header can't carry "+describe(n)+", which the request sends as it wants: pass it through oneOf, token, quoted or urlencode")
 }
+
+// noLabelsIn checks, with NoLabels, that no SUBDOMAIN nor FIRST_SUBDOMAIN of n reaches the value of the header: by
+// itself, through what changes a text (token, urlencode, quoted, lower, upper) or through either branch of ? :.
+// oneOf gives a text of its list, and a condition no text.
+func (c *checker) noLabelsIn(n *node) *Error {
+	if !c.options.NoLabels {
+		return nil
+	}
+	switch n.op {
+	case opVariable:
+		if variables[n.variable].class == Labels {
+			return c.errorAt(n.pos, labelsInANavigationHeader)
+		}
+	case opConcat:
+		if err := c.noLabelsIn(n.args[0]); err != nil {
+			return err
+		}
+		return c.noLabelsIn(n.args[1])
+	case opCondition:
+		if err := c.noLabelsIn(n.args[1]); err != nil {
+			return err
+		}
+		return c.noLabelsIn(n.args[2])
+	case opToken, opURLEncode, opQuoted, opLower, opUpper:
+		return c.noLabelsIn(n.args[0])
+	}
+	return nil
+}
+
+// labelsInANavigationHeader is why a header that a browser follows (NoLabels) can't carry the labels that the client
+// chose.
+const labelsInANavigationHeader = "SUBDOMAIN and FIRST_SUBDOMAIN can't be used in this header: a browser goes where its value says, and a wildcard subdomain lets the client choose them; redirect with a rewrite, whose host is checked"
 
 // position is where the next part of a rewrite's target goes, as the caller places it: before anything (the start,
 // which only a text of the expression can begin), in the host of a redirection, in the path or in the query. A set
@@ -341,6 +380,10 @@ func (c *checker) rewriteParts(root *node) *Error {
 // labelsAtTheEnd is why the host of a redirection can't end with SUBDOMAIN or FIRST_SUBDOMAIN: under a wildcard the
 // client chooses them ("evil.example" of "evil.example.mysite.com"), and would choose where its visitors go.
 const labelsAtTheEnd = "SUBDOMAIN and FIRST_SUBDOMAIN, which a wildcard lets the client choose, can't end the host of a redirection: write a \".\" and the rest of the host after them"
+
+// rewriteInTheHost is why REWRITE, the key of the rewrite, can't be in the host of a redirection: it always starts
+// with "/", and encoded there it gave no URL ("https://new.example.com%2Fblog%2F/blog/a").
+const rewriteInTheHost = `REWRITE starts with "/": it can't be in the host of a redirection; write the host alone (the path asked for is added) or the path after it`
 
 // labelStart is a character that can start a label of a host after the "." that follows Labels.
 func labelStart(c byte) bool {
@@ -398,11 +441,17 @@ func (c *checker) flow(n *node, in position) (position, *Error) {
 		return 0, c.errorAt(n.pos, "a target starts with a text written in the expression (/, http:// or https://), and "+describe(n)+" may come first")
 	}
 	inHost := in&(positionHostStart|positionHost) != 0
+	if inHost && n.op == opVariable && n.variable == Rewrite {
+		return 0, c.errorAt(n.pos, rewriteInTheHost)
+	}
 	if inHost && class != Config && class != Host && class != Labels {
 		return 0, c.errorAt(n.pos, "the host of a redirection can only be written in the expression, chosen with oneOf, or one that Turbo serves; "+describe(n)+" may fall in it")
 	}
 	if inHost && in&afterLabels != 0 && class != Labels { // "SUBDOMAIN + DOMAIN": the client's labels would start another name
 		return 0, c.errorAt(n.pos, labelsAtTheEnd)
+	}
+	if inHost && in&afterLabelsDot != 0 && n.op == opVariable && (n.variable == FirstDomain || n.variable == FirstSite) {
+		c.labelsAliasName = true // Nothing without an alias: the caller answers 500 then
 	}
 	// A value: what follows has no text of the expression right before it
 	out := in &^ (afterSlash | afterDot | afterLabels | afterLabelsDot)
@@ -447,6 +496,11 @@ func (c *checker) advance(n *node, in position, text string) (position, *Error) 
 			}
 			at = positionHost
 		}
+		if at == positionHost && strings.IndexByte(hostOf(rest), '\\') != -1 {
+			// A browser ends the host there, and what was after it, the rest of the host for the rule of the labels,
+			// was the path: "SUBDOMAIN + '.com\\.example.com'" went to the client's labels and ".com"
+			return 0, c.errorAt(n.pos, `the host of a redirection can't have a \`)
+		}
 		if strings.Contains(rest, "..") || strings.Contains(rest, "//") {
 			return 0, c.errorAt(n.pos, "a target can't have '..' or '//'")
 		}
@@ -464,12 +518,14 @@ func (c *checker) advance(n *node, in position, text string) (position, *Error) 
 		return 0, c.errorAt(n.pos, "a target can't have '..' or '//'")
 	}
 	if in&(afterLabels|afterLabelsDot) != 0 {
-		host := text // What of the text is still the host
-		if end := strings.IndexAny(host, "/?#"); end != -1 {
-			host = host[:end]
-		}
-		if in&afterLabels != 0 && len(host) > 1 && host[0] == '.' && strings.IndexByte(host[1:], '.') == -1 {
-			c.labelsOneLabel = true
+		host := hostOf(text) // What of the text is still the host
+		if in&afterLabels != 0 && len(host) > 1 && host[0] == '.' {
+			// Without its port, nor the dot that may end a host, which is no label more: "SUBDOMAIN + '.com.'" is
+			// "SUBDOMAIN + '.com'", as for a target written as a text
+			label, _, _ := strings.Cut(host[1:], ":")
+			if label = strings.TrimSuffix(label, "."); label != "" && strings.IndexByte(label, '.') == -1 {
+				c.labelsOneLabel = true
+			}
 		}
 		switch {
 		case in&afterLabels != 0 && (host == "" || host[0] != '.'):
@@ -484,6 +540,14 @@ func (c *checker) advance(n *node, in position, text string) (position, *Error) 
 		}
 	}
 	return out, nil
+}
+
+// hostOf is what of a text placed in the host of a redirection is still the host: up to a "/", "?" or "#".
+func hostOf(text string) string {
+	if end := strings.IndexAny(text, "/?#"); end != -1 {
+		return text[:end]
+	}
+	return text
 }
 
 // advancePosition is where a text placed as it is from at leaves the next part: a "/" goes from the host to the

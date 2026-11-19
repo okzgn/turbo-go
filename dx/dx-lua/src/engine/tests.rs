@@ -725,3 +725,58 @@ fn a_pipe_isnt_opened_as_a_script() {
     let answer = receiver.recv_timeout(Duration::from_secs(10)).expect("the worker waits for the pipe");
     assert_eq!(answer.unwrap(), Response::empty(404));
 }
+
+/// `table.insert` with a position that isn't an integer of 1 to `#t + 1` is an error at once, with a time and without:
+/// LuaJIT moved the elements up to it in a loop of C that the hook doesn't stop, and a position of 2^31 (or -2^31) held
+/// the worker some 18 s past the time of its request (review of v2.5.1, RS-2). The other forms do what they did.
+#[test]
+fn table_insert_out_of_its_bounds_is_an_error() {
+    let site = Site::new();
+    site.script("far.lua", "table.insert({}, 2^31, 1)")
+        .script("negative.lua", "table.insert({}, -2^31, 1)")
+        .script("half.lua", "table.insert({ 1, 2 }, 1.5, 0)")
+        .script("zero.lua", "table.insert({ 1, 2 }, 0, 0)")
+        .script("past.lua", "table.insert({ 1, 2 }, 4, 0)")
+        .script(
+            "forms.lua",
+            r#"local t = {}
+            table.insert(t, "a") table.insert(t, 1, "b") table.insert(t, #t + 1, "c") table.insert(t, "2", "d")
+            return table.concat(t, ",")"#,
+        )
+        .script("caught.lua", "local ok, e = pcall(table.insert, {}, 2^31, 1) return tostring(ok) .. ' ' .. e")
+        .script("not-a-number.lua", "table.insert({}, 'x', 1)");
+    for timeout in [None, Some("30000")] {
+        let extra: Vec<(&str, &str)> = timeout.map(|t| vec![("DX_TIMEOUT_MS", t)]).unwrap_or_default();
+        for script in ["far.lua", "negative.lua", "half.lua", "zero.lua", "past.lua"] {
+            let start = Instant::now();
+            let error = site.run(script, &extra, b"").unwrap_err();
+            assert!(error.contains("position out of bounds"), "{script}, time {timeout:?}: {error}");
+            assert!(start.elapsed() < Duration::from_secs(2), "{script}, time {timeout:?}: {:?}", start.elapsed());
+        }
+        let forms = site.run("forms.lua", &extra, b"").unwrap();
+        assert_eq!(String::from_utf8_lossy(&forms.body), "b,d,a,c", "time {timeout:?}");
+        let caught = String::from_utf8_lossy(&site.run("caught.lua", &extra, b"").unwrap().body).into_owned();
+        assert!(
+            caught.starts_with("false ") && caught.contains("position out of bounds"),
+            "time {timeout:?}: {caught}"
+        );
+        let error = site.run("not-a-number.lua", &extra, b"").unwrap_err();
+        assert!(error.contains("bad argument #2 to 'insert'"), "time {timeout:?}: {error}");
+    }
+}
+
+/// A Content-Length that a script returns is dropped, in any case: the length is the body's, which the worker knows. One
+/// that wasn't it cut the answer, and the connection was closed (review of v2.5.1, RS-3).
+#[test]
+fn a_content_length_of_a_script_is_dropped() {
+    let site = Site::new();
+    site.script(
+        "length.lua",
+        r#"return { headers = { ["Content-Length"] = "5", ["content-LENGTH"] = { "50", "60" }, ["X-Test"] = "yes" },
+        body = "hello world" }"#,
+    );
+    let response = site.run("length.lua", &[], b"").unwrap();
+    assert_eq!(response.body, b"hello world");
+    assert!(header(&response, "Content-Length").is_empty(), "{:?}", response.headers);
+    assert_eq!(header(&response, "X-Test"), vec![&b"yes"[..]]);
+}

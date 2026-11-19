@@ -118,21 +118,26 @@ func console(responseWriter customNetHttp.ResponseWriter, request *customNetHttp
 	return true
 }
 
-// panelHSTS sets Strict-Transport-Security in an answer of the panel on its own host over TLS: a year while a
-// certificate covers the host, and max-age=0 without one, so that the browser can come back by HTTP (a request on a
-// connection still open, or a TLS session resumed, once the certificate is gone). It is set as each request comes in,
-// and again by the actions that may take the certificate away before they answer (setM to a directory without
-// turbo.panel, cfgPC a=0 also when its files were already gone): their answer carried the year decided before them,
-// with no HTTPS left to come back to, and the administrator's browser was kept out of the panel.
+// panelHSTS sets Strict-Transport-Security in an answer of the panel over TLS: a year on a host of PA while a
+// certificate covers it; max-age=0 on any host that none covers, so that the browser can come back by HTTP (a request
+// on a connection still open, or a TLS session resumed, once the certificate is gone); and none on a host that a
+// certificate covers and isn't of PA. It is set as each request comes in, and again by the actions that may take the
+// certificate away, or the host out of PA, before they answer (setM to a directory without turbo.panel or whose
+// turbo.config changes PA, cfgPC a=0 also when its files were already gone): their answer carried the year decided
+// before them, with no HTTPS left to come back to, and the administrator's browser was kept out of the panel. A host
+// that PA no longer lists may have had the year: without a certificate it gets max-age=0 too.
 func panelHSTS(responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request) {
-	hostName := panelHostName(request)
-	if request.TLS == nil || !panelAccess.Load().hosts[hostName] {
+	if request.TLS == nil {
 		return
 	}
-	if certificateFor(hostName) != nil {
-		responseWriter.Header().Set("Strict-Transport-Security", "max-age=31536000")
-	} else {
+	hostName := panelHostName(request)
+	switch {
+	case certificateFor(hostName) == nil:
 		responseWriter.Header().Set("Strict-Transport-Security", "max-age=0")
+	case panelAccess.Load().hosts[hostName]:
+		responseWriter.Header().Set("Strict-Transport-Security", "max-age=31536000")
+	default: // The year set as the request came in, on a host of PA before the action, isn't kept
+		responseWriter.Header().Del("Strict-Transport-Security")
 	}
 }
 
@@ -695,10 +700,18 @@ func startLoginAttempt(ip string) (loginAttempt, int64) {
 }
 
 // finishLoginAttempt ends an attempt started by startLoginAttempt and, if it failed, counts the failure and blocks
-// its client, or its /48, when it reaches the limit.
+// its client, or its /48, when it reaches the limit. The lines of turbo.denials of those blocks are written once
+// loginFailuresMutex is released: written with it held, a disk that took long to write them held every login and
+// every check of the current password with it.
 func finishLoginAttempt(attempt loginAttempt, failed bool) {
+	var denials []string
+	defer func() {
+		for _, line := range denials {
+			serverWriteLogs(denialsLogName, nil, 0, line)
+		}
+	}()
 	loginFailuresMutex.Lock()
-	defer loginFailuresMutex.Unlock()
+	defer loginFailuresMutex.Unlock() // Runs before the lines are written
 	now := time.Now()
 	for _, limit := range attempt {
 		failures, found := loginFailuresByIP[limit.key]
@@ -718,7 +731,7 @@ func finishLoginAttempt(attempt loginAttempt, failed bool) {
 		block := min(loginFirstBlock<<min(failures.blocks, 4), loginLongestBlock)
 		failures.blocks++
 		failures.count, failures.windowEnd, failures.blockedUntil = 0, now, now.Add(block)
-		serverWriteLogs(denialsLogName, nil, 0, limit.key+" login denial "+block.String())
+		denials = append(denials, limit.key+" login denial "+block.String())
 	}
 }
 
@@ -1752,8 +1765,10 @@ func cleanInterruptedWork(baseDir string, startDir string) bool {
 // hardUpload replaces the public folder (@) of a site with the uploaded files, all at once: every name is
 // checked first, the files are written to a folder of their own next to @, and that folder takes the place of @
 // with a rename, holding the global lock and only if the site still exists, so a site deleted meanwhile doesn't
-// come back. Until then, @ is left as it was. It returns the status and the message of the response.
-func hardUpload(domain string, subdomain string, siteDir string, files []*customNetHttp.FileHeader) (int, string) {
+// come back, and baseDir, the sites directory that siteDir is in, is still the one in use: after a setM meanwhile,
+// the @ replaced was of the directory left, and the answer said "Data uploaded". Until then, @ is left as it was. It
+// returns the status and the message of the response.
+func hardUpload(domain string, subdomain string, baseDir string, siteDir string, files []*customNetHttp.FileHeader) (int, string) {
 	type upload struct {
 		file *customNetHttp.FileHeader
 		path string
@@ -1829,8 +1844,11 @@ func hardUpload(domain string, subdomain string, siteDir string, files []*custom
 	beforeUploadSwap()
 	contentDir := siteDir + publicDirName
 	previousDir := contentDir + previousFolderMark + newSessionToken()[:16]
-	siteGone := false
+	siteGone, dirChanged := false, false
 	withGlobalLock(func() {
+		if dirChanged = sitesDir.Get() != baseDir; dirChanged { // setM changes it with this lock held
+			return
+		}
 		if siteGone = !siteExists(domain, subdomain); siteGone {
 			return
 		}
@@ -1844,6 +1862,9 @@ func hardUpload(domain string, subdomain string, siteDir string, files []*custom
 			}
 		}
 	})
+	if dirChanged { // The folder of the upload is removed when it returns, as with a site deleted meanwhile
+		return 400, "The sites directory changed during the upload: nothing was replaced"
+	}
 	if siteGone {
 		return 400, "Site not found"
 	}
@@ -2650,11 +2671,12 @@ func consoleActionsAPI(apiPath string, currentSession string, viaCookie bool, re
 				return true
 			}
 
-			siteDir := sitesDir.Get() + changeWildcards(request.Form["s"][0]) + "/"
+			baseDir := sitesDir.Get() // hardUpload replaces nothing if a setM changes it meanwhile
+			siteDir := baseDir + changeWildcards(request.Form["s"][0]) + "/"
 			if request.Form["d"][0] != "" {
 				siteDir += changeWildcards(request.Form["d"][0]) + "/"
 			}
-			status, message := hardUpload(request.Form["s"][0], request.Form["d"][0], siteDir, request.MultipartForm.File["f"])
+			status, message := hardUpload(request.Form["s"][0], request.Form["d"][0], baseDir, siteDir, request.MultipartForm.File["f"])
 			respondStatus(responseWriter, status, message)
 			return true
 

@@ -13,3 +13,7 @@ path = "src/main.rs"
 [dependencies]
 dx-core = { path = "../dx-core" }
 mlua = { version = "0.12", features = ["luajit", "vendored"] }
+
+# O_NONBLOCK, to open a script without waiting (already built, for mlua)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

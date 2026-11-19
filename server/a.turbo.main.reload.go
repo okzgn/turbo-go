@@ -366,6 +366,11 @@ func updateSettingsFollowing(checkSitesFlag bool, redirects int, options reloadO
 			if configErr == nil {
 				certificatePublishPaused = true
 				inUse := siteCertificates // applySiteConfig makes the map anew
+				if !following {
+					// What keepCertificatesInUseLocked keeps, as the validator S applies the file
+					certificatesBeforeApply = inUse
+					defer func() { certificatesBeforeApply = nil }() // Also after a panic, with the lock still held
+				}
 				applySiteConfig(config)
 				if !following {
 					keepCertificatesInUseLocked(inUse)
@@ -675,6 +680,9 @@ func applySiteConfig(config parsedConfig) {
 // stamp says that its files couldn't be loaded, so the look of every 30 s reads them again (refreshSiteCertificates).
 // Callers hold the global lock.
 func keepCertificatesInUseLocked(inUse map[string]*tls.Certificate) {
+	// It warns of each, and nothing else does: the validator S doesn't say that HTTPS waits for the pair
+	// (certificatesBeforeApply), nor does the look that follows (refreshSiteCertificates). Three warnings were written,
+	// and the first said that HTTPS waited, while the certificate in use went on.
 	for siteKey, cert := range inUse {
 		if _, loaded := siteCertificates[siteKey]; loaded || cert == nil || !httpsEnabled(siteKey) {
 			continue
@@ -684,6 +692,11 @@ func keepCertificatesInUseLocked(inUse map[string]*tls.Certificate) {
 		slog.Warn("The certificate files of a site can't be loaded: the certificate in use stays", "site", siteKey)
 	}
 }
+
+// certificatesBeforeApply are the certificates that the sites had in use while a turbo.config is applied over the
+// same sites directory, nil otherwise: keepCertificatesInUseLocked keeps those whose pair the validator S can't load,
+// so S doesn't say then that HTTPS waits for it. Guarded by the global lock.
+var certificatesBeforeApply map[string]*tls.Certificate
 
 // subdomainContentOrder is the order in which the content of a site of turbo.config is applied.
 var subdomainContentOrder = []string{"!", "=", "$", ".", "?", "-", "&"}

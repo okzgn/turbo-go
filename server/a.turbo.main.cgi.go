@@ -175,20 +175,25 @@ func dynamic(mode preprocessorMode, basePath string, requestPath string, querySt
 	// The client's query goes first, without the parameters that the rewrite's query sets, and the rewrite's after it:
 	// an application gets the rewrite's value whether it reads the first of a repeated parameter (Python's parse_qs,
 	// Perl's CGI.pm) or the last (PHP). Only the last was the rewrite's.
-	rewriteQuery := queryString != ""
-	if clientQuery := withoutParametersOf(request.URL.RawQuery, queryString); clientQuery != "" && queryString != "" {
+	clientQuery := withoutParametersOf(request.URL.RawQuery, queryString)
+	switch {
+	case clientQuery != "" && queryString != "":
 		queryString = clientQuery + "&" + queryString
-	} else if clientQuery != "" {
+	case clientQuery != "":
 		queryString = clientQuery
 	}
-	// REQUEST_URI is the path that the client asked for (what the routers of the applications read) and, where the
-	// rewrite has a query, that same query: an application that takes its parameters from REQUEST_URI and not from
-	// QUERY_STRING (a CGI of Go: net/http/cgi makes the URL of the request from it) got the client's value of a
-	// parameter that the rewrite sets.
+	// REQUEST_URI is what the client asked for, as Apache and nginx pass it (what the routers of the applications read,
+	// and compare with their canonical URL), without the parameters that the rewrite's query sets: an application that
+	// takes its parameters from REQUEST_URI and not from QUERY_STRING (a CGI of Go: net/http/cgi makes the URL of the
+	// request from it) gets no value of the client's for them, and the rewrite's only in QUERY_STRING. With the client's
+	// own query there, it got the client's value of a parameter that the rewrite sets; with the rewrite's query there
+	// (v2.5.1), an application that compares it with its canonical URL redirected without end.
 	requestURI := request.URL.RequestURI()
-	if rewriteQuery {
-		path, _, _ := strings.Cut(requestURI, "?")
-		requestURI = path + "?" + queryString
+	if clientQuery != request.URL.RawQuery { // The rewrite sets a parameter that the client sent
+		requestURI, _, _ = strings.Cut(requestURI, "?")
+		if clientQuery != "" {
+			requestURI += "?" + clientQuery
+		}
 	}
 	if timeout > 0 {
 		// The connection's write deadline (WT from the end of the request) would pass right when the CGI is cut:
@@ -1126,9 +1131,18 @@ func bufferedRequestBodyOf(keys []string, body io.Reader, expected int64) (io.Re
 		reserved += grow
 		grown := make([]byte, len(memory), int64(len(memory))+grow)
 		copy(grown, memory)
-		n, err := io.ReadFull(body, grown[len(memory):cap(grown)])
-		memory = grown[:len(memory)+n]
-		if err == io.EOF || err == io.ErrUnexpectedEOF { // All of it
+		// Read until the block is full, with the error of the body as it is: only io.EOF is its end. A body cut before
+		// the length it said (io.ErrUnexpectedEOF, the connection ended) is an error, as on the way of the file; with
+		// io.ReadFull, which gives that error also for a body that ends before the block is full, it was taken whole.
+		n := len(memory)
+		var err error
+		for n < cap(grown) && err == nil {
+			var read int
+			read, err = body.Read(grown[n:cap(grown)])
+			n += read
+		}
+		memory = grown[:n]
+		if err == io.EOF { // All of it
 			return io.NopCloser(bytes.NewReader(memory)), int64(len(memory)), release, nil
 		}
 		if err != nil {

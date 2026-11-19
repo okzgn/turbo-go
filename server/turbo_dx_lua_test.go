@@ -60,6 +60,12 @@ var dxLuaScripts = map[string]string{
 		local function f() depth = depth + 1 return (string.gsub("x", "x", f)) end
 		local ok, message = pcall(f)
 		return tostring(ok) .. "|" .. depth .. "|" .. tostring(message)`,
+	// As a tail call, string.gsub takes the frame of f: some 13 000 levels, the deepest (review of v2.5.1, RS-1)
+	"deeptail.lua": `
+		local depth = 0
+		local function f() depth = depth + 1 return string.gsub("x", "x", f) end
+		local ok, message = pcall(f)
+		return tostring(ok) .. "|" .. depth .. "|" .. tostring(message)`,
 	"number.lua": `return { headers = { ["X-Ratio"] = 1.5 }, body = 2.5 }`,
 }
 
@@ -155,14 +161,18 @@ func TestDXLuaTime(t *testing.T) {
 
 // V2.5.0 review DX-1: a script that recurses through a function of the library (string.gsub with a function) gets
 // LuaJIT's "stack overflow", an error that pcall catches, and its worker goes on: the stack of C ran out first, the
-// worker ended, and so did the one of the retry. And DX-4: a number with decimals is a body and a header's value.
+// worker ended, and so did the one of the retry. Also as a tail call, the deepest (review of v2.5.1, RS-1: with a
+// stack of 96 or 112 MiB the worker ended there on Linux). And DX-4: a number with decimals is a body and a header's
+// value.
 func TestDXLuaDeepRecursionKeepsTheWorker(t *testing.T) {
 	_, base := setupDXLua(t)
 	logs := captureLog(t)
-	for attempt := 0; attempt < 2; attempt++ {
-		code, body := dxRequest(t, "GET", base, "/deep.lua", nil, nil)
-		if code != 200 || !strings.HasPrefix(body, "false|") || !strings.Contains(body, "stack overflow") {
-			t.Fatalf("request %d of a script that recurses through string.gsub: %d %q; expected the error caught by pcall", attempt+1, code, body)
+	for _, script := range []string{"/deep.lua", "/deeptail.lua"} {
+		for attempt := 0; attempt < 2; attempt++ {
+			code, body := dxRequest(t, "GET", base, script, nil, nil)
+			if code != 200 || !strings.HasPrefix(body, "false|") || !strings.Contains(body, "stack overflow") {
+				t.Fatalf("request %d of %s, which recurses through string.gsub: %d %q; expected the error caught by pcall", attempt+1, script, code, body)
+			}
 		}
 	}
 	if code, body := dxRequest(t, "GET", base, "/number.lua", nil, nil); code != 200 || body != "2.5" {

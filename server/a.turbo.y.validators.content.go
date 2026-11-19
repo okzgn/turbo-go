@@ -170,8 +170,13 @@ var subdomainContentCheckers = map[string]func(bool, interface{}, bool, ...strin
 						continue
 					}
 					slog.Warn("turbo.config rewrite whose expression doesn't compile: the paths it takes answer 500", "site", siteKeys[0], "subdomain", siteKeys[1], "source", targetURI, "reason", err.Error())
-				} else if program.LabelsBeforeOneLabel() && !(isExisting && current == "X"+source) { // As for a target written as a text
-					slog.Warn("Rewrite whose host is SUBDOMAIN and one label: under a wildcard subdomain, the visitor chooses the whole domain of the redirection. Write the rest of the host as a domain of the site", "site", joinedSite(siteKeys[1], siteKeys[0]), "source", targetURI)
+				} else if !(isExisting && current == "X"+source) { // As for a target written as a text, and not again for one unchanged
+					if program.LabelsBeforeOneLabel() {
+						slog.Warn("Rewrite whose host is SUBDOMAIN and one label: under a wildcard subdomain, the visitor chooses the whole domain of the redirection. Write the rest of the host as a domain of the site", "site", joinedSite(siteKeys[1], siteKeys[0]), "source", targetURI)
+					}
+					if program.LabelsBeforeAnAliasName() {
+						slog.Warn("Rewrite whose host is SUBDOMAIN and FIRST_DOMAIN or FIRST_SITE: these give nothing for a request that comes through no alias and no wildcard domain, and such a request answers 500", "site", joinedSite(siteKeys[1], siteKeys[0]), "source", targetURI)
+					}
 				}
 				if isExisting && current == "X"+source {
 					if printErrors {
@@ -212,6 +217,22 @@ var subdomainContentCheckers = map[string]func(bool, interface{}, bool, ...strin
 					slog.Warn("Rewrite discarded: the target has no host", "site", siteKeys[0], "subdomain", siteKeys[1], "source", targetURI)
 				}
 				continue
+			}
+			// A browser ends the host at a "\" too, and what came after it, the rest of the host for the rule of the
+			// labels, was the path: "https://{SUBDOMAIN}.com\.example.com/" went to the client's labels and ".com"
+			if host := strVal; schemeMode != "N" {
+				if end := strings.IndexAny(host, "/?#"); end != -1 {
+					host = host[:end]
+				}
+				if strings.IndexByte(host, '\\') != -1 {
+					if printErrors {
+						return false, "The host of a redirection can't have a \\"
+					}
+					if isFromFile {
+						slog.Warn("Rewrite discarded: the host of a redirection can't have a \\", "site", siteKeys[0], "subdomain", siteKeys[1], "source", targetURI)
+					}
+					continue
+				}
 			}
 			if problem := textTargetProblem(schemeMode + strVal); problem != "" { // As an expression's, and before unknownPlaceholder: {TURBO_CURRENT_DIR} is no keyword of a rewrite
 				if printErrors {
@@ -254,12 +275,6 @@ var subdomainContentCheckers = map[string]func(bool, interface{}, bool, ...strin
 				discardedFromFile(isFromFile, "rewrite", joinedSite(siteKeys[1], siteKeys[0]), targetURI, "the target is longer than 512 bytes")
 				continue
 			}
-			if labelsBeforeOneLabel(schemeMode + strVal) {
-				slog.Warn("Rewrite whose host is {SUBDOMAIN} and one label: under a wildcard subdomain, the visitor chooses the whole domain of the redirection. Write the rest of the host as a domain of the site", "site", joinedSite(siteKeys[1], siteKeys[0]), "source", targetURI)
-			}
-			if labelsBeforeAnAliasKeyword(schemeMode + strVal) {
-				slog.Warn("Rewrite whose host is {SUBDOMAIN} and {FIRST_DOMAIN} or {FIRST_SITE}: these give nothing for a request that comes through no alias and no wildcard domain, and such a request answers 500", "site", joinedSite(siteKeys[1], siteKeys[0]), "source", targetURI)
-			}
 			// Compared as it is kept: decoded, and with its scheme in a letter. It was compared as written, so the
 			// same target answered "Rewrite changed", and a target without its scheme "Rewrite unchanged".
 			if isExisting && current == schemeMode+strVal {
@@ -267,6 +282,13 @@ var subdomainContentCheckers = map[string]func(bool, interface{}, bool, ...strin
 					return false, "Rewrite unchanged"
 				}
 				continue
+			}
+			// Written once the rewrite changes, as for an expression: a target sent again unchanged wrote them again
+			if labelsBeforeOneLabel(schemeMode + strVal) {
+				slog.Warn("Rewrite whose host is {SUBDOMAIN} and one label: under a wildcard subdomain, the visitor chooses the whole domain of the redirection. Write the rest of the host as a domain of the site", "site", joinedSite(siteKeys[1], siteKeys[0]), "source", targetURI)
+			}
+			if labelsBeforeAnAliasKeyword(schemeMode + strVal) {
+				slog.Warn("Rewrite whose host is {SUBDOMAIN} and {FIRST_DOMAIN} or {FIRST_SITE}: these give nothing for a request that comes through no alias and no wildcard domain, and such a request answers 500", "site", joinedSite(siteKeys[1], siteKeys[0]), "source", targetURI)
 			}
 			sitesMap[siteKeys[0]][siteKeys[1]][targetURI] = schemeMode + strVal
 			if printErrors {

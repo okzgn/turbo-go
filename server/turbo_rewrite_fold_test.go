@@ -19,15 +19,25 @@ var foldSamples = []string{
 	"\xff", "\xfe", "�", "/café", "/CAFÉ", "/café", "a\x00b", "A\x00B", "/a/b", "/a/B/", "µ", "μ", "Μ",
 }
 
+// namesFoldEqual says whether two names are one where names fold, which is what foldKey stands for: strings.EqualFold
+// takes them for equal, and on macOS (foldNormalizes) it does with both in NFC, as its file system opens a name written
+// in NFC and in NFD as one.
+func namesFoldEqual(a, b string) bool {
+	if foldNormalizes {
+		return strings.EqualFold(nfcOf(a), nfcOf(b))
+	}
+	return strings.EqualFold(a, b)
+}
+
 // linearRewriteKey is how a rewrite was looked up before: as written, or else the first, in byte order, of those
-// that strings.EqualFold takes for the key.
+// that strings.EqualFold takes for the key, and on macOS of both in NFC (namesFoldEqual).
 func linearRewriteKey(rewrites map[string]string, key string, fold bool) (string, bool) {
 	if _, found := rewrites[key]; found || !fold {
 		return key, found
 	}
 	match := ""
 	for candidate := range rewrites {
-		if strings.EqualFold(candidate, key) && (match == "" || candidate < match) {
+		if namesFoldEqual(candidate, key) && (match == "" || candidate < match) {
 			match = candidate
 		}
 	}
@@ -77,39 +87,55 @@ func foldForTest(tb testing.TB, fold bool) {
 	})
 }
 
-// R6 O-8: two texts have the same foldKey exactly when strings.EqualFold takes them for equal, and ASCII without
-// capitals is its own, without a copy.
+// normalizeForTest sets whether foldKey takes a name in NFC and in NFD for one (foldNormalizes, set on macOS),
+// whatever the system of the test, until it ends. It is set with the write lock, so that what is kept by foldKey (the
+// rewrites of each site by it) is made again.
+func normalizeForTest(tb testing.TB, on bool) {
+	previous := foldNormalizes
+	withGlobalLock(func() { foldNormalizes = on })
+	tb.Cleanup(func() { withGlobalLock(func() { foldNormalizes = previous }) })
+}
+
+// R6 O-8: two texts have the same foldKey exactly when strings.EqualFold takes them for equal, and on macOS of both in
+// NFC (namesFoldEqual), and ASCII without capitals is its own, without a copy. Both ways are tried on every system:
+// the oracle was EqualFold alone, and it failed only on macOS (v2.5.2).
 func TestR6_O8_FoldKeyIsEqualFold(t *testing.T) {
-	for _, a := range foldSamples {
-		for _, b := range foldSamples {
-			if same, equal := foldKey(a) == foldKey(b), strings.EqualFold(a, b); same != equal {
-				t.Errorf("%q and %q: foldKey %q and %q, the same %v; EqualFold says %v", a, b, foldKey(a), foldKey(b), same, equal)
+	for _, normalize := range []bool{false, true} {
+		normalizeForTest(t, normalize)
+		for _, a := range foldSamples {
+			for _, b := range foldSamples {
+				if same, equal := foldKey(a) == foldKey(b), namesFoldEqual(a, b); same != equal {
+					t.Errorf("normalizing %v, %q and %q: foldKey %q and %q, the same %v; EqualFold says %v", normalize, a, b, foldKey(a), foldKey(b), same, equal)
+				}
 			}
 		}
-	}
-	for text, expected := range map[string]string{"/Section/": "/section/", "K": "k", "ſ": "s", "\xff": "�", "/CAFÉ": "/cafÉ"} {
-		if key := foldKey(text); key != expected {
-			t.Errorf("foldKey(%q) = %q; expected %q", text, key, expected)
+		for text, expected := range map[string]string{"/Section/": "/section/", "K": "k", "ſ": "s", "\xff": "�", "/CAFÉ": "/cafÉ"} {
+			if key := foldKey(text); key != expected {
+				t.Errorf("normalizing %v, foldKey(%q) = %q; expected %q", normalize, text, key, expected)
+			}
 		}
-	}
-	if raceEnabled {
-		return // The race detector allocates on its own
-	}
-	path := "/a/long/path/of/a/site/in/lower/case.html"
-	if allocations := testing.AllocsPerRun(100, func() { foldKey(path) }); allocations != 0 {
-		t.Errorf("foldKey of a path without capitals: %.0f allocations; expected none", allocations)
+		if raceEnabled {
+			continue // The race detector allocates on its own
+		}
+		path := "/a/long/path/of/a/site/in/lower/case.html"
+		if allocations := testing.AllocsPerRun(100, func() { foldKey(path) }); allocations != 0 {
+			t.Errorf("normalizing %v, foldKey of a path without capitals: %.0f allocations; expected none", normalize, allocations)
+		}
 	}
 }
 
-// R6 O-8: any two texts.
+// R6 O-8: any two texts, normalizing as on macOS and not.
 func FuzzFoldKey(f *testing.F) {
 	for i, a := range foldSamples {
 		f.Add(a, foldSamples[(i+1)%len(foldSamples)])
 		f.Add(a, strings.ToUpper(a))
 	}
 	f.Fuzz(func(t *testing.T, a, b string) {
-		if same, equal := foldKey(a) == foldKey(b), strings.EqualFold(a, b); same != equal {
-			t.Fatalf("%q and %q: foldKey %q and %q, the same %v; EqualFold says %v", a, b, foldKey(a), foldKey(b), same, equal)
+		for _, normalize := range []bool{false, true} {
+			normalizeForTest(t, normalize)
+			if same, equal := foldKey(a) == foldKey(b), namesFoldEqual(a, b); same != equal {
+				t.Fatalf("normalizing %v, %q and %q: foldKey %q and %q, the same %v; EqualFold says %v", normalize, a, b, foldKey(a), foldKey(b), same, equal)
+			}
 		}
 	})
 }
@@ -179,8 +205,8 @@ func TestR6_O8_RewriteInOtherCapitals(t *testing.T) {
 }
 
 // R6 O-8: the rewrite of a path is the one that was found before, when each of its folders was a text made for it
-// and compared with every rewrite: with names that fold and that don't, in a site without rewrites, and for paths
-// that are a rewrite, are under one, differ from one in case, or end in "/".
+// and compared with every rewrite: with names that fold and that don't, normalizing as on macOS and not, in a site
+// without rewrites, and for paths that are a rewrite, are under one, differ from one in case, or end in "/".
 func TestR6_O8_RewriteOfAPathAsBefore(t *testing.T) {
 	initForTest(t)
 	sites := [][]string{
@@ -190,21 +216,24 @@ func TestR6_O8_RewriteOfAPathAsBefore(t *testing.T) {
 	paths := []string{
 		"/", "/a", "/a/", "/A", "/a/b", "/a/b/", "/a/B/c", "/A/B/c/d.html", "/x", "/x/", "/X/y", "/file.html",
 		"/FILE.html", "/dir/file.html", "/dir/file.html/", "/section/x/y/z", "/SECTION/X", "/sEcTiOn/x/", "/CAFÉ/menu",
-		"/k/kelvin", "/other/deep/path/of/a/site.css", "//", "/a//b",
+		"/k/kelvin", "/other/deep/path/of/a/site.css", "//", "/a//b", "/café/menu", "/CAFÉ/",
 	}
-	for _, fold := range []bool{false, true} {
-		foldForTest(t, fold)
-		for _, keys := range sites {
-			foldSite(t, keys...)
-			for _, path := range paths {
-				var rewrites map[string]string
-				var target, matched string
-				withReadLock(func() {
-					rewrites = sitesMap["fold.test"][""]
-					target, matched = rewrite(path, "fold.test", "")
-				})
-				if expectedTarget, expectedMatch := linearRewrite(rewrites, path, fold); target != expectedTarget || matched != expectedMatch {
-					t.Errorf("%q among %q, folding %v: %q by %q; before, %q by %q", path, keys, fold, target, matched, expectedTarget, expectedMatch)
+	for _, normalize := range []bool{false, true} {
+		normalizeForTest(t, normalize)
+		for _, fold := range []bool{false, true} {
+			foldForTest(t, fold)
+			for _, keys := range sites {
+				foldSite(t, keys...)
+				for _, path := range paths {
+					var rewrites map[string]string
+					var target, matched string
+					withReadLock(func() {
+						rewrites = sitesMap["fold.test"][""]
+						target, matched = rewrite(path, "fold.test", "")
+					})
+					if expectedTarget, expectedMatch := linearRewrite(rewrites, path, fold); target != expectedTarget || matched != expectedMatch {
+						t.Errorf("%q among %q, folding %v, normalizing %v: %q by %q; before, %q by %q", path, keys, fold, normalize, target, matched, expectedTarget, expectedMatch)
+					}
 				}
 			}
 		}
@@ -238,8 +267,9 @@ func TestR6_O8_RewriteMakesNoTextForAFolder(t *testing.T) {
 	}
 }
 
-// R6 O-8: for any rewrites and any key, with names that fold and that don't, the lookup gives what comparing the key
-// with each rewrite gave, and so does the lookup of the key as a whole request path.
+// R6 O-8: for any rewrites and any key, with names that fold and that don't, and normalizing as on macOS and not, the
+// lookup gives what comparing the key with each rewrite gave, and so does the lookup of the key as a whole request
+// path.
 func FuzzRewriteLookup(f *testing.F) {
 	f.Add("/section/\n/Section/\n/SECTION/\n/other/", "/sEcTiOn/", true)
 	f.Add("/a\n/A\n/K\n/k\n/K", "/k", true)
@@ -256,23 +286,26 @@ func FuzzRewriteLookup(f *testing.F) {
 			keys = keys[:64]
 		}
 		foldForTest(t, fold)
-		lookup := foldSite(t, keys...)
-		var rewrites map[string]string
-		withReadLock(func() { rewrites = sitesMap["fold.test"][""] })
-		for _, asked := range append(keys, key, strings.ToUpper(key), strings.ToLower(key)) {
-			match, found := lookup(asked)
-			expected, expectedFound := linearRewriteKey(rewrites, asked, fold)
-			if found != expectedFound || found && match != expected {
-				t.Fatalf("%q among %q, folding %v: %q, found %v; comparing with each gives %q, found %v", asked, keys, fold, match, found, expected, expectedFound)
-			}
-			path := asked
-			if !strings.HasPrefix(path, "/") {
-				path = "/" + path // As every path of a request
-			}
-			var target, matched string
-			withReadLock(func() { target, matched = rewrite(path, "fold.test", "") })
-			if expectedTarget, expectedMatch := linearRewrite(rewrites, path, fold); target != expectedTarget || matched != expectedMatch {
-				t.Fatalf("the path %q among %q, folding %v: %q by %q; before, %q by %q", path, keys, fold, target, matched, expectedTarget, expectedMatch)
+		for _, normalize := range []bool{false, true} {
+			normalizeForTest(t, normalize)
+			lookup := foldSite(t, keys...)
+			var rewrites map[string]string
+			withReadLock(func() { rewrites = sitesMap["fold.test"][""] })
+			for _, asked := range append(keys, key, strings.ToUpper(key), strings.ToLower(key)) {
+				match, found := lookup(asked)
+				expected, expectedFound := linearRewriteKey(rewrites, asked, fold)
+				if found != expectedFound || found && match != expected {
+					t.Fatalf("%q among %q, folding %v, normalizing %v: %q, found %v; comparing with each gives %q, found %v", asked, keys, fold, normalize, match, found, expected, expectedFound)
+				}
+				path := asked
+				if !strings.HasPrefix(path, "/") {
+					path = "/" + path // As every path of a request
+				}
+				var target, matched string
+				withReadLock(func() { target, matched = rewrite(path, "fold.test", "") })
+				if expectedTarget, expectedMatch := linearRewrite(rewrites, path, fold); target != expectedTarget || matched != expectedMatch {
+					t.Fatalf("the path %q among %q, folding %v, normalizing %v: %q by %q; before, %q by %q", path, keys, fold, normalize, target, matched, expectedTarget, expectedMatch)
+				}
 			}
 		}
 	})

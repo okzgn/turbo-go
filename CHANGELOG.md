@@ -2,9 +2,24 @@
 
 [Español](CHANGELOG.es.md)
 
-v2.5.1 is the next release after v2.5. If you upgrade from **v2.5**, read [Upgrading from v2.5](#upgrading-from-v25). From an earlier version, read first what this paragraph says for it, and then [Upgrading from v2.5](#upgrading-from-v25) too. If you upgrade from **v2.4.4**, read [Upgrading from v2.4.4](#upgrading-from-v244). If you upgrade from **v2.4.3**, read only that one too: v2.4.4 changed nothing in what Turbo does ([Upgrading from v2.4.3](#upgrading-from-v243)). If you upgrade from **v2.4.2**, read [Upgrading from v2.4.2](#upgrading-from-v242) first, and then [Upgrading from v2.4.4](#upgrading-from-v244). If you upgrade from **v2.4.1**, v2.4.2 applies too: read [Upgrading from v2.4.1](#upgrading-from-v241), and then [Upgrading from v2.4.2](#upgrading-from-v242) and [Upgrading from v2.4.4](#upgrading-from-v244). If you upgrade from **v2.4**, read [Upgrading from v2.4](#upgrading-from-v24), and then those three. If you upgrade from **v2.3.rc3**, every stage of v2.4 and every later version applies: read [Upgrading from v2.3.rc3](#upgrading-from-v23rc3) first, and then the other four.
+v2.5.2 is the next version after v2.5.1. If you upgrade from **v2.5.1**, read [Upgrading from v2.5.1](#upgrading-from-v251). If you upgrade from **v2.5**, read [Upgrading from v2.5](#upgrading-from-v25) first, and then that one. From an earlier version, read first what this paragraph says for it, and then those two too. If you upgrade from **v2.4.4**, read [Upgrading from v2.4.4](#upgrading-from-v244). If you upgrade from **v2.4.3**, read only that one too: v2.4.4 changed nothing in what Turbo does ([Upgrading from v2.4.3](#upgrading-from-v243)). If you upgrade from **v2.4.2**, read [Upgrading from v2.4.2](#upgrading-from-v242) first, and then [Upgrading from v2.4.4](#upgrading-from-v244). If you upgrade from **v2.4.1**, v2.4.2 applies too: read [Upgrading from v2.4.1](#upgrading-from-v241), and then [Upgrading from v2.4.2](#upgrading-from-v242) and [Upgrading from v2.4.4](#upgrading-from-v244). If you upgrade from **v2.4**, read [Upgrading from v2.4](#upgrading-from-v24), and then those three. If you upgrade from **v2.3.rc3**, every stage of v2.4 and every later version applies: read [Upgrading from v2.3.rc3](#upgrading-from-v23rc3) first, and then the other four.
 
 Published binaries are static and built with the latest Go 1.26 patch. Check the download with `SHA256SUMS`, in the folder of the download: `sha256sum -c --ignore-missing SHA256SUMS` (`--ignore-missing` checks only the binaries you downloaded; without it, `sha256sum` fails for the others). A signed release also has `SHA256SUMS.sig`: [SECURITY.md](SECURITY.md) says how to check it.
+
+## Upgrading from v2.5.1
+
+v2.5.2 fixes what a review of v2.5.1 found, none of it of high or medium severity: among it, a regression of v2.5.1 in the panel's pages, and a redirection to the host that the client chooses, through a header that the administrator writes with `SUBDOMAIN`.
+
+Replace the binary (or your build), and build `dx-lua` again if you use it (0.3.2). What is configured goes on doing the same, with these exceptions:
+- **`Refresh`, `Location` and `Content-Location` don't take `SUBDOMAIN` nor `FIRST_SUBDOMAIN`** in an expression, neither through `token`, `urlencode`, `quoted`, `lower`, `upper` nor a branch of `? :` (`oneOf` and the conditions still do): a browser goes where their value says, and a wildcard subdomain lets the client choose them. One of `turbo.config` is kept, the log says so, and the site answers 500 until it is changed: redirect with a rewrite, whose host is checked.
+- **`REQUEST_URI` is again what the client asked for, without the parameters that the rewrite's query sets** (v2.5.1 put the whole `QUERY_STRING` there): `/x?role=admin&z=1` through `/x` → `/app.cgi?role=user` gives `REQUEST_URI=/x?z=1` and `QUERY_STRING=z=1&role=user`, for a CGI and for a worker of the mode dx. An application that compared it with its canonical URL could redirect without end. A CGI that reads its parameters from `REQUEST_URI` (one of Go) finds the rewrite's in `QUERY_STRING`.
+- **`{REWRITE}` and a `\` are refused in the host of a redirection** (`REWRITE` too, in an expression): `{REWRITE}` always starts with `/`, and gave no URL there; a browser ends the host at a `\`. From `turbo.config`, a target written as a text is dropped with a warning, and an expression is kept and answers 500.
+- **`urlencode` in the target of a rewrite is no longer encoded twice:** what it gives goes into the path or the query as it is.
+- **`dx-lua` 0.3.2:** each worker reserves 256 MiB of stack (the deepest recursion takes some 116 MiB of it on Linux); `table.insert` with a position that isn't an integer of 1 to `#t + 1` is an error; a `Content-Length` that a script returns is dropped. Build it again.
+- **Turbo doesn't start when `TURBO_HTTP_ADDR` and `TURBO_HTTPS_ADDR` are the same address** (the same port, and the same host or one of them on every interface): the HTTPS address was tried again every 30 s for good.
+- **The panel:** over HTTPS, a host that no certificate covers gets `max-age=0` also once it isn't in `PA` (after a `setM`); `hardUpload` answers 400 and replaces nothing if the sites directory changed during the upload; the pages send again the extension of a preprocessor that has the token of a replacement in it.
+
+Going back to v2.5.1 needs nothing: it reads the `turbo.config` that v2.5.2 saves.
 
 ## Upgrading from v2.5
 
@@ -71,7 +86,7 @@ Before upgrading, back up the sites folder, `turbo.config` included, and review 
 
 ## Upgrading from v2.4.1
 
-**Recommendation: upgrade as soon as possible.** v2.4.2 fixes security issues: the panel of a Turbo just installed, or whose systemd unit lost its credentials file, let in anyone who reached it with the default credentials; a stolen panel session could still make a site's file run as a page on the panel's origin, or lock the administrator out with wrong passwords; another page could lock the administrator's IP out of the panel; and requests with a malformed `Host` reached the CGIs. Details are in the repository's security advisory, published together with this version.
+**Recommendation: upgrade as soon as possible.** v2.4.2 fixes security issues: the panel of a Turbo just installed, or whose systemd unit lost its credentials file, let in anyone who reached it with the default credentials; a stolen panel session could still make a site's file run as a page on the panel's origin, or lock the administrator out with wrong passwords; another page could lock the administrator's IP out of the panel; and requests with a malformed `Host` reached the CGIs. Details will be in the repository's security advisories, published with the first release that carries these fixes.
 
 Before upgrading, back up the sites folder, `turbo.config` included, and review the breaking changes of v2.4.2, especially:
 - the default password (`Admin`) signs in only from the machine itself, at `localhost` (or a loopback address) and without a proxy in front: set your own password before you upgrade (or `TURBO_PASSWORD`), or sign in through an SSH tunnel afterwards; a proxy on the same machine must send `X-Forwarded-For`, `Forwarded` or `X-Real-IP`;
@@ -85,7 +100,7 @@ Before upgrading, back up the sites folder, `turbo.config` included, and review 
 
 ## Upgrading from v2.4
 
-**Recommendation: upgrade as soon as possible.** v2.4.1 fixes security issues: a client could hold every CGI slot and leave the PHP of every site answering 503, a stolen panel session could change what the administrator later confirms with the password or reach the panel through an error template, and a site could lose its settings when its folder couldn't be read, its scripts then served as text. Details are in the repository's security advisory, published together with this version.
+**Recommendation: upgrade as soon as possible.** v2.4.1 fixes security issues: a client could hold every CGI slot and leave the PHP of every site answering 503, a stolen panel session could change what the administrator later confirms with the password or reach the panel through an error template, and a site could lose its settings when its folder couldn't be read, its scripts then served as text. Details will be in the repository's security advisories, published with the first release that carries these fixes.
 
 Before upgrading, back up the sites folder, `turbo.config` included, and review the breaking changes of v2.4.1, especially:
 - the response templates and the character replacements need the current password, the actions that need it take their values as sent (an API client sends them URL-encoded, without the tokens of the replacements), and a replacement can't be for letters or digits;
@@ -103,7 +118,7 @@ The commit "v2.4." `57cbb3c` of `main` is v2.4; stage 6 (the third review) wasn'
 
 ## Upgrading from v2.3.rc3
 
-**Recommendation: upgrade as soon as possible.** This version fixes security and stability issues: some could expose files outside a site, stop or hang the server, or affected the admin panel, certificates and the TLS configuration. Details are in the repository's security advisory, published together with this version.
+**Recommendation: upgrade as soon as possible.** This version fixes security and stability issues: some could expose files outside a site, stop or hang the server, or affected the admin panel, certificates and the TLS configuration. Details will be in the repository's security advisories, published with the first release that carries these fixes.
 
 Before upgrading:
 
@@ -141,9 +156,29 @@ Before upgrading:
 
 ---
 
+## v2.5.2
+
+Not published yet: the next version after v2.5.1, with what a review of v2.5.1 as it was published found. Each fix has a test that failed before it.
+
+### Fixes
+- **The headers that a browser follows:** `Refresh`, `Location` and `Content-Location` don't take `SUBDOMAIN` nor `FIRST_SUBDOMAIN` (above): `'0; url=https://' + SUBDOMAIN + '.' + FIRST_DOMAIN` sent the visitor of a request without an alias to the host that the client wrote, as a rewrite did before v2.5.1.
+- **The targets of the rewrites:** what `urlencode` gives is placed as it is (`a%20b` was `a%2520b`); `{REWRITE}`, `REWRITE` and a `\` are refused in the host of a redirection; an IPv6 address in the host (`{DOMAIN}` of the site `*`) goes between brackets (`https://[::1]/x`; it was `%3A%3A1`). The warning of a host that is `SUBDOMAIN` and one label also sees that label with a final dot or a port, as for a text; the warning of `SUBDOMAIN` before `FIRST_DOMAIN` or `FIRST_SITE` is given for an expression too; and neither is written again for a rewrite sent again unchanged.
+- **CGIs:** `REQUEST_URI` is what the client asked for (above). A body cut before the length it said is an error in memory too, as it was in a temporary file.
+- **Where names fold** (Windows, macOS, a sites directory that folds them), the path of a request is folded once to look its rewrite up: a path of 10 KiB in capitals cost some 130 ms and 27 MiB, with the global lock held, and costs what any other does.
+- **The panel:** a `setM` that takes the panel's host out of `PA` and leaves it without a certificate answers `max-age=0` (it kept the year of HSTS set as it came in), and on a host that a certificate covers and isn't in `PA` the answer carries no `Strict-Transport-Security`. `hardUpload` replaces nothing if a `setM` changed the sites directory during the upload: it replaced the `@` of the directory left. The pages send again the extension of `addPreprocessor` and `delPreprocessor` as typed: the server reads those two as sent, and with a replacement whose token was in the extension (`!` → `hp`, and `php`) the pages of v2.5.1 didn't send them. The line `login denial` of `turbo.denials` is written once the logins are no longer held.
+- **The life cycle:** the probe of whether the sites directory folds names takes only "not found" for the name in capitals as a "no" (another error, of a share or a loop of links, was taken as one, and the protections of the systems that ignore case were left off); the renewals due at start are checked in the goroutine of the periodic work, so a signal stops Turbo while a disk doesn't answer; a certificate kept after a reload is warned about once; and Turbo doesn't start with the same address in `TURBO_HTTP_ADDR` and `TURBO_HTTPS_ADDR` (above).
+- **`dx-lua` 0.3.2:** a stack of 256 MiB, `table.insert` and `Content-Length` (above); `O_NONBLOCK` comes from `libc`.
+- **Documentation:** `REQUEST_URI` and `QUERY_STRING` as they are, in the API; the 503 of the request bodies of the CGIs, in the table of the API; the limits of 128 bytes, not characters; what counts as a level of nesting; the error of `setM` for a directory that leads back; a `z` of `cfgC` saved before an error; a panel's certificate put by hand that has expired; an `M` that waits for its directory; the memory of a worker of `dx-lua`, with its cache; the licenses of what `dx-lua` links.
+
+### In the repository
+- **Tests:** `TestR251_…`, in `server/turbo_review_v251_<subject>_test.go`, and in `dx/dx-lua`; `FuzzExpressionTargetHost`, `FuzzTextTargetHost` and `FuzzFoldKeyPrefixes`. The tests of the folded names compared with `strings.EqualFold` alone, and failed only on macOS, where `foldKey` takes a name in NFC and in NFD for one: they compare as the file system does, and run both ways on every system.
+- **Continuous integration:** the check of the executable scripts is a job of its own: as a step of the analysis, a commit that lost the bit skipped every analysis with it.
+
+---
+
 ## v2.5.1
 
-The next version after v2.5, with what a review of v2.5 as it was published found. Each fix has a test that failed before it.
+Published as a commit of `main` (`fb3a595`), without binaries: the next version after v2.5, with what a review of v2.5 as it was published found. Each fix has a test that failed before it.
 
 ### Fixes
 - **One client can't take the memory and the files of the scripts' request bodies:** a body stayed counted in their budgets, which are for every site, until its response had reached the client, with its CGI already ended, and nothing bounded what one client took: one that sent bodies and didn't read its responses filled them, and every other request with a body for a script got 503. A body is given back when its script is done, each client has a share of both budgets (above), the budget is taken as the body arrives (a megabyte was taken for a request that had sent only its headers), and a request without a body takes nothing and needs no temporary file (with the memory taken, each `GET` for a script made one, and answered 500 where none could be made).
@@ -169,7 +204,7 @@ The next version after v2.5, with what a review of v2.5 as it was published foun
 
 ## v2.5
 
-Published as a commit of `main`, without binaries: the next version after v2.4.4.
+Published as a commit of `main` (`0d6d7a7`), without binaries: the next version after v2.4.4.
 
 ### New
 - **Expressions in headers and rewrites:** the value of a site's header and the target of a rewrite can be computed for each request ([§6.3 of the API](API_SPECIFICATION.md#63-expressions-in-headers-and-rewrites)): `Cache-Control` by the extension of the file served, the `Access-Control-Allow-Origin` of an origin chosen from a list, a page in the language of the visitor, a redirection to a host chosen from a list. The language is a subset of CEL without loops. In the panel, the dialogs of headers and rewrites choose "Text" or "Expression", and an expression is written in a text area, which may span lines. What the client sends never reaches a header as it came, nor the host of a redirection, and an expression that fails answers 500: Turbo checks that when the expression is added, and again for each request. The headers an expression reads are added to the `Vary` of the response. The example `turbo.config` has a header computed by extension.
@@ -202,7 +237,7 @@ Published as a commit of `main`, without binaries: the next version after v2.4.4
 
 ## v2.4.4
 
-Published as a commit of `main`, without binaries: the next version after v2.4.3. The server is the same, without a change in what it does: this version brings its new isotype and, in the repository, the source in a folder and two tests that no longer depend on how fast the machine is.
+Published as a commit of `main` (`0e1668c`), without binaries: the next version after v2.4.3. The server is the same, without a change in what it does: this version brings its new isotype and, in the repository, the source in a folder and two tests that no longer depend on how fast the machine is.
 
 ### New
 - **New isotype:** the panel and the sample site show Turbo's new isotype, and the icons of the repository (`turbo.icon.png`, `turbo.icon.small.png`, `turbo.icon.nano.png`) are the new one too. A copy of `turbo.dev` in the sites directory goes on showing its own `admin/i.png`.
@@ -214,7 +249,7 @@ Published as a commit of `main`, without binaries: the next version after v2.4.3
 
 ## v2.4.3
 
-Published as a commit of `main`, without binaries: the next version after v2.4.2, with what a full review of its code found. Each fix has a test that failed before it.
+Published as a commit of `main` (`c82106e`), without binaries: the next version after v2.4.2, with what a full review of its code found. Each fix has a test that failed before it.
 
 ### New
 - **Precompressed files (`cfgZ`):** a site, or a subdomain, can answer the request of a file with the `<file>.br` or `<file>.gz` that is next to it, for the requests whose `Accept-Encoding` accepts it, with the type of the file, the length of the copy, an `ETag` of its own and `Vary: Accept-Encoding`. It is off until it is turned on for a site: "Precompressed" in the panel, `cfgZ` in the API, `"Z"` among the settings of the site in `turbo.config`. Turbo doesn't compress: whoever deploys the site makes the copies, and their dates aren't compared with the file's. Requests with `Range`, the files that a preprocessor runs and the URLs that end in `/index.html` are served as always (API specification, §8.4).
@@ -288,7 +323,7 @@ Published as a commit of `main`, without binaries: the next version after v2.4.2
 
 ## v2.4.2
 
-Published as a commit of `main`, without binaries: the next version after v2.4.1, with the fixes found after it.
+Published as commits of `main` (`ac63977` and `15dcff2`, both "v2.4.2."), without binaries: the next version after v2.4.1, with the fixes found after it.
 
 ### Fixes
 - **A site of `turbo.config` without a section of its own:** a site that the file named only through its subdomains (`"example.com": {"www": {…}}`), or as `{}` or `null`, was built with nothing, and its `/` answered 404, while the same site found on disk has `index.html` as its index. Now it gets what a site found on disk gets: `index.html` as its index and the state of its certificate. A site with a `""` section keeps exactly what the section says: `"": {}` leaves it without an index. A site saved meanwhile already has its section, with `"-": {}`, and stays without an index: add the index from the panel.

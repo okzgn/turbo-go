@@ -133,15 +133,32 @@ fn a_recursion_through_c_functions_is_an_error_and_the_worker_goes_on() {
             return tostring(ok) .. " " .. tostring(e)"#,
         ),
         ("uncaught.lua", r#"local function f() return (string.gsub("x", "x", f)) end return f()"#),
+        // As a tail call, string.gsub takes the frame of f: 5 slots of LuaJIT's stack a level instead of 8, so some
+        // 13 000 levels, each with its buffer of C, the deepest of all (some 116 MiB on Linux, review of v2.5.1, RS-1).
+        // With a stack of 96 or 112 MiB the worker ended here, and the variant above still passed.
+        (
+            "tail.lua",
+            r#"local depth = 0
+            local function f()
+              depth = depth + 1
+              if depth >= 20000 then return "y" end
+              return string.gsub("x", "x", f)
+            end
+            local ok, e = pcall(f)
+            return depth .. " " .. tostring(ok) .. " " .. tostring(e)"#,
+        ),
+        ("uncaught-tail.lua", r#"local g = string.gsub local f f = function() return g("x", "x", f) end return f()"#),
         ("alive.lua", r#"return "alive""#),
     ]);
     assert_eq!(worker.body("alive.lua"), "alive");
-    for script in ["gsub.lua", "sort.lua", "format.lua"] {
+    for script in ["gsub.lua", "tail.lua", "sort.lua", "format.lua"] {
         let body = worker.body(script);
         assert!(body.contains("false") && body.contains("stack overflow"), "{script}: {body}");
         assert_eq!(worker.body("alive.lua"), "alive", "the same worker, after {script}");
     }
-    assert_eq!(worker.request("uncaught.lua"), Ok(Response::empty(500)), "an error as any other");
-    assert_eq!(worker.body("alive.lua"), "alive", "the same worker, after an error that nothing caught");
+    for script in ["uncaught.lua", "uncaught-tail.lua"] {
+        assert_eq!(worker.request(script), Ok(Response::empty(500)), "{script}: an error as any other");
+        assert_eq!(worker.body("alive.lua"), "alive", "the same worker, after an error that nothing caught ({script})");
+    }
     assert!(worker.running());
 }

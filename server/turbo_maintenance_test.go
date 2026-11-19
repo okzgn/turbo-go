@@ -38,7 +38,7 @@ func TestR6_M76_MaintenanceDoesTheWorkOfEachTick(t *testing.T) {
 	ended := make(chan struct{})
 	go func() {
 		defer close(ended)
-		runMaintenance(stop, renew, config, cleanup)
+		runMaintenance(stop, nil, renew, config, cleanup)
 	}()
 	// The channels have no buffer and the loop does one thing at a time: a tick is taken when the work of the one
 	// before it is done.

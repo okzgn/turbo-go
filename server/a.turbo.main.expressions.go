@@ -65,16 +65,25 @@ func sentExpression(value string) bool {
 
 // expressionOptions are what the expressions of target are compiled with (for a header, the header named header):
 // they can't read the credentials of the client nor those of the panel's sessions (the cookies, and the token of the
-// "ok" header), which they could copy into a header or a redirection; and quoted is refused in the headers where it
-// doesn't keep a text together.
+// "ok" header), which they could copy into a header or a redirection; quoted is refused in the headers where it
+// doesn't keep a text together; and the labels that the client chose, in those whose URL a browser follows.
 func expressionOptions(target expr.Target, header string) expr.Options {
+	canonical := customNetHttp.CanonicalHeaderKey(header)
 	return expr.Options{
 		Target:            target,
 		UnreadableHeaders: []string{"Cookie", "Authorization", "Proxy-Authorization", "ok"},
 		UnreadableCookies: []string{sessionCookieName, sessionCookieNameTLS},
-		NoQuoted:          target == expr.HeaderValue && quotedUnsafeHeaders[customNetHttp.CanonicalHeaderKey(header)],
+		NoQuoted:          target == expr.HeaderValue && quotedUnsafeHeaders[canonical],
+		NoLabels:          target == expr.HeaderValue && navigationHeaders[canonical],
 	}
 }
+
+// navigationHeaders are the headers whose URL a browser follows: Refresh goes to it, Location too in a 3xx (a CGI's
+// answer, which a header of the site replaces), and Content-Location names what the response is. Under a wildcard
+// subdomain, SUBDOMAIN and FIRST_SUBDOMAIN are what the client chose, and "'0; url=https://' + SUBDOMAIN + '.' +
+// FIRST_DOMAIN" sent the visitors of a request without an alias to the host that the client wrote: the host of a
+// redirection keeps its rule only in the targets of the rewrites, so these headers don't take them (expr.NoLabels).
+var navigationHeaders = map[string]bool{"Refresh": true, "Location": true, "Content-Location": true}
 
 // quotedUnsafeHeaders are the headers whose grammar doesn't keep a quoted text together: a ";" or a space inside the
 // quotes still ends the value there (an attribute of Set-Cookie, a directive or a source of a policy), and what
@@ -93,6 +102,7 @@ var compiledExpressions struct {
 type compiledExpressionKey struct {
 	target   expr.Target
 	noQuoted bool
+	noLabels bool
 	source   string
 }
 
@@ -107,7 +117,7 @@ const maxCompiledExpressions = 1024
 // it doesn't compile.
 func compileExpression(target expr.Target, header string, source string) (*expr.Program, error) {
 	options := expressionOptions(target, header)
-	key := compiledExpressionKey{target, options.NoQuoted, source}
+	key := compiledExpressionKey{target, options.NoQuoted, options.NoLabels, source}
 	compiledExpressions.mutex.Lock()
 	compiled, found := compiledExpressions.entries[key]
 	compiledExpressions.mutex.Unlock()
@@ -412,6 +422,10 @@ func expressionTarget(responseWriter customNetHttp.ResponseWriter, read *express
 		}
 		if part.Class == expr.Const {
 			writer.text(part.Text)
+			continue
+		}
+		if part.Encoded && writer.position != targetInHost { // What urlencode gave: encoded again, "%20" was "%2520"
+			writer.encoded(part.Text)
 			continue
 		}
 		writer.value(part.Name, part.Text)

@@ -283,15 +283,19 @@ func TestRewriteParts(t *testing.T) {
 		source string
 		want   []Part
 	}{
-		{`'/es' + FIRST_REQUEST`, []Part{{"/es", Const, ""}, {"/blog/a", Raw, "FIRST_REQUEST"}}},
+		{`'/es' + FIRST_REQUEST`, []Part{{"/es", Const, "", false}, {"/blog/a", Raw, "FIRST_REQUEST", false}}},
 		{`HEADER('Accept-Language') == 'en' ? '/en' + FIRST_REQUEST : ''`, nil},
-		{`'https://' + oneOf(QUERY('to'), ['a.example', 'b.example']) + '/x'`, []Part{{"https://", Const, ""}, {"b.example", Const, ""}, {"/x", Const, ""}}},
-		{`'/new/' + REWRITE_COMPLEMENT`, []Part{{"/new/", Const, ""}, {"a?x=1", Raw, "REWRITE_COMPLEMENT"}}},
+		{`'https://' + oneOf(QUERY('to'), ['a.example', 'b.example']) + '/x'`, []Part{{"https://", Const, "", false}, {"b.example", Const, "", false}, {"/x", Const, "", false}}},
+		{`'/new/' + REWRITE_COMPLEMENT`, []Part{{"/new/", Const, "", false}, {"a?x=1", Raw, "REWRITE_COMPLEMENT", false}}},
 		// With its name: the rewrite places it as REWRITE_COMPLEMENT, the query apart (in other capitals, it was placed in
 		// the path, and the query with it)
-		{`'/new/' + lower(REWRITE_COMPLEMENT)`, []Part{{"/new/", Const, ""}, {"a?x=1", Raw, "REWRITE_COMPLEMENT"}}},
-		{`'https://' + DOMAIN + '/' + DIR`, []Part{{"https://", Const, ""}, {"example.com", Host, "DOMAIN"}, {"/", Const, ""}, {"/blog", Raw, "DIR"}}},
-		{`'/a' + '' + FILE`, []Part{{"/a", Const, ""}}},
+		{`'/new/' + lower(REWRITE_COMPLEMENT)`, []Part{{"/new/", Const, "", false}, {"a?x=1", Raw, "REWRITE_COMPLEMENT", false}}},
+		{`'https://' + DOMAIN + '/' + DIR`, []Part{{"https://", Const, "", false}, {"example.com", Host, "DOMAIN", false}, {"/", Const, "", false}, {"/blog", Raw, "DIR", false}}},
+		{`'/a' + '' + FILE`, []Part{{"/a", Const, "", false}}},
+		// What urlencode gives is marked: a rewrite places it as it is in a path or a query, also once lower changed it
+		{`'/find?q=' + urlencode(QUERY('to'))`, []Part{{"/find?q=", Const, "", false}, {"b.example", Clean, "", true}}},
+		{`'/find?q=' + lower(urlencode(HEADER('Accept-Language') + ' X'))`, []Part{{"/find?q=", Const, "", false}, {"es%20x", Clean, "", true}}},
+		{`'/find?q=' + token(QUERY('to'))`, []Part{{"/find?q=", Const, "", false}, {"b.example", Clean, "", false}}},
 	}
 	for _, c := range cases {
 		got, err := mustCompile(t, c.source, rewriteOptions).Rewrite(request)

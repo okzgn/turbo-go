@@ -1117,9 +1117,11 @@ func refreshSiteCertificates() {
 			case err != nil:
 				// Not kept as the stamp of files that were read: they are read again at every look until they can be
 				// loaded, as what makes them readable (the owner or the permissions of a key copied by a renewal
-				// hook) changes neither their date nor their size. Warned once for each state of the files.
+				// hook) changes neither their date nor their size. Warned once for each state of the files: the
+				// stamp unloadableStampMark alone is of a certificate kept by a reload, which warned already
+				// (keepCertificatesInUseLocked).
 				unloadable := unloadableStampMark + stamp
-				if site.stamp != "" && site.stamp != unloadable {
+				if site.stamp != "" && site.stamp != unloadableStampMark && site.stamp != unloadable {
 					slog.Warn("The certificate files of a site changed and can't be loaded: the certificate in use stays", "site", siteKey, "error", err)
 				}
 				siteCertificateStamps[siteKey] = unloadable

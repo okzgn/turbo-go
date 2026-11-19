@@ -262,7 +262,7 @@ func FuzzHardUpload(f *testing.F) {
 			expected[relative] = string(data)
 		}
 
-		code, message := hardUpload("localhost", "", siteDir, uploaded)
+		code, message := hardUpload("localhost", "", dir, siteDir, uploaded)
 		if code != 200 && code != 400 {
 			t.Errorf("upload of %q: %d %q; expected 200 or 400", names, code, message)
 		}
