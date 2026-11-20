@@ -359,6 +359,15 @@ func clientTimeout() time.Duration {
 	return 3 * time.Second
 }
 
+// The tests' clients share Go's default transport, which keeps 2 idle connections per host. The tests that send
+// requests from many goroutines then open a new connection for almost each one: some 9 000 in the 6 s of
+// TestR_RealisticRace, each left in TIME_WAIT. macOS has 16 384 ephemeral ports and keeps them about 30 s, so its
+// runner ran out of them ("can't assign requested address"), in that test and in the next ones. With more idle
+// connections, the requests reuse them; a test that wants a new connection still makes its own transport.
+func init() {
+	http.DefaultTransport.(*http.Transport).MaxIdleConnsPerHost = 64
+}
+
 func get(base, path string, hdr map[string]string) (int, string, error) {
 	req, _ := http.NewRequest("GET", base+path, nil)
 	req.Host = "localhost"
