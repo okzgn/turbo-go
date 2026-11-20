@@ -1,12 +1,13 @@
 #!/bin/bash
 # Builds the binaries of a Turbo release and their SHA256SUMS in dist/<version>/.
 #
-# Usage: git tag v2.5.1 && bash release.sh v2.5.1
+# Usage: git tag v2.5.2 && bash release.sh v2.5.2
 #
 # - It uses the Go on the PATH, which must be the latest patch of the go.mod version: that Go itself, not an older
 #   one that switches to it (inside the repository "go version" shows the one it switches to). If the Go of go.mod is
-#   in the module cache: PATH="$(go env GOROOT)/bin:$PATH" bash release.sh v2.5.1
-# - Static binaries (CGO_ENABLED=0), without local paths (-trimpath) or symbols,
+#   in the module cache: PATH="$(go env GOROOT)/bin:$PATH" bash release.sh v2.5.2
+# - Static binaries (CGO_ENABLED=0), without local paths (-trimpath) or symbols, named with the version as the
+#   releases up to v2.3.rc3 were (turbo-v2.5.2-linux-amd64, turbo-v2.5.2-windows-x64.exe),
 #   with the version embedded: Turbo writes it at startup, with the commit and the Go.
 # - It requires the version's tag on HEAD and a clean tree (also without untracked
 #   files, or files marked so that git doesn't see their changes), so that the
@@ -143,9 +144,9 @@ build() { # GOOS GOARCH name
 	echo "Building $3"
 	CGO_ENABLED=0 GOOS="$1" GOARCH="$2" go build -trimpath -ldflags "-s -w -X main.turboVersion=$VERSION" -o "$OUT/$3" .
 }
-build linux amd64 turbo-linux-amd64
-build linux arm64 turbo-linux-arm64
-build windows amd64 turbo-windows-x64.exe
+build linux amd64 "turbo-$VERSION-linux-amd64"
+build linux arm64 "turbo-$VERSION-linux-arm64"
+build windows amd64 "turbo-$VERSION-windows-x64.exe"
 
 # Each binary says what it was built from: HEAD, without changes (a file saved during the build would show here)
 # and without cgo.

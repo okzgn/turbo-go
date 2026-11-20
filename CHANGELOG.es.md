@@ -2,7 +2,7 @@
 
 [English](CHANGELOG.md)
 
-v2.5.2 es la versión siguiente a v2.5.1. Si actualiza desde **v2.5.1**, lea [Actualizar desde v2.5.1](#actualizar-desde-v251). Si actualiza desde **v2.5**, lea antes [Actualizar desde v2.5](#actualizar-desde-v25), y después esa. Desde una versión anterior, lea antes lo que este párrafo indica para ella, y después también esas dos. Si actualiza desde **v2.4.4**, lea [Actualizar desde v2.4.4](#actualizar-desde-v244). Si actualiza desde **v2.4.3**, lea solo esa también: v2.4.4 no cambió nada de lo que hace Turbo ([Actualizar desde v2.4.3](#actualizar-desde-v243)). Si actualiza desde **v2.4.2**, lea antes [Actualizar desde v2.4.2](#actualizar-desde-v242), y después [Actualizar desde v2.4.4](#actualizar-desde-v244). Si actualiza desde **v2.4.1**, también se aplica v2.4.2: lea [Actualizar desde v2.4.1](#actualizar-desde-v241), y después [Actualizar desde v2.4.2](#actualizar-desde-v242) y [Actualizar desde v2.4.4](#actualizar-desde-v244). Si actualiza desde **v2.4**, lea [Actualizar desde v2.4](#actualizar-desde-v24), y después esas tres. Si actualiza desde **v2.3.rc3**, se aplican todas las etapas de v2.4 y todas las versiones posteriores: lea antes [Actualizar desde v2.3.rc3](#actualizar-desde-v23rc3), y después las otras cuatro.
+v2.5.2 es la versión siguiente a v2.5.1, y la primera versión publicada con binarios desde v2.3.rc3: las versiones intermedias se publicaron como commits de `main`, sin binarios, así que sus correcciones llegan con esta a un servidor que usa una versión publicada. Si actualiza desde **v2.5.1**, lea [Actualizar desde v2.5.1](#actualizar-desde-v251). Si actualiza desde **v2.5**, lea antes [Actualizar desde v2.5](#actualizar-desde-v25), y después esa. Desde una versión anterior, lea antes lo que este párrafo indica para ella, y después también esas dos. Si actualiza desde **v2.4.4**, lea [Actualizar desde v2.4.4](#actualizar-desde-v244). Si actualiza desde **v2.4.3**, lea solo esa también: v2.4.4 no cambió nada de lo que hace Turbo ([Actualizar desde v2.4.3](#actualizar-desde-v243)). Si actualiza desde **v2.4.2**, lea antes [Actualizar desde v2.4.2](#actualizar-desde-v242), y después [Actualizar desde v2.4.4](#actualizar-desde-v244). Si actualiza desde **v2.4.1**, también se aplica v2.4.2: lea [Actualizar desde v2.4.1](#actualizar-desde-v241), y después [Actualizar desde v2.4.2](#actualizar-desde-v242) y [Actualizar desde v2.4.4](#actualizar-desde-v244). Si actualiza desde **v2.4**, lea [Actualizar desde v2.4](#actualizar-desde-v24), y después esas tres. Si actualiza desde **v2.3.rc3**, se aplican todas las etapas de v2.4 y todas las versiones posteriores: lea antes [Actualizar desde v2.3.rc3](#actualizar-desde-v23rc3), y después las otras cuatro.
 
 Los binarios publicados son estáticos y se compilan con el último parche de Go 1.26. Compruebe la descarga con `SHA256SUMS`, en la carpeta de la descarga: `sha256sum -c --ignore-missing SHA256SUMS` (`--ignore-missing` comprueba solo los binarios que descargó; sin él, `sha256sum` falla por los demás). Una versión firmada trae además `SHA256SUMS.sig`: [SECURITY.md](SECURITY.md) dice cómo comprobarla.
 
@@ -86,7 +86,7 @@ Antes de actualizar, haga una copia de la carpeta de sitios, con `turbo.config`,
 
 ## Actualizar desde v2.4.1
 
-**Recomendación: actualice cuanto antes.** v2.4.2 corrige fallos de seguridad: el panel de un Turbo recién instalado, o cuya unidad de systemd perdió su archivo de credenciales, dejaba entrar con las credenciales por defecto a cualquiera que llegara a él; una sesión del panel robada aún podía hacer que un archivo de un sitio se ejecutara como página en el origen del panel, o dejar fuera al administrador con contraseñas erróneas; otra página podía bloquear la IP del administrador en el panel; y las peticiones con un `Host` mal formado llegaban a los CGI. Los detalles estarán en los avisos de seguridad del repositorio, que se publican con la primera release que lleve estas correcciones.
+**Recomendación: actualice cuanto antes.** v2.4.2 corrige fallos de seguridad: el panel de un Turbo recién instalado, o cuya unidad de systemd perdió su archivo de credenciales, dejaba entrar con las credenciales por defecto a cualquiera que llegara a él; una sesión del panel robada aún podía hacer que un archivo de un sitio se ejecutara como página en el origen del panel, o dejar fuera al administrador con contraseñas erróneas; otra página podía bloquear la IP del administrador en el panel; y las peticiones con un `Host` mal formado llegaban a los CGI. Los detalles están en los avisos de seguridad del repositorio, publicados con v2.5.2, la primera release que lleva estas correcciones.
 
 Antes de actualizar, haga una copia de la carpeta de sitios, `turbo.config` incluido, y revise los cambios incompatibles de v2.4.2, sobre todo:
 - la contraseña por defecto (`Admin`) solo abre sesión desde la propia máquina, en `localhost` (o una dirección de loopback) y sin un proxy delante: ponga su propia contraseña antes de actualizar (o `TURBO_PASSWORD`), o entre después por un túnel SSH; un proxy en la misma máquina debe enviar `X-Forwarded-For`, `Forwarded` o `X-Real-IP`;
@@ -100,7 +100,7 @@ Antes de actualizar, haga una copia de la carpeta de sitios, `turbo.config` incl
 
 ## Actualizar desde v2.4
 
-**Recomendación: actualice cuanto antes.** v2.4.1 corrige fallos de seguridad: un cliente podía ocupar todas las plazas CGI y dejar el PHP de todos los sitios respondiendo 503, una sesión del panel robada podía cambiar lo que el administrador confirma después con la contraseña o llegar al panel con una plantilla de error, y un sitio podía perder sus ajustes cuando su carpeta no se podía leer, y servirse luego sus scripts como texto. Los detalles estarán en los avisos de seguridad del repositorio, que se publican con la primera release que lleve estas correcciones.
+**Recomendación: actualice cuanto antes.** v2.4.1 corrige fallos de seguridad: un cliente podía ocupar todas las plazas CGI y dejar el PHP de todos los sitios respondiendo 503, una sesión del panel robada podía cambiar lo que el administrador confirma después con la contraseña o llegar al panel con una plantilla de error, y un sitio podía perder sus ajustes cuando su carpeta no se podía leer, y servirse luego sus scripts como texto. Los detalles están en los avisos de seguridad del repositorio, publicados con v2.5.2, la primera release que lleva estas correcciones.
 
 Antes de actualizar, haga una copia de la carpeta de sitios, incluido `turbo.config`, y revise los cambios incompatibles de v2.4.1, sobre todo:
 - las plantillas de respuesta y los reemplazos de caracteres piden la contraseña actual, las acciones que la piden toman sus valores tal como llegan (un cliente de la API los envía codificados para URL, sin los tokens de los reemplazos), y un reemplazo no puede ser de letras ni dígitos;
@@ -118,7 +118,7 @@ El commit "v2.4." `57cbb3c` de `main` es v2.4; no tenía la etapa 6 (la tercera 
 
 ## Actualizar desde v2.3.rc3
 
-**Recomendación: actualice cuanto antes.** Esta versión corrige fallos de seguridad y de estabilidad: algunos podían exponer archivos de fuera de un sitio o dejar el servidor sin servicio o colgado, y otros afectaban al panel, a los certificados y a la configuración de TLS. Los detalles estarán en los avisos de seguridad del repositorio, que se publican con la primera release que lleve estas correcciones.
+**Recomendación: actualice cuanto antes.** Esta versión corrige fallos de seguridad y de estabilidad: algunos podían exponer archivos de fuera de un sitio o dejar el servidor sin servicio o colgado, y otros afectaban al panel, a los certificados y a la configuración de TLS. Los detalles están en los avisos de seguridad del repositorio, publicados con v2.5.2, la primera release que lleva estas correcciones.
 
 Antes de actualizar:
 
@@ -158,7 +158,7 @@ Antes de actualizar:
 
 ## v2.5.2
 
-Sin publicar todavía: la versión siguiente a v2.5.1, con lo que encontró una revisión de v2.5.1 tal como se publicó. Cada corrección tiene una prueba que fallaba antes de ella.
+La primera versión publicada con binarios desde v2.3.rc3: la versión siguiente a v2.5.1, con lo que encontró una revisión de v2.5.1 tal como se publicó. Cada corrección tiene una prueba que fallaba antes de ella.
 
 ### Correcciones
 - **Las cabeceras que sigue un navegador:** `Refresh`, `Location` y `Content-Location` no admiten `SUBDOMAIN` ni `FIRST_SUBDOMAIN` (arriba): `'0; url=https://' + SUBDOMAIN + '.' + FIRST_DOMAIN` enviaba al visitante de una petición sin alias al host que escribió el cliente, como hacía una reescritura antes de v2.5.1.
@@ -173,6 +173,7 @@ Sin publicar todavía: la versión siguiente a v2.5.1, con lo que encontró una 
 ### En el repositorio
 - **Pruebas:** `TestR251_…`, en `server/turbo_review_v251_<tema>_test.go`, y en `dx/dx-lua`; `FuzzExpressionTargetHost`, `FuzzTextTargetHost` y `FuzzFoldKeyPrefixes`. Las pruebas de los nombres plegados comparaban solo con `strings.EqualFold`, y fallaban solo en macOS, donde `foldKey` toma por uno un nombre en NFC y en NFD: comparan como lo hace el sistema de archivos, y se ejecutan de las dos formas en todos los sistemas.
 - **Integración continua:** la comprobación de los scripts ejecutables es un trabajo propio: como paso del análisis, un commit que perdía el bit se saltaba con él todos los análisis.
+- **Los binarios de la release llevan su versión en el nombre,** como hasta v2.3.rc3: `turbo-v2.5.2-linux-amd64`, `turbo-v2.5.2-linux-arm64` y `turbo-v2.5.2-windows-x64.exe` (`release.sh`), y así figuran en `SHA256SUMS`.
 
 ---
 
@@ -392,7 +393,7 @@ Publicada como commits de `main` (`ac63977` y `15dcff2`, los dos "v2.4.2."), sin
 
 ## v2.4.1
 
-La primera versión publicada después de v2.4. Trae las correcciones de una revisión de Turbo para producción y las de la tercera revisión de v2.4 (etapa 6), que v2.4 no tenía: se enumeran abajo, de la más reciente a la más antigua, y al actualizar desde v2.4 se aplican las dos.
+Publicada como commits de `main` (`775a809` y `5bc3b9e`, los dos "v2.4.1."), sin binarios: la versión siguiente a v2.4. Trae las correcciones de una revisión de Turbo para producción y las de la tercera revisión de v2.4 (etapa 6), que v2.4 no tenía: se enumeran abajo, de la más reciente a la más antigua, y al actualizar desde v2.4 se aplican las dos.
 
 ### Revisión para producción
 
@@ -470,7 +471,7 @@ La primera versión publicada después de v2.4. Trae las correcciones de una rev
 
 ## v2.4
 
-La primera versión publicada después de v2.3.rc3, el commit "v2.4." `57cbb3c` de `main`. Reúne cinco etapas de trabajo, ninguna publicada por separado: se enumeran abajo, de la más reciente a la más antigua, con sus cambios. Al actualizar desde v2.3.rc3 se aplican todas.
+Publicada como commit de `main` (`57cbb3c`, "v2.4."), sin binarios: la versión siguiente a v2.3.rc3. Reúne cinco etapas de trabajo, ninguna publicada por separado: se enumeran abajo, de la más reciente a la más antigua, con sus cambios. Al actualizar desde v2.3.rc3 se aplican todas.
 
 ### Etapa 5: segunda revisión
 

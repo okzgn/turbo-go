@@ -2,7 +2,7 @@
 
 [Español](CHANGELOG.es.md)
 
-v2.5.2 is the next version after v2.5.1. If you upgrade from **v2.5.1**, read [Upgrading from v2.5.1](#upgrading-from-v251). If you upgrade from **v2.5**, read [Upgrading from v2.5](#upgrading-from-v25) first, and then that one. From an earlier version, read first what this paragraph says for it, and then those two too. If you upgrade from **v2.4.4**, read [Upgrading from v2.4.4](#upgrading-from-v244). If you upgrade from **v2.4.3**, read only that one too: v2.4.4 changed nothing in what Turbo does ([Upgrading from v2.4.3](#upgrading-from-v243)). If you upgrade from **v2.4.2**, read [Upgrading from v2.4.2](#upgrading-from-v242) first, and then [Upgrading from v2.4.4](#upgrading-from-v244). If you upgrade from **v2.4.1**, v2.4.2 applies too: read [Upgrading from v2.4.1](#upgrading-from-v241), and then [Upgrading from v2.4.2](#upgrading-from-v242) and [Upgrading from v2.4.4](#upgrading-from-v244). If you upgrade from **v2.4**, read [Upgrading from v2.4](#upgrading-from-v24), and then those three. If you upgrade from **v2.3.rc3**, every stage of v2.4 and every later version applies: read [Upgrading from v2.3.rc3](#upgrading-from-v23rc3) first, and then the other four.
+v2.5.2 is the next version after v2.5.1, and the first release with binaries after v2.3.rc3: the versions between them were published as commits of `main`, without binaries, so their fixes reach a server that runs a release with this one. If you upgrade from **v2.5.1**, read [Upgrading from v2.5.1](#upgrading-from-v251). If you upgrade from **v2.5**, read [Upgrading from v2.5](#upgrading-from-v25) first, and then that one. From an earlier version, read first what this paragraph says for it, and then those two too. If you upgrade from **v2.4.4**, read [Upgrading from v2.4.4](#upgrading-from-v244). If you upgrade from **v2.4.3**, read only that one too: v2.4.4 changed nothing in what Turbo does ([Upgrading from v2.4.3](#upgrading-from-v243)). If you upgrade from **v2.4.2**, read [Upgrading from v2.4.2](#upgrading-from-v242) first, and then [Upgrading from v2.4.4](#upgrading-from-v244). If you upgrade from **v2.4.1**, v2.4.2 applies too: read [Upgrading from v2.4.1](#upgrading-from-v241), and then [Upgrading from v2.4.2](#upgrading-from-v242) and [Upgrading from v2.4.4](#upgrading-from-v244). If you upgrade from **v2.4**, read [Upgrading from v2.4](#upgrading-from-v24), and then those three. If you upgrade from **v2.3.rc3**, every stage of v2.4 and every later version applies: read [Upgrading from v2.3.rc3](#upgrading-from-v23rc3) first, and then the other four.
 
 Published binaries are static and built with the latest Go 1.26 patch. Check the download with `SHA256SUMS`, in the folder of the download: `sha256sum -c --ignore-missing SHA256SUMS` (`--ignore-missing` checks only the binaries you downloaded; without it, `sha256sum` fails for the others). A signed release also has `SHA256SUMS.sig`: [SECURITY.md](SECURITY.md) says how to check it.
 
@@ -86,7 +86,7 @@ Before upgrading, back up the sites folder, `turbo.config` included, and review 
 
 ## Upgrading from v2.4.1
 
-**Recommendation: upgrade as soon as possible.** v2.4.2 fixes security issues: the panel of a Turbo just installed, or whose systemd unit lost its credentials file, let in anyone who reached it with the default credentials; a stolen panel session could still make a site's file run as a page on the panel's origin, or lock the administrator out with wrong passwords; another page could lock the administrator's IP out of the panel; and requests with a malformed `Host` reached the CGIs. Details will be in the repository's security advisories, published with the first release that carries these fixes.
+**Recommendation: upgrade as soon as possible.** v2.4.2 fixes security issues: the panel of a Turbo just installed, or whose systemd unit lost its credentials file, let in anyone who reached it with the default credentials; a stolen panel session could still make a site's file run as a page on the panel's origin, or lock the administrator out with wrong passwords; another page could lock the administrator's IP out of the panel; and requests with a malformed `Host` reached the CGIs. Details are in the repository's security advisories, published with v2.5.2, the first release that carries these fixes.
 
 Before upgrading, back up the sites folder, `turbo.config` included, and review the breaking changes of v2.4.2, especially:
 - the default password (`Admin`) signs in only from the machine itself, at `localhost` (or a loopback address) and without a proxy in front: set your own password before you upgrade (or `TURBO_PASSWORD`), or sign in through an SSH tunnel afterwards; a proxy on the same machine must send `X-Forwarded-For`, `Forwarded` or `X-Real-IP`;
@@ -100,7 +100,7 @@ Before upgrading, back up the sites folder, `turbo.config` included, and review 
 
 ## Upgrading from v2.4
 
-**Recommendation: upgrade as soon as possible.** v2.4.1 fixes security issues: a client could hold every CGI slot and leave the PHP of every site answering 503, a stolen panel session could change what the administrator later confirms with the password or reach the panel through an error template, and a site could lose its settings when its folder couldn't be read, its scripts then served as text. Details will be in the repository's security advisories, published with the first release that carries these fixes.
+**Recommendation: upgrade as soon as possible.** v2.4.1 fixes security issues: a client could hold every CGI slot and leave the PHP of every site answering 503, a stolen panel session could change what the administrator later confirms with the password or reach the panel through an error template, and a site could lose its settings when its folder couldn't be read, its scripts then served as text. Details are in the repository's security advisories, published with v2.5.2, the first release that carries these fixes.
 
 Before upgrading, back up the sites folder, `turbo.config` included, and review the breaking changes of v2.4.1, especially:
 - the response templates and the character replacements need the current password, the actions that need it take their values as sent (an API client sends them URL-encoded, without the tokens of the replacements), and a replacement can't be for letters or digits;
@@ -118,7 +118,7 @@ The commit "v2.4." `57cbb3c` of `main` is v2.4; stage 6 (the third review) wasn'
 
 ## Upgrading from v2.3.rc3
 
-**Recommendation: upgrade as soon as possible.** This version fixes security and stability issues: some could expose files outside a site, stop or hang the server, or affected the admin panel, certificates and the TLS configuration. Details will be in the repository's security advisories, published with the first release that carries these fixes.
+**Recommendation: upgrade as soon as possible.** This version fixes security and stability issues: some could expose files outside a site, stop or hang the server, or affected the admin panel, certificates and the TLS configuration. Details are in the repository's security advisories, published with v2.5.2, the first release that carries these fixes.
 
 Before upgrading:
 
@@ -158,7 +158,7 @@ Before upgrading:
 
 ## v2.5.2
 
-Not published yet: the next version after v2.5.1, with what a review of v2.5.1 as it was published found. Each fix has a test that failed before it.
+The first release with binaries after v2.3.rc3: the next version after v2.5.1, with what a review of v2.5.1 as it was published found. Each fix has a test that failed before it.
 
 ### Fixes
 - **The headers that a browser follows:** `Refresh`, `Location` and `Content-Location` don't take `SUBDOMAIN` nor `FIRST_SUBDOMAIN` (above): `'0; url=https://' + SUBDOMAIN + '.' + FIRST_DOMAIN` sent the visitor of a request without an alias to the host that the client wrote, as a rewrite did before v2.5.1.
@@ -173,6 +173,7 @@ Not published yet: the next version after v2.5.1, with what a review of v2.5.1 a
 ### In the repository
 - **Tests:** `TestR251_…`, in `server/turbo_review_v251_<subject>_test.go`, and in `dx/dx-lua`; `FuzzExpressionTargetHost`, `FuzzTextTargetHost` and `FuzzFoldKeyPrefixes`. The tests of the folded names compared with `strings.EqualFold` alone, and failed only on macOS, where `foldKey` takes a name in NFC and in NFD for one: they compare as the file system does, and run both ways on every system.
 - **Continuous integration:** the check of the executable scripts is a job of its own: as a step of the analysis, a commit that lost the bit skipped every analysis with it.
+- **Release binaries named with their version,** as up to v2.3.rc3: `turbo-v2.5.2-linux-amd64`, `turbo-v2.5.2-linux-arm64` and `turbo-v2.5.2-windows-x64.exe` (`release.sh`), listed so in `SHA256SUMS`.
 
 ---
 
@@ -392,7 +393,7 @@ Published as commits of `main` (`ac63977` and `15dcff2`, both "v2.4.2."), withou
 
 ## v2.4.1
 
-The first release after v2.4. It brings the fixes of a review of Turbo for production and those of the third review of v2.4 (stage 6), which v2.4 didn't have: they are listed below, newest first, and both apply when upgrading from v2.4.
+Published as commits of `main` (`775a809` and `5bc3b9e`, both "v2.4.1."), without binaries: the next version after v2.4. It brings the fixes of a review of Turbo for production and those of the third review of v2.4 (stage 6), which v2.4 didn't have: they are listed below, newest first, and both apply when upgrading from v2.4.
 
 ### Production review
 
@@ -470,7 +471,7 @@ The first release after v2.4. It brings the fixes of a review of Turbo for produ
 
 ## v2.4
 
-The first release after v2.3.rc3, the commit "v2.4." `57cbb3c` of `main`. It brings together five stages of work, none of them released on its own: they are listed below, newest first, with their changes. Every stage applies when upgrading from v2.3.rc3.
+Published as a commit of `main` (`57cbb3c`, "v2.4."), without binaries: the next version after v2.3.rc3. It brings together five stages of work, none of them published on its own: they are listed below, newest first, with their changes. Every stage applies when upgrading from v2.3.rc3.
 
 ### Stage 5: second review
 
