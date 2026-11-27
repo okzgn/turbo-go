@@ -58,12 +58,16 @@ type checker struct {
 	cookies     bool
 	patternCost int // The instructions of the patterns of matches, in all
 	labelsAt    int // Where the last Labels placed in the host of a redirection is, for the errors
-	// A text of the expression may leave a "." and one label alone after Labels, to the end of the host
-	// ("SUBDOMAIN + '.com'"): allowed, and worth a warning of the caller (Program.LabelsBeforeOneLabel)
+	// The texts of the expression may leave a "." and one label alone after Labels, to the end of the host
+	// ("SUBDOMAIN + '.com'", "SUBDOMAIN + '.' + 'com/'"): allowed, and worth a warning of the caller
+	// (Program.LabelsBeforeOneLabel)
 	labelsOneLabel bool
 	// FIRST_DOMAIN or FIRST_SITE may come right after Labels and a ".": allowed, and worth a warning of the caller
 	// (Program.LabelsBeforeAnAliasName)
 	labelsAliasName bool
+	// A value that may give nothing for a request may leave two texts together as "//" or "..": allowed, and worth a
+	// warning of the caller (Program.ValueMayJoinTexts)
+	valueJoinsTexts bool
 }
 
 func (c *checker) errorAt(pos int, message string) *Error { return errorAt(c.source, pos, message) }
@@ -340,8 +344,8 @@ func (c *checker) noLabelsIn(n *node) *Error {
 const labelsInANavigationHeader = "SUBDOMAIN and FIRST_SUBDOMAIN can't be used in this header: a browser goes where its value says, and a wildcard subdomain lets the client choose them; redirect with a rewrite, whose host is checked"
 
 // position is where the next part of a rewrite's target goes, as the caller places it: before anything (the start,
-// which only a text of the expression can begin), in the host of a redirection, in the path or in the query. A set
-// of them is a bit mask, with what may be right before it.
+// which only a text of the expression can begin), in the host of a redirection, in the path, in the query or in the
+// fragment. A set of them is a bit mask, with what may be right before it.
 type position uint16
 
 const (
@@ -350,6 +354,7 @@ const (
 	positionHost
 	positionPath
 	positionQuery
+	positionFragment // After a "#": the rest is the fragment, which nothing moves
 	// What may be right before the next part, besides where it goes: a text of the expression that ends in "/" or "."
 	// (a text that starts with one of them would make "//" or ".." with it), and labels that the client may choose at
 	// the end of the host (Labels), alone or with a "." after them.
@@ -357,10 +362,19 @@ const (
 	afterDot
 	afterLabels
 	afterLabelsDot
+	// The same "/" or "." of a text, with values between that may give nothing for a request (mayBeEmpty): "'/' + EXT +
+	// '/x'" gives "//x" for a request without an extension. Allowed, as the value is meant to be there, and worth a
+	// warning of the caller.
+	maybeAfterSlash
+	maybeAfterDot
+	// After labels that the client may choose and a ".", the host has one label so far, without or with a final "."
+	// (afterOneLabelDot): if the host ends there, the visitor chooses the whole domain (labelsOneLabel).
+	afterOneLabel
+	afterOneLabelDot
 )
 
 // positions are the bits of where the next part goes.
-const positions = positionStart | positionHostStart | positionHost | positionPath | positionQuery
+const positions = positionStart | positionHostStart | positionHost | positionPath | positionQuery | positionFragment
 
 // rewriteParts checks the rules of a rewrite's target (flow), and what only its end tells: a redirection without a
 // host whatever it gives, or a host that may end with labels that the client chose.
@@ -373,6 +387,9 @@ func (c *checker) rewriteParts(root *node) *Error {
 		return &Error{Message: "the target needs a host"} // Of the whole expression
 	case out&(afterLabels|afterLabelsDot) != 0:
 		return c.errorAt(c.labelsAt, labelsAtTheEnd)
+	}
+	if out&(afterOneLabel|afterOneLabelDot) != 0 { // The host may end with the expression, after one label
+		c.labelsOneLabel = true
 	}
 	return nil
 }
@@ -453,8 +470,18 @@ func (c *checker) flow(n *node, in position) (position, *Error) {
 	if inHost && in&afterLabelsDot != 0 && n.op == opVariable && (n.variable == FirstDomain || n.variable == FirstSite) {
 		c.labelsAliasName = true // Nothing without an alias: the caller answers 500 then
 	}
-	// A value: what follows has no text of the expression right before it
-	out := in &^ (afterSlash | afterDot | afterLabels | afterLabelsDot)
+	// A value: what follows has no text of the expression right before it, unless the value gives nothing for the
+	// request, which the evaluation drops. Not refused (the value is meant to be there): kept, for the warnings.
+	out := in &^ (afterSlash | afterDot | afterLabels | afterLabelsDot | maybeAfterSlash | maybeAfterDot | afterOneLabel | afterOneLabelDot)
+	if mayBeEmpty(n) {
+		out |= in & (maybeAfterSlash | maybeAfterDot | afterOneLabel | afterOneLabelDot)
+		if in&afterSlash != 0 {
+			out |= maybeAfterSlash
+		}
+		if in&afterDot != 0 {
+			out |= maybeAfterDot
+		}
+	}
 	if out&positionHostStart != 0 { // A host that Turbo serves, or of the configuration, encoded: never one of hostStarters
 		out = out&^positionHostStart | positionHost
 	}
@@ -472,7 +499,7 @@ func (c *checker) advance(n *node, in position, text string) (position, *Error) 
 		return in, nil // Nothing placed: what was before is before what follows
 	}
 	var out position
-	for _, from := range [...]position{positionStart, positionHostStart, positionHost, positionPath, positionQuery} {
+	for _, from := range [...]position{positionStart, positionHostStart, positionHost, positionPath, positionQuery, positionFragment} {
 		if in&from == 0 {
 			continue
 		}
@@ -517,16 +544,12 @@ func (c *checker) advance(n *node, in position, text string) (position, *Error) 
 	if in&afterSlash != 0 && text[0] == '/' || in&afterDot != 0 && text[0] == '.' { // Joined to a text before it
 		return 0, c.errorAt(n.pos, "a target can't have '..' or '//'")
 	}
-	if in&(afterLabels|afterLabelsDot) != 0 {
-		host := hostOf(text) // What of the text is still the host
-		if in&afterLabels != 0 && len(host) > 1 && host[0] == '.' {
-			// Without its port, nor the dot that may end a host, which is no label more: "SUBDOMAIN + '.com.'" is
-			// "SUBDOMAIN + '.com'", as for a target written as a text
-			label, _, _ := strings.Cut(host[1:], ":")
-			if label = strings.TrimSuffix(label, "."); label != "" && strings.IndexByte(label, '.') == -1 {
-				c.labelsOneLabel = true
-			}
-		}
+	if in&maybeAfterSlash != 0 && text[0] == '/' || in&maybeAfterDot != 0 && text[0] == '.' { // Where a value gives nothing
+		c.valueJoinsTexts = true
+	}
+	if in&(afterLabels|afterLabelsDot|afterOneLabel|afterOneLabelDot) != 0 {
+		host := hostOf(text)           // What of the text is still the host
+		ended := len(host) < len(text) // A "/", "?" or "#" after it: the host ends in this text
 		switch {
 		case in&afterLabels != 0 && (host == "" || host[0] != '.'):
 			return 0, c.errorAt(n.pos, labelsAtTheEnd)
@@ -538,8 +561,58 @@ func (c *checker) advance(n *node, in position, text string) (position, *Error) 
 		case in&afterLabels != 0 && !labelStart(host[1]), in&afterLabelsDot != 0 && (host == "" || !labelStart(host[0])):
 			return 0, c.errorAt(n.pos, labelsAtTheEnd)
 		}
+		// One label after the labels and their "." may end the host, however its texts are written: "SUBDOMAIN + '.com'",
+		// "SUBDOMAIN + '.' + 'com/'", "SUBDOMAIN + '.' + oneOf(EXT, ['com', 'org'])". Followed to where the host ends:
+		// "SUBDOMAIN + '.app.' + DOMAIN" is a domain of the site's.
+		if in&afterLabels != 0 && host != "." {
+			out |= c.oneLabel(host[1:], ended)
+		}
+		if in&afterLabelsDot != 0 {
+			out |= c.oneLabel(host, ended)
+		}
+		if in&afterOneLabel != 0 && (host == "" || host == "." || host[0] != '.') { // The same label goes on, or the host ends
+			out |= c.oneLabel(host, ended)
+		}
+		if in&afterOneLabelDot != 0 && (host == "" || host[0] == ':') { // After its final ".", the host ends, or its port
+			out |= c.oneLabel(host, ended)
+		}
 	}
 	return out, nil
+}
+
+// oneLabel follows the host of a redirection after the labels that the client may choose and their ".": name is what
+// of a text is still the host from there on, and ended whether the host ends in that text. With one label only where
+// the host ends (without its port, nor the "." that may end a host, which is no label more), the visitor chooses the
+// whole domain: it marks the warning. Where the host may go on in the next part, it returns what that part starts
+// after.
+func (c *checker) oneLabel(name string, ended bool) position {
+	name, _, hasPort := strings.Cut(name, ":")
+	if strings.IndexByte(strings.TrimSuffix(name, "."), '.') != -1 {
+		return 0 // Another label: the rest of the host is written in the expression
+	}
+	if ended || hasPort {
+		c.labelsOneLabel = true
+		return 0
+	}
+	if strings.HasSuffix(name, ".") {
+		return afterOneLabelDot
+	}
+	return afterOneLabel
+}
+
+// mayBeEmpty reports whether a value placed in a target (a variable, a header, a parameter or a cookie of the request,
+// or what token, quoted and urlencode give) may give nothing for a request, which the evaluation drops: the texts
+// around it then meet. DOMAIN, SITE, WILDCARD_DOMAIN, WILDCARD_SITE, REWRITE, FIRST_REQUEST, IP and METHOD always give
+// something.
+func mayBeEmpty(n *node) bool {
+	if n.op != opVariable {
+		return true
+	}
+	switch n.variable {
+	case Domain, Site, WildcardDomain, WildcardSite, Rewrite, FirstRequest, IP, Method, Path:
+		return false
+	}
+	return true
 }
 
 // hostOf is what of a text placed in the host of a redirection is still the host: up to a "/", "?" or "#".
@@ -551,9 +624,10 @@ func hostOf(text string) string {
 }
 
 // advancePosition is where a text placed as it is from at leaves the next part: a "/" goes from the host to the
-// path, and a "?" from either to the query. The caller places texts the same way.
+// path, a "?" from either to the query, and a "#" from any of them to the fragment, which nothing leaves. The caller
+// places texts the same way.
 func advancePosition(at position, text string) position {
-	for i := 0; i < len(text) && at != positionQuery; i++ {
+	for i := 0; i < len(text) && at != positionFragment; i++ {
 		switch text[i] {
 		case '/':
 			if at == positionHost {
@@ -561,6 +635,8 @@ func advancePosition(at position, text string) position {
 			}
 		case '?':
 			at = positionQuery
+		case '#':
+			at = positionFragment
 		}
 	}
 	return at

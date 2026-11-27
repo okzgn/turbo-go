@@ -220,18 +220,19 @@ func limiterReference(key string) *IPReference {
 }
 
 // cleanIPReferences forgets the IPs whose counting window ended more than CIL ago and that aren't blocked:
-// their next request would start from zero anyway.
+// their next request would start from zero anyway. Each is decided and deleted holding its mutex, and marked gone:
+// a request that had taken it in between counted in an entry no longer in the map, and a block it set was lost.
 func cleanIPReferences() {
 	now := monotonicNow()
 	intervalLimit := serverRequestLimits.CIL.Load()
 	ipReferences.Range(func(ip, ipRef any) bool {
 		ipData := ipRef.(*IPReference)
 		ipData.mutex.Lock()
-		idle := now-ipData.windowStart > intervalLimit && ipData.blockedUntil <= now
-		ipData.mutex.Unlock()
-		if idle && ipReferences.CompareAndDelete(ip, ipRef) {
+		if now-ipData.windowStart > intervalLimit && ipData.blockedUntil <= now && ipReferences.CompareAndDelete(ip, ipRef) {
+			ipData.gone = true
 			ipReferenceCounts[ipData.level].Add(-1)
 		}
+		ipData.mutex.Unlock()
 		return true
 	})
 }
@@ -253,12 +254,27 @@ func perIPRejected(client clientAddress, incrementCounter bool) (bool, int64) {
 		return true, until - nowUnix
 	}
 
-	ipData := limiterReference(client.key)
-	ipData.mutex.Lock()
+	var ipData *IPReference
+	for {
+		ipData = limiterReference(client.key)
+		ipData.mutex.Lock()
+		if !ipData.gone { // Forgotten by cleanIPReferences meanwhile: a new one counts
+			break
+		}
+		ipData.mutex.Unlock()
+	}
 	rejected, left, newBlock := ipData.countLocked(incrementCounter)
+	level := ipData.level
 	ipData.mutex.Unlock()
 	if newBlock {
-		serverWriteLogs(denialsLogName, nil, 0, client.ip+" conn denial")
+		// Who: the client, or the network whose count it shares (ipReferenceLimit), which it only made reach the limit
+		who := client.ip
+		if level > 0 {
+			if who = limiterNetworkKey(client.key, level); who == overflowIPKey {
+				who = "*"
+			}
+		}
+		serverWriteLogs(denialsLogName, nil, 0, who+" conn denial")
 	}
 	return rejected, (left + int64(time.Second) - 1) / int64(time.Second)
 }
@@ -302,4 +318,5 @@ type IPReference struct {
 	windowStart  int64 // Start of the current count
 	requestCount int64 // Requests counted since windowStart
 	level        int   // Its level (limiterLevels), fixed when it is made
+	gone         bool  // Deleted from ipReferences (cleanIPReferences): whoever took it before takes it again
 }

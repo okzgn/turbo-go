@@ -31,7 +31,6 @@ import (
 	"errors"
 	"io"
 	"net/netip"
-	"net/url"
 	"os"
 	"runtime"
 	"strings"
@@ -74,14 +73,66 @@ func withoutParametersOf(query string, other string) string {
 	return kept.String()
 }
 
-// queryParameterName is the name of a parameter of a query ("name=value", or the name alone), decoded as a CGI's
-// library decodes it; as it is if it can't be decoded.
+// queryParameterName is the name of a parameter of a query ("name=value", or the name alone), decoded as a script reads
+// it (scriptQueryUnescape).
 func queryParameterName(parameter string) string {
 	name, _, _ := strings.Cut(parameter, "=")
-	if decoded, err := url.QueryUnescape(name); err == nil {
-		return decoded
+	return scriptQueryUnescape(name)
+}
+
+// maxQueryParameters is how many parameters of a query a preprocessor reads, as dx-core's MAX_PAIRS and PHP's
+// max_input_vars: the rest isn't there for it, nor for QUERY() of an expression.
+const maxQueryParameters = 1000
+
+// scriptQueryUnescape decodes a name or a value of a query as the preprocessors read them (dx-core's url_decode, PHP's
+// urldecode): "+" is a space and "%XX" the byte it names, and a "%" not followed by two hexadecimal digits stays as it
+// is. url.QueryUnescape refused such a text whole, and an expression read nothing where the script read the text.
+func scriptQueryUnescape(text string) string {
+	return percentUnescape(text, true)
+}
+
+// phpCookieUnescape decodes the value of a cookie as PHP reads it (rawurldecode): as scriptQueryUnescape, but a "+"
+// stays a "+".
+func phpCookieUnescape(text string) string {
+	return percentUnescape(text, false)
+}
+
+// percentUnescape decodes "%XX" into the byte it names, and "+" into a space when plusIsSpace; a "%" not followed by
+// two hexadecimal digits stays as it is.
+func percentUnescape(text string, plusIsSpace bool) string {
+	if strings.IndexByte(text, '%') == -1 && (!plusIsSpace || strings.IndexByte(text, '+') == -1) {
+		return text
 	}
-	return name
+	unhex := func(c byte) (byte, bool) {
+		switch {
+		case c >= '0' && c <= '9':
+			return c - '0', true
+		case c >= 'a' && c <= 'f':
+			return c - 'a' + 10, true
+		case c >= 'A' && c <= 'F':
+			return c - 'A' + 10, true
+		}
+		return 0, false
+	}
+	decoded := make([]byte, 0, len(text))
+	for i := 0; i < len(text); i++ {
+		c := text[i]
+		if c == '+' && plusIsSpace {
+			decoded = append(decoded, ' ')
+			continue
+		}
+		if c == '%' && i+2 < len(text) {
+			high, okHigh := unhex(text[i+1])
+			low, okLow := unhex(text[i+2])
+			if okHigh && okLow {
+				decoded = append(decoded, high<<4|low)
+				i += 2
+				continue
+			}
+		}
+		decoded = append(decoded, c)
+	}
+	return string(decoded)
 }
 
 // dynamic runs the preprocessor of a site for a request, with its mode: the program executable runs the script
@@ -1382,7 +1433,7 @@ func withoutPanelCredentials(request *customNetHttp.Request) {
 	for _, value := range request.Header["Cookie"] {
 		var pairs []string
 		for _, pair := range strings.Split(value, ";") {
-			if name, _, _ := strings.Cut(pair, "="); strings.TrimSpace(name) == sessionCookieName || strings.TrimSpace(name) == sessionCookieNameTLS {
+			if panelSessionPair(pair) {
 				removed = true
 				continue
 			}
@@ -1400,4 +1451,12 @@ func withoutPanelCredentials(request *customNetHttp.Request) {
 	} else {
 		request.Header["Cookie"] = kept
 	}
+}
+
+// panelSessionPair reports whether a pair of a header Cookie ("name=value", between two ";") is the panel's session,
+// which withoutPanelCredentials cuts from what a CGI or a worker receives.
+func panelSessionPair(pair string) bool {
+	name, _, _ := strings.Cut(pair, "=")
+	name = strings.TrimSpace(name)
+	return name == sessionCookieName || name == sessionCookieNameTLS
 }

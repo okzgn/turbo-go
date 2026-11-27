@@ -78,6 +78,10 @@ func resetSitesLocked() {
 	panelCertificate, panelCertificateStamp = nil, "" // Read again from the new sites directory
 	warnedDiskSites = make(map[string]bool)
 	configFileLoaded = false
+	// The attempts of Certbot and their retries have the folders of the directory left: none applies here (a site of
+	// the same name of the new one got the certificate of the old one, and the retry its files there)
+	certSitesEpoch++
+	clear(certPending)
 }
 
 // configFileLoaded is set when the configuration in use came from a turbo.config of the sites directory (or setM
@@ -244,12 +248,14 @@ func updateSettingsFollowing(checkSitesFlag bool, redirects int, options reloadO
 	// usable before anything is applied (sitesDirChainProblem). Outside setM, a pointer must lead to a configuration:
 	// applied on its own, it would leave the defaults, the default credentials and an open panel included. One without
 	// "M" ({}, or only "^") points nowhere: it is an empty configuration, loaded as such.
-	// With TURBO_DIR, the "M" of the whole turbo.config of that directory that is written with {TURBO_CURRENT_DIR}
-	// means that directory, where it was saved when Turbo was started from it: followed, it led to the working
-	// directory of the service (another one, without a turbo.config), where no site has its folder.
+	// With TURBO_DIR, the "M" of the whole turbo.config of that directory that is {TURBO_CURRENT_DIR} means that
+	// directory, where it was saved when Turbo was started from it: followed, it led to the working directory of the
+	// service (another one, without a turbo.config), where no site has its folder. Only that value, which a save writes:
+	// one with a folder after it ("{TURBO_CURRENT_DIR}/sites") was taken for that directory too, and the folder it names
+	// was never followed. It is followed, as without TURBO_DIR.
 	ownDirMeant := false
 	if readConfig && configErr == nil && config.raw != nil && !following && sitesDirFromEnv && !isSitesDirPointerMap(config.raw) {
-		if value, _ := configSitesDir(config.raw); strings.Contains(value, "{"+currentDirPlaceholder+"}") {
+		if value, _ := configSitesDir(config.raw); strings.TrimRight(value, `/\`) == "{"+currentDirPlaceholder+"}" {
 			if resolved, err := resolveSitesDir(value); err == nil && sameDir(baseDir, startDir) && !sameDir(resolved, baseDir) {
 				ownDirMeant = true
 				slog.Warn("The \"M\" of turbo.config is written with {"+currentDirPlaceholder+"}, which with TURBO_DIR is another directory: it is not followed, and the sites directory of TURBO_DIR stays. Saving the configuration writes \"M\" as TURBO_DIR says", "directory", baseDir, "working directory", resolved)
@@ -301,10 +307,18 @@ func updateSettingsFollowing(checkSitesFlag bool, redirects int, options reloadO
 	}
 
 	kept := keptSiteNames()
+	var configs []map[string]map[string]interface{} // The turbo.config that applies, whose domains Turbo knows
+	switch {
+	case readConfig && configErr == nil:
+		configs = append(configs, config.raw)
+	case carried:
+		configs = append(configs, options.carried.raw)
+	}
+	known := knownSiteDomains(kept, following, configs...)
 	if following { // Those of the directory left: none of them is in this one
 		kept = nil
 	}
-	diskSites, mixedCase := scanDiskSites(baseDir, dirEntries, kept)
+	diskSites, mixedCase := scanDiskSites(baseDir, dirEntries, kept, known)
 	folds, foldsKnown := probeNameFoldingKnown(baseDir, diskSites)
 	var restoring map[diskSite]map[string]interface{}
 	if !following {
@@ -641,17 +655,18 @@ func applySiteConfig(config parsedConfig) {
 		if _, keyExists = defaultSettingValidators[domain]; keyExists {
 			continue
 		}
-		if !siteExistenceCheck(domain, "") {
-			keepDormantFromFile(domain, "") // Its folder may appear later
-			continue
-		}
-		// Built just now, empty (the file's sites were emptied first). Without a "" section the file doesn't describe
-		// it: it is a site whose folder is there, as one found on disk. A "" section says all it has, no index included.
-		if _, described := rawConfigMap[domain][""]; !described {
+		// The root and each subdomain on their own: a root without its @ (a deploy that replaces it) left its subdomains
+		// out, with their folders there
+		rootActive := siteExistenceCheck(domain, "")
+		if !rootActive {
+			keepDormantFromFile(domain, "") // Its folder or its @ may appear later
+		} else if _, described := rawConfigMap[domain][""]; !described {
+			// Built just now, empty (the file's sites were emptied first). Without a "" section the file doesn't describe
+			// it: it is a site whose folder is there, as one found on disk. A "" section says all it has, no index included.
 			newSiteContentLocked(domain, "")
 		}
 		for _, subKey := range sortedKeys(rawConfigMap[domain]) {
-			if _, keyExists = subdomainContentCheckers[subKey]; keyExists {
+			if _, keyExists = subdomainContentCheckers[subKey]; keyExists || subKey == "" && !rootActive {
 				continue
 			}
 			if subKey != "" && !siteExistenceCheck(domain, subKey) {
@@ -741,12 +756,15 @@ type diskSite struct {
 	subdomain string
 }
 
-// scanDiskSites lists the site folders of baseDir that have a public folder (@), the ones a reload activates. A
-// folder whose name has capital letters isn't a site's, as no host has them. On a file system that ignores case
-// (Windows, macOS), though, the folder of a site kept without its folder (kept, from keptSiteNames) that comes back
-// with other capitals is that site's, and brings it back; the other site folders with capitals are listed in
-// mixedCase, to be logged once. It reads the disk, so it runs without the global lock.
-func scanDiskSites(baseDir string, dirEntries []os.DirEntry, kept map[string]map[string]bool) (found []diskSite, mixedCase []string) {
+// scanDiskSites lists the site folders of baseDir that have a public folder (@) that can be listed, the ones a reload
+// activates. A folder whose name has capital letters isn't a site's, as no host has them. On a file system that
+// ignores case (Windows, macOS), though, the folder of a site kept without its folder (kept, from keptSiteNames) that
+// comes back with other capitals is that site's, and brings it back; the other site folders with capitals are listed
+// in mixedCase, to be logged once. The subdomains of a domain whose own @ isn't there, or can't be listed, are looked
+// at only for the domains that Turbo knows (known, from knownSiteDomains): any folder of the sites directory, a copy
+// of one ("backup/example.com/@") among them, became a host with the defaults, its scripts served as text. It reads
+// the disk, so it runs without the global lock.
+func scanDiskSites(baseDir string, dirEntries []os.DirEntry, kept map[string]map[string]bool, known map[string]bool) (found []diskSite, mixedCase []string) {
 	for _, entry := range dirEntries { // This is used when input is like: #.domain.com
 		entryName := entry.Name()
 		if entryName == panelCertDirName { // Never a site: nothing of it is served
@@ -766,14 +784,17 @@ func scanDiskSites(baseDir string, dirEntries []os.DirEntry, kept map[string]map
 		if hostValid, _ := hostOk(wildcardName, false); !hostValid {
 			continue
 		}
-		if !publicFolderReadable(baseDir + entryName) {
+		rootReadable := publicFolderReadable(baseDir + entryName)
+		if !rootReadable && !known[wildcardName] {
 			continue
 		}
 		subdirEntries, err := os.ReadDir(baseDir + entryName)
 		if err != nil {
 			continue
 		}
-		found = append(found, diskSite{wildcardName, ""})
+		if rootReadable {
+			found = append(found, diskSite{wildcardName, ""})
+		}
 		for _, subEntry := range subdirEntries {
 			subFolder := baseDir + entryName + "/" + subEntry.Name()
 			subWildcardName := putWildcards(subEntry.Name())
@@ -790,7 +811,7 @@ func scanDiskSites(baseDir string, dirEntries []os.DirEntry, kept map[string]map
 			if hostValid, _ := hostOk(subWildcardName+"."+changeWildcards(wildcardName, "x"), false); !hostValid {
 				continue
 			}
-			if !publicFolderThere(subFolder) {
+			if !publicFolderReadable(subFolder) { // As for the root: one that can't be listed was activated, and a root wasn't
 				continue
 			}
 			found = append(found, diskSite{wildcardName, subWildcardName})
@@ -823,6 +844,29 @@ func sameFolder(a string, b string) bool {
 	infoA, errA := os.Stat(a)
 	infoB, errB := os.Stat(b)
 	return errA == nil && errB == nil && os.SameFile(infoA, infoB)
+}
+
+// knownSiteDomains are the domains whose folder scanDiskSites looks into without a readable @ of their own: those of
+// the sites active or kept without their folder (kept), unless the reload follows to another directory, which has none
+// of them, and those of the turbo.config that applies (configs).
+func knownSiteDomains(kept map[string]map[string]bool, following bool, configs ...map[string]map[string]interface{}) map[string]bool {
+	known := make(map[string]bool)
+	if !following {
+		for domain := range kept {
+			known[domain] = true
+		}
+		withReadLock(func() {
+			for domain := range sitesMap {
+				known[domain] = true
+			}
+		})
+	}
+	for _, raw := range configs {
+		for domain := range raw {
+			known[domain] = true
+		}
+	}
+	return known
 }
 
 // keptSiteNames are the names of the sites kept without their folder (dormantSites), for scanDiskSites.

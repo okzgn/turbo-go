@@ -51,6 +51,16 @@ const (
 	turboProcessSetQuotaAndTerminate       = 0x0101 // PROCESS_SET_QUOTA | PROCESS_TERMINATE
 )
 
+// The layout of JOBOBJECT_EXTENDED_LIMIT_INFORMATION is that of 64-bit Windows
+// (amd64, arm64, the systems Turbo is built for), 144 bytes, which
+// SetInformationJobObject takes by its size. On a 32-bit one Go aligns
+// IoCounters to 4 bytes where Windows aligns it to 8: this doesn't build
+// there, instead of handing the Job Object a structure it would refuse.
+var (
+	_ [144 - unsafe.Sizeof(turboJobLimits{})]byte
+	_ [unsafe.Sizeof(turboJobLimits{}) - 144]byte
+)
+
 // turboJobLimits is JOBOBJECT_EXTENDED_LIMIT_INFORMATION.
 type turboJobLimits struct {
 	PerProcessUserTimeLimit int64

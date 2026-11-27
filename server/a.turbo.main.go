@@ -106,9 +106,23 @@ var (
 	}}
 
 	currentCertDomain string              // Certificate domain currently being processed
+	currentCertEpoch  uint64              // The sites directory (certSitesEpoch) of the attempt of currentCertDomain
 	certRetryDelay    = 30 * time.Second  // Delay before retrying a certificate while another one is being issued
 	certPending       = map[string]bool{} // Sites with a certificate retry waiting (one each); guarded by globalMutex
 	configFileStamp   configStamp         // turbo.config as it was when last read; the zero value reads it again
+	// certSitesEpoch counts the changes of sites directory (resetSitesLocked): an attempt of Certbot, or a retry of one,
+	// started for another directory has its folders, and applies nothing to the sites of this one. Guarded by
+	// globalMutex.
+	certSitesEpoch uint64
+	// certbotStopping is set when Turbo stops (stopCertbot): no attempt of Certbot starts any more. certbotAttempts
+	// counts the attempts started and not over (waitCertbot). Atomic: shutdown never waits for the global lock, which a
+	// slow disk may hold (a second signal had nothing to end then).
+	certbotStopping atomic.Bool
+	certbotAttempts atomic.Int32
+	// certbotContext is the context of every attempt, which certbotStop cancels when Turbo stops; both are guarded by
+	// certbotContextMutex, never held with another lock taken after it.
+	certbotContextMutex         sync.Mutex
+	certbotContext, certbotStop = context.WithCancel(context.Background())
 
 	httpResponses      = &customNetHttp.TurboErrorTemplates // HTTP responses (published copy, see setHTTPResponses)
 	fixedHTTPResponses = make(map[int]bool)                 // Fixed HTTP response codes
@@ -351,7 +365,9 @@ const cgiEndWait = 3 * time.Second
 // progress. Then the connections still open are closed, which ends their CGIs with all they started (P12): without
 // systemd, nothing else would, and they would go on after Turbo. Then the logs are closed, and main returns (exit
 // code 0). A second signal (from again, if it isn't nil) ends that wait at once: it was ignored until the wait ended.
-// The rest goes on as always, so no CGI is left behind.
+// The rest goes on as always, so no CGI is left behind. Certbot first: no attempt starts any more, the one in
+// progress is cancelled, and it is waited for once the requests are, with the certificate it may be putting in place.
+// Nothing here waits for the global lock.
 func shutdown(received os.Signal, again <-chan os.Signal) {
 	slog.Info("Stopping", "signal", received.String())
 	ctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
@@ -366,6 +382,7 @@ func shutdown(received os.Signal, again <-chan os.Signal) {
 			}
 		}()
 	}
+	stopCertbot()
 	var wg sync.WaitGroup
 	for _, server := range servers {
 		if server == nil {
@@ -383,6 +400,7 @@ func shutdown(received os.Signal, again <-chan os.Signal) {
 	wg.Wait()
 	waitCGIsEnded(cgiEndWait)
 	stopPreprocessorModes(cgiEndWait)     // What the modes keep running, once no request uses it
+	waitCertbot(certbotStopWait())        // Cancelled when the stop began
 	errorLines.close()                    // The errors counted and not written yet, and then each one at once
 	scriptLines.close()                   // So do the lines of the scripts
 	serverSetLogState(visitsLogName, nil) // Closed, so the last lines are written
@@ -677,7 +695,7 @@ var (
 	httpsAddr = ":443"
 )
 
-// sitesDirFromEnv says that TURBO_DIR chose the start directory: the "M" of its turbo.config written with
+// sitesDirFromEnv says that TURBO_DIR chose the start directory: the "M" of its turbo.config that is
 // {TURBO_CURRENT_DIR} then means that directory, not the working one (updateSettingsFollowing). Set at start.
 var sitesDirFromEnv bool
 
@@ -1128,13 +1146,10 @@ func deleteSite(domain string, subdomain string) {
 }
 
 // deleteSiteLocked is deleteSite for callers that hold the global lock. Deleting a root domain deletes its
-// subdomains too, as their folders go with it.
+// subdomains too, as their folders go with it: the panel deletes the folder of the domain (deleteSiteFromPanel).
 func deleteSiteLocked(domain string, subdomain string) {
 	if subdomain != "" {
-		delete(sitesMap[domain], subdomain)
-		if siteKeyOwner(subdomain+"."+domain, domain, subdomain) == "" { // Never what another site keeps there
-			forgetSiteKey(subdomain + "." + domain)
-		}
+		deleteSiteEntryLocked(domain, subdomain)
 		return
 	}
 	subdomains := sitesMap[domain]
@@ -1146,6 +1161,23 @@ func deleteSiteLocked(domain string, subdomain string) {
 	}
 	if siteKeyOwner(domain, domain, "") == "" {
 		forgetSiteKey(domain)
+	}
+}
+
+// deleteSiteEntryLocked deletes one site, a root or a subdomain, with the settings of its key (never what another
+// site keeps there), and its domain once none of its sites is left. A root goes alone: its subdomains have folders of
+// their own, and are served without it. Callers hold the global lock.
+func deleteSiteEntryLocked(domain string, subdomain string) {
+	delete(sitesMap[domain], subdomain)
+	siteKey := domain
+	if subdomain != "" {
+		siteKey = subdomain + "." + domain
+	}
+	if siteKeyOwner(siteKey, domain, subdomain) == "" {
+		forgetSiteKey(siteKey)
+	}
+	if len(sitesMap[domain]) == 0 {
+		delete(sitesMap, domain)
 	}
 }
 
@@ -1259,7 +1291,7 @@ var warnedDiskSites = make(map[string]bool)
 // the global lock.
 func dropAliasesOfSites() {
 	for _, alias := range sortedKeys(domainAliases) {
-		if served, _, _, _ := hostExist(alias); served {
+		if hostServedBySite(alias) {
 			slog.Warn("Alias discarded: its host is a site's", "alias", alias, "site", domainAliases[alias])
 			delete(domainAliases, alias)
 		}
@@ -1321,8 +1353,10 @@ func checkSites() {
 			if !siteExists(site.domain, site.subdomain) || publicSwaps.Load() != swaps { // Deleted, or an @ swapped, meanwhile
 				return
 			}
+			// That site alone: a root without its @ (a deploy that replaces it) took its subdomains with it, whose
+			// folders were there, and every *.example.com answered 404 until it came back
 			keepDormantLocked(site.domain, site.subdomain)
-			deleteSiteLocked(site.domain, site.subdomain)
+			deleteSiteEntryLocked(site.domain, site.subdomain)
 			deleted = true
 		})
 		if !deleted {
@@ -1431,12 +1465,17 @@ func (listings folderListings) has(parent string, name string) (bool, error) {
 }
 
 // siteFolderGone reports whether the folder of a site or its public folder (@) is no longer there: it isn't a
-// folder, or it doesn't exist and its parent folder, which can be listed, doesn't have it. Any other answer
+// folder, or it doesn't exist and its parent folder, which can be listed, doesn't have it. For a subdomain, the folder
+// of its domain first: gone, the subdomain's went with it, and its parent can't be listed then. Any other answer
 // (permissions, I/O, a network share that doesn't answer, whose errors Windows also gives as "not found") says
 // nothing about the site, which is left as it is.
 func siteFolderGone(domain string, subdomain string, listings folderListings) bool {
 	folder := sitesDir.Get() + siteFolder(domain, subdomain)
-	for _, path := range []string{strings.TrimSuffix(folder, "/"), folder + publicDirName} {
+	paths := []string{strings.TrimSuffix(folder, "/"), folder + publicDirName}
+	if subdomain != "" {
+		paths = append([]string{sitesDir.Get() + changeWildcards(domain)}, paths...)
+	}
+	for _, path := range paths {
 		info, err := siteDirStat(path)
 		if err == nil {
 			if !info.IsDir() {
@@ -1454,25 +1493,19 @@ func siteFolderGone(domain string, subdomain string, listings folderListings) bo
 	return false
 }
 
-// keepDormantLocked keeps the settings of a site whose folder is gone (for a domain, also those of its
-// subdomains, whose folders go with it), as turbo.config has them, before it is deactivated: they come back with
-// its folder, instead of the defaults (with which its scripts were served as text), and saving keeps them in
-// turbo.config. Callers hold the global lock.
+// keepDormantLocked keeps the settings of a site whose folder or @ is gone, as turbo.config has them, before it is
+// deactivated: they come back with its folder, instead of the defaults (with which its scripts were served as text),
+// and saving keeps them in turbo.config. That site alone: the subdomains of a domain have folders of their own, which
+// checkSites looks at one by one. Callers hold the global lock.
 func keepDormantLocked(domain string, subdomain string) {
-	subdomains := []string{subdomain}
-	if subdomain == "" {
-		subdomains = sortedKeys(sitesMap[domain])
-	}
-	for _, sub := range subdomains {
-		if _, active := sitesMap[domain][sub]; active {
-			setDormantLocked(domain, sub, createSubdomainData(domain, sub))
-		}
+	if _, active := sitesMap[domain][subdomain]; active {
+		setDormantLocked(domain, subdomain, createSubdomainData(domain, subdomain))
 	}
 }
 
 // keepDormantFromFile keeps, for a site of the turbo.config being applied whose folder or public folder isn't
-// there, or can't be looked at (for a domain, with its subdomains), its section, to be applied when the folder can
-// be used; saving keeps it in turbo.config. Any error of the disk counts: permissions, I/O or a network disk that
+// there, or can't be looked at, its section, to be applied when the folder can be used; saving keeps it in
+// turbo.config. That site alone: applySiteConfig looks at each subdomain of a domain on its own. Any error of the disk counts: permissions, I/O or a network disk that
 // doesn't answer say nothing about the site, which, readable again, would otherwise come from the disk with the
 // defaults (its scripts served as text). A name that can't be a site's, or a folder and an @ that are there (the
 // check of the site logs why it can't be used), keeps nothing. Callers hold the global lock, within
@@ -1485,27 +1518,12 @@ func keepDormantFromFile(domain string, subdomain string) {
 	if valid, _ := hostOk(name, false); !valid || reservedSiteNames[changeWildcards(domain)] || siteFolderPresentWith(diskStat, domain, subdomain) {
 		return
 	}
-	subdomains := []string{subdomain}
-	if subdomain == "" {
-		subdomains = sortedKeys(rawConfigMap[domain])
+	section, isMap := rawConfigMap[domain][subdomain].(map[string]interface{})
+	if _, content := subdomainContentCheckers[subdomain]; content || !isMap {
+		return // A site without a section ({}, null) has nothing to keep: its folder brings it as a new site
 	}
-	kept := false
-	for _, sub := range subdomains {
-		section, isMap := rawConfigMap[domain][sub].(map[string]interface{})
-		if _, content := subdomainContentCheckers[sub]; content || !isMap {
-			continue
-		}
-		if sub != "" {
-			if valid, _ := hostOk(sub+"."+changeWildcards(domain, "x"), false); !valid {
-				continue
-			}
-		}
-		setDormantLocked(domain, sub, jsonSection(section))
-		kept = true
-	}
-	if kept { // A site without sections ({}, null) has nothing to keep: its folder brings it as a new site
-		slog.Info("turbo.config site whose folder isn't there or can't be read: its settings apply when it can be used", "site", domain, "subdomain", subdomain)
-	}
+	setDormantLocked(domain, subdomain, jsonSection(section))
+	slog.Info("turbo.config site whose folder isn't there or can't be read: its settings apply when it can be used", "site", domain, "subdomain", subdomain)
 }
 
 // siteFolderPresentWith reports, looking with stat, whether the folder of a site and its public folder (@) are both
@@ -2164,10 +2182,11 @@ func rewrite(requestURI string, domain string, subdomain string) (string, string
 // scheme, and "?" and "#" leave it empty.
 const redirectHostStarters = `/\?#`
 
-// rewriteRedirect answers a rewrite to "http(s)://" with a 302: to the exact target when it has a path or
-// a query, or to the target domain followed by the original URI when it is only a domain. site and source name the
-// rewrite, for the log.
-func rewriteRedirect(secure bool, target string, query string, site string, source string, responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request) {
+// rewriteRedirect answers a rewrite to "http(s)://" with a 302: to the exact target when it has a path, a query or a
+// fragment, or to the target domain followed by the original URI when it is only a domain. target is the host and the
+// path, query the query without its "?", and fragment the fragment with its "#". site and source name the rewrite, for
+// the log.
+func rewriteRedirect(secure bool, target string, query string, fragment string, site string, source string, responseWriter customNetHttp.ResponseWriter, request *customNetHttp.Request) {
 	scheme := "http://"
 	if secure {
 		scheme = "https://"
@@ -2183,14 +2202,51 @@ func rewriteRedirect(secure bool, target string, query string, site string, sour
 		reqMsg(responseWriter, 500)
 		return
 	}
-	if strings.IndexByte(target, '/') == -1 && query == "" {
+	// A value before a "." gave nothing for this request: "https://{SUBDOMAIN}.example.com/" in the site's root, where
+	// there is no SUBDOMAIN, gave "https://.example.com/", and "https://app.{SUBDOMAIN}.example.com/" a host with "..".
+	// No browser goes to such a host.
+	if redirectHostMalformed(target) {
+		if logDueOnceAMinute("redirect|" + site + "|" + source) {
+			slog.Warn(`Rewrite whose host would start with a "." or have ".." when responding (a value before a "." gave nothing): 500 (reported once a minute)`, "site", site, "source", source)
+		}
+		reqMsg(responseWriter, 500)
+		return
+	}
+	if strings.IndexByte(target, '/') == -1 && query == "" && fragment == "" {
 		customNetHttp.Redirect(responseWriter, request, scheme+target+request.RequestURI, 302)
 		return
 	}
 	if query != "" {
 		target += "?" + query
 	}
-	customNetHttp.Redirect(responseWriter, request, scheme+target, 302)
+	customNetHttp.Redirect(responseWriter, request, scheme+target+fragment, 302)
+}
+
+// redirectHostMalformed reports whether the host name of a redirection's target, as it is placed (the host and the
+// path), is empty, starts with a "." or has "..": without its userinfo nor its port. An IPv6 address between brackets
+// isn't a name. A "." that ends the name is no label more, and stays.
+func redirectHostMalformed(target string) bool {
+	host := target
+	if end := strings.IndexAny(host, "/?#"); end != -1 {
+		host = host[:end]
+	}
+	if at := strings.LastIndexByte(host, '@'); at != -1 {
+		host = host[at+1:]
+	}
+	if strings.HasPrefix(host, "[") {
+		return false
+	}
+	name, _, _ := strings.Cut(host, ":")
+	return name == "" || name[0] == '.' || strings.Contains(name, "..")
+}
+
+// splitFragment cuts a target at its fragment: what is before the first "#", and the fragment with its "#". Only a text
+// written in the target places a "#" as it is: every value placed in it is encoded.
+func splitFragment(target string) (string, string) {
+	if at := strings.IndexByte(target, '#'); at != -1 {
+		return target[:at], target[at:]
+	}
+	return target, ""
 }
 
 // chosenPath is what choose found for a request: the path to serve and the query a rewrite adds, whether that path is
@@ -2247,13 +2303,16 @@ func choose(overTLS bool, responseWriter customNetHttp.ResponseWriter, request *
 			return chosenPath{}, false
 		}
 	}
+	// The fragment first: a "?" in it ("#tab?x=1") is no query
+	rewriteResult, fragment := splitFragment(rewriteResult)
 	rewriteResult, query, _ := strings.Cut(rewriteResult, "?")
 	switch rewriteResult[0] {
 	case 'H', 'S':
 		addVary(responseWriter.Header(), vary)
-		rewriteRedirect(rewriteResult[0] == 'S', rewriteResult[1:], query, joinedSite(site.siteSubdomain, site.siteDomain), matchedRewrite, responseWriter, request)
+		rewriteRedirect(rewriteResult[0] == 'S', rewriteResult[1:], query, fragment, joinedSite(site.siteSubdomain, site.siteDomain), matchedRewrite, responseWriter, request)
 		return chosenPath{}, false
 	case 'N':
+		// Without its fragment, which a browser never sends: "/index.html#top" served no file but one named so
 		rewriteResult = rewriteResult[1:]
 	}
 	if rewriteResult == "" { // A rewrite whose placeholders expand to nothing
@@ -2346,7 +2405,7 @@ func labelsBeforeAnAliasKeyword(target string) bool {
 		return false
 	}
 	host := target[1:]
-	if end := strings.IndexAny(host, "/?"); end != -1 {
+	if end := strings.IndexAny(host, "/?#"); end != -1 {
 		host = host[:end]
 	}
 	for _, labels := range []string{"{SUBDOMAIN}.", "{FIRST_SUBDOMAIN}."} {
@@ -2380,7 +2439,7 @@ func textTargetProblem(target string) string {
 		if labels, ok = hostAfterLabels(labels, literal); !ok {
 			return false
 		}
-		inHost = !strings.ContainsAny(literal, "/?") // As targetWriter moves
+		inHost = !strings.ContainsAny(literal, "/?#") // As targetWriter moves
 		return true
 	}
 	remaining := target[1:]
@@ -2454,32 +2513,83 @@ func labelsBeforeOneLabel(target string) bool {
 	return false
 }
 
+// textTargetValueJoins reports whether a target written as a text (as it is kept) has, between a text that ends in
+// "/" or "." and one that starts with the same character, only keywords that may give nothing for a request, as
+// Program.ValueMayJoinTexts for an expression: "/{EXT}/x" is "//x" for a request without an extension, and
+// "https://app.{SUBDOMAIN}.example.com/" a host with ".." in the site's root. Turbo warns of it when the rewrite is
+// added or read: a path of the site is cleaned as a request's, a redirection gets its path as it is, and one whose
+// host is left so answers 500.
+func textTargetValueJoins(target string) bool {
+	if target == "" {
+		return false
+	}
+	var before byte // The last character of the last text, while only keywords that may give nothing follow it
+	joins := func(literal string) bool {
+		if literal == "" {
+			return false
+		}
+		joined := (before == '/' || before == '.') && literal[0] == before
+		before = literal[len(literal)-1]
+		return joined
+	}
+	remaining := target[1:]
+	for { // As shortcutWords reads it
+		open := strings.IndexByte(remaining, '{')
+		if open == -1 {
+			break
+		}
+		closing := strings.IndexByte(remaining[open:], '}')
+		if closing == -1 {
+			break
+		}
+		closing += open
+		if joins(remaining[:open]) {
+			return true
+		}
+		switch remaining[open+1 : closing] { // Those that always give something: nothing meets across them
+		case "DOMAIN", "SITE", "WILDCARD_DOMAIN", "WILDCARD_SITE", "REWRITE", "FIRST_REQUEST":
+			before = 0
+		}
+		remaining = remaining[closing+1:]
+	}
+	return joins(remaining)
+}
+
+// valueJoinsTextsWarning is the warning of a rewrite whose texts may meet as "//" or ".." where a value gives nothing
+// (textTargetValueJoins, Program.ValueMayJoinTexts).
+const valueJoinsTextsWarning = `Rewrite whose target has, between a "/" and a "/" (or a "." and a "."), only values that may give nothing for a request (EXT, FILE, a parameter…): for such a request the two meet as "//" or "..". A path of the site is cleaned as a request's (a ".." segment answers 404), a redirection keeps its path as it is, and one whose host is left so answers 500`
+
 // textTargetLabelsAtTheEnd is why a host of a redirection can't end with the labels that the client may choose.
 const textTargetLabelsAtTheEnd = "{SUBDOMAIN} and {FIRST_SUBDOMAIN}, which a wildcard lets the client choose, can't end the host of a redirection: write a \".\" and the rest of the host after them"
 
 // textTargetRewriteInTheHost is why {REWRITE} can't be in the host of a redirection (as REWRITE in an expression).
 const textTargetRewriteInTheHost = `{REWRITE} starts with "/": it can't be in the host of a redirection; write the host alone (the path asked for is added) or the path after it`
 
-// targetPosition is where the next piece of a rewrite's target goes: the host of a redirection, the path or the
-// query.
+// targetPosition is where the next piece of a rewrite's target goes: the host of a redirection, the path, the query
+// or the fragment.
 type targetPosition uint8
 
 const (
 	targetInHost targetPosition = iota
 	targetInPath
 	targetInQuery
+	targetInFragment
 )
 
 // targetWriter writes the target of a rewrite for a request: the texts written in the target as they are, and the
 // values placed in it, each encoded for where it goes, so that no value changes the shape of the URL. A "/" of a
-// text goes from the host to the path, and a "?" to the query. The target starts with its mode ("N" for a path of
-// the site, "H" or "S" for a redirection), which starts it in the path or in the host.
+// text goes from the host to the path, a "?" to the query, and a "#" to the fragment, which nothing leaves (RFC 3986:
+// a "/" or a "?" after it is the fragment's). The target starts with its mode ("N" for a path of the site, "H" or "S"
+// for a redirection), which starts it in the path or in the host.
 type targetWriter struct {
 	request     *customNetHttp.Request
 	result      strings.Builder
 	position    targetPosition
 	redirection bool
 	addQuery    bool // The request's query goes at the end (REWRITE_COMPLEMENT in the path of a redirection)
+	// The request's query goes at the end of the fragment (REWRITE_COMPLEMENT in the fragment of a redirection), where
+	// it went before the fragment was told apart: "/legacy/a/b?x=1" to "#{REWRITE_COMPLEMENT}" is "#a/b?x=1"
+	addQueryToFragment bool
 }
 
 func newTargetWriter(request *customNetHttp.Request, redirection bool) *targetWriter {
@@ -2494,6 +2604,9 @@ func newTargetWriter(request *customNetHttp.Request, redirection bool) *targetWr
 func (writer *targetWriter) text(literal string) {
 	for _, char := range literal {
 		switch {
+		case writer.position == targetInFragment:
+		case char == '#':
+			writer.position = targetInFragment
 		case char == '/' && writer.position == targetInHost:
 			writer.position = targetInPath
 		case char == '?' && writer.position != targetInQuery:
@@ -2504,8 +2617,8 @@ func (writer *targetWriter) text(literal string) {
 }
 
 // value writes the value of the placeholder name, encoded for where it goes: in the host, so that "/", "?" or "@"
-// can't change the URL, and an IPv6 address between brackets; in the path, each segment, keeping "/"; in the query,
-// as one value.
+// can't change the URL, and an IPv6 address between brackets; in the path and in the fragment, each segment, keeping
+// "/"; in the query, as one value.
 func (writer *targetWriter) value(name string, value string) {
 	switch writer.position {
 	case targetInHost:
@@ -2516,50 +2629,100 @@ func (writer *targetWriter) value(name string, value string) {
 		writer.result.WriteString(url.QueryEscape(value)) // A host name is left as it is; "/", "?" or "@" can't change the URL
 	case targetInPath:
 		if name == "REWRITE_COMPLEMENT" { // The path here; a redirection adds the query to the target's
-			// Without the query that the replacer adds: a "?" before it comes from the decoded path (%3F), and is
-			// escaped with the segment. In any capitals: an expression may have changed them (lower, upper), and the
-			// query goes on as the request sent it
-			if queryStart := strings.IndexByte(writer.request.RequestURI, '?'); queryStart != -1 {
-				if query := writer.request.RequestURI[queryStart:]; len(value) >= len(query) && strings.EqualFold(value[len(value)-len(query):], query) {
-					value = value[:len(value)-len(query)]
-				}
-			}
+			value, _ = writer.complementParts(value)
 			writer.addQuery = writer.redirection // An internal target already gets the request's query (CGI, QUERY_STRING)
 		}
-		segments := strings.Split(value, "/")
-		for i, segment := range segments {
-			segments[i] = url.PathEscape(segment)
+		writePathSegments(&writer.result, value)
+	case targetInFragment:
+		// What follows a "#" is the fragment's, which a page reads as it is (the router of a page: "#/a/b?x=1"): a
+		// value goes there as in the path, and REWRITE_COMPLEMENT brings the request's query to the end of the
+		// fragment, as before the fragment was told apart (written as one value, "/legacy/a/b?x=1" to
+		// "#{REWRITE_COMPLEMENT}" was "#a%2Fb%3Fx=1"). Nothing written after a "#" changes the URL; a "#" of its own is
+		// encoded.
+		if name == "REWRITE_COMPLEMENT" {
+			value, _ = writer.complementParts(value)
+			writer.addQueryToFragment = writer.redirection // An internal target is served without its fragment
 		}
-		writer.result.WriteString(strings.Join(segments, "/"))
+		writePathSegments(&writer.result, value)
 	default:
 		writer.result.WriteString(url.QueryEscape(value))
 	}
 }
 
-// encoded writes, in the path or the query, a text that urlencode made: only the characters that a URL never encodes
-// and %XX, which change neither where it goes nor the shape of the URL. Written as a value, it was encoded again.
+// complementParts cuts the value of REWRITE_COMPLEMENT into its path and the query that the replacer adds to it, with
+// its "?" (or ""): a "?" before that query comes from the decoded path (%3F), and is escaped with the path. In any
+// capitals: an expression may have changed them (lower, upper), and the query goes on as the request sent it.
+func (writer *targetWriter) complementParts(value string) (string, string) {
+	if queryStart := strings.IndexByte(writer.request.RequestURI, '?'); queryStart != -1 {
+		if query := writer.request.RequestURI[queryStart:]; len(value) >= len(query) && strings.EqualFold(value[len(value)-len(query):], query) {
+			return value[:len(value)-len(query)], query
+		}
+	}
+	return value, ""
+}
+
+// writePathSegments writes value encoded as the segments of a path, each with url.PathEscape, keeping its "/".
+func writePathSegments(result *strings.Builder, value string) {
+	for {
+		end := strings.IndexByte(value, '/')
+		if end == -1 {
+			result.WriteString(url.PathEscape(value))
+			return
+		}
+		result.WriteString(url.PathEscape(value[:end]))
+		result.WriteByte('/')
+		value = value[end+1:]
+	}
+}
+
+// writeQueryAsSent writes a query as the request sent it, its control characters encoded as in the rest of a target.
+func writeQueryAsSent(result *strings.Builder, query string) {
+	for i := 0; i < len(query); i++ {
+		if c := query[i]; c < 0x20 || c == 0x7f {
+			fmt.Fprintf(result, "%%%02X", c)
+		} else {
+			result.WriteByte(c)
+		}
+	}
+}
+
+// encoded writes, in the path, the query or the fragment, a text that urlencode made: only the characters that a URL
+// never encodes and %XX, which change neither where it goes nor the shape of the URL. Written as a value, it was
+// encoded again.
 func (writer *targetWriter) encoded(text string) {
 	writer.result.WriteString(text)
 }
 
-// finish returns the target, with the request's query at its end when a REWRITE_COMPLEMENT in the path of a
-// redirection asked for it.
+// finish returns the target, with the request's query at the end of its own, before its fragment, when a
+// REWRITE_COMPLEMENT in the path of a redirection asked for it (after the fragment, it was the fragment's), and at the
+// end of the fragment when one in the fragment did.
 func (writer *targetWriter) finish() string {
-	if _, query, hasQuery := strings.Cut(writer.request.RequestURI, "?"); writer.addQuery && hasQuery && query != "" {
-		if strings.IndexByte(writer.result.String(), '?') == -1 {
-			writer.result.WriteByte('?')
-		} else {
-			writer.result.WriteByte('&')
-		}
-		for i := 0; i < len(query); i++ { // Control characters stay encoded, as in the rest of the target
-			if c := query[i]; c < 0x20 || c == 0x7f {
-				fmt.Fprintf(&writer.result, "%%%02X", c)
-			} else {
-				writer.result.WriteByte(c)
-			}
-		}
+	_, query, hasQuery := strings.Cut(writer.request.RequestURI, "?")
+	if !writer.addQuery && !writer.addQueryToFragment || !hasQuery || query == "" {
+		return writer.result.String()
 	}
-	return writer.result.String()
+	target, fragment := splitFragment(writer.result.String())
+	var placed strings.Builder
+	placed.Grow(len(target) + 2*len(query) + len(fragment) + 2)
+	placed.WriteString(target)
+	if writer.addQuery {
+		placed.WriteByte(querySeparator(target))
+		writeQueryAsSent(&placed, query)
+	}
+	placed.WriteString(fragment)
+	if writer.addQueryToFragment {
+		placed.WriteByte(querySeparator(fragment))
+		writeQueryAsSent(&placed, query)
+	}
+	return placed.String()
+}
+
+// querySeparator is what goes before a query added to text: "?", or "&" if text has a "?" already.
+func querySeparator(text string) byte {
+	if strings.IndexByte(text, '?') == -1 {
+		return '?'
+	}
+	return '&'
 }
 
 // sortedKeys returns the keys of values in byte order.

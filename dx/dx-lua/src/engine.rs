@@ -48,7 +48,10 @@ const ALLOWED_GLOBALS: &[&str] = &[
 /// LuaJIT would run it without the hook, since the error comes from the hook, and a handler that doesn't end would hold
 /// the worker. And `table.insert` with a position that isn't an integer of 1 to `#t + 1` is an error, as in Lua 5.3:
 /// LuaJIT moves the elements up to it in a loop of C, which the hook doesn't stop, and a position of 2^31 (or -2^31)
-/// held the worker some 18 s past the time of its request. The originals are kept as upvalues, where no script reaches.
+/// held the worker some 18 s past the time of its request. A long move (from `#t` down to the position, 2^16 elements
+/// or more) is done here, in Lua, raw as the C does it, where the hook stops it: `#t` of a table with a few keys at
+/// powers of two is up to 2^30, and a position of 1 inside those bounds held the worker as long. The originals are kept
+/// as upvalues, where no script reaches.
 const PRELUDE: &str = r##"
 local over, raw_pcall, raw_xpcall, error = ...
 if over then
@@ -66,11 +69,19 @@ if over then
   end
 end
 local insert, select, type, tonumber, floor = table.insert, select, type, tonumber, math.floor
+local rawget, rawset = rawget, rawset
 table.insert = function(t, ...)
   if select("#", ...) == 2 and type(t) == "table" then
     local position = tonumber((...))
-    if position and (position ~= floor(position) or position < 1 or position > #t + 1) then
+    local n = #t
+    if position and (position ~= floor(position) or position < 1 or position > n + 1) then
       error("bad argument #2 to 'insert' (position out of bounds)", 2)
+    end
+    if position and n - position >= 65536 then
+      local value = select(2, ...)
+      for i = n, position, -1 do rawset(t, i + 1, rawget(t, i)) end
+      rawset(t, position, value)
+      return
     end
   end
   return insert(t, ...)
@@ -110,29 +121,138 @@ impl Default for Config {
     }
 }
 
-/// A script kept in memory, with what tells whether its file is still the same: its date and size and, on Unix, its
-/// inode (another file put in its place, of the same size and within the precision of the date, was taken for it).
+/// A script kept in memory, with what tells whether its file is still the same: its date and size, and its identity
+/// (file_identity).
 struct Cached {
     modified: SystemTime,
     len: u64,
-    identity: u64,
+    identity: [u64; 4],
     code: Rc<[u8]>,
     used: u64, // When it was last used, by the count of uses of the cache: the least used recently goes first
 }
 
-/// The identity of a file: its inode on Unix, where a file put in another's place (written apart and renamed, as most
-/// deployments do) has another. Elsewhere 0: on Windows std doesn't give the index of a file, and a file put in another's
-/// place keeps its date of creation (tunneling); the date of its last change, to 100 ns, and its size tell it there.
-fn file_identity(meta: &std::fs::Metadata) -> u64 {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        meta.ino()
+/// The identity of an open file, besides its date and size: which file it is (its device and inode on Unix, its volume
+/// and index on Windows), so that another one put in its place (written apart and renamed) isn't taken for it, and when
+/// it last changed in any way (its ctime, which no program sets), so that one written again in place, with its date put
+/// back and of the same size (as an archive is extracted), isn't either. On Windows the index and the time of the last
+/// change come from the system (std gives neither), and it ran the old code of such a file until the worker ended.
+/// Zeros where the system doesn't tell.
+#[cfg(unix)]
+fn file_identity(_file: &std::fs::File, meta: &std::fs::Metadata) -> [u64; 4] {
+    use std::os::unix::fs::MetadataExt;
+    [meta.dev(), meta.ino(), meta.ctime() as u64, meta.ctime_nsec() as u64]
+}
+
+#[cfg(windows)]
+fn file_identity(file: &std::fs::File, _meta: &std::fs::Metadata) -> [u64; 4] {
+    let (volume, index) = windows_file::key(file).unwrap_or((0, 0));
+    [volume, index, windows_file::change_time(file).unwrap_or(0), 0]
+}
+
+#[cfg(not(any(unix, windows)))]
+fn file_identity(_file: &std::fs::File, _meta: &std::fs::Metadata) -> [u64; 4] {
+    [0; 4]
+}
+
+/// Whether `file`, open, is the file that `path` names now (the same device and inode, or volume and index): one opened
+/// by a path that something changed in between is another.
+#[cfg(unix)]
+fn same_file(file: &std::fs::File, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (file.metadata(), std::fs::metadata(path)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
     }
-    #[cfg(not(unix))]
-    {
-        let _ = meta;
-        0
+}
+
+#[cfg(windows)]
+fn same_file(file: &std::fs::File, path: &Path) -> bool {
+    match (windows_file::key(file), open_script(path).ok().as_ref().and_then(windows_file::key)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn same_file(_file: &std::fs::File, _path: &Path) -> bool {
+    true // Nothing tells: the path, resolved again, is all that is looked at
+}
+
+/// What std doesn't give of an open file on Windows: its volume and index, and the time of its last change.
+#[cfg(windows)]
+mod windows_file {
+    use std::os::windows::io::AsRawHandle;
+
+    #[repr(C)]
+    struct ByHandleFileInformation {
+        file_attributes: u32,
+        creation_time: [u32; 2],
+        last_access_time: [u32; 2],
+        last_write_time: [u32; 2],
+        volume_serial_number: u32,
+        file_size_high: u32,
+        file_size_low: u32,
+        number_of_links: u32,
+        file_index_high: u32,
+        file_index_low: u32,
+    }
+
+    #[repr(C)]
+    struct FileBasicInfo {
+        creation_time: i64,
+        last_access_time: i64,
+        last_write_time: i64,
+        change_time: i64,
+        file_attributes: u32,
+    }
+
+    const FILE_BASIC_INFO_CLASS: i32 = 0;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetFileInformationByHandle(file: *mut core::ffi::c_void, information: *mut ByHandleFileInformation) -> i32;
+        fn GetFileInformationByHandleEx(
+            file: *mut core::ffi::c_void,
+            class: i32,
+            information: *mut core::ffi::c_void,
+            size: u32,
+        ) -> i32;
+    }
+
+    /// The volume and the index of the file, which tell it from any other while it exists.
+    pub(super) fn key(file: &std::fs::File) -> Option<(u64, u64)> {
+        let mut information = std::mem::MaybeUninit::<ByHandleFileInformation>::zeroed();
+        // SAFETY: the handle is that of an open file, and the structure is the one this call writes, whole.
+        let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle(), information.as_mut_ptr()) };
+        if ok == 0 {
+            return None;
+        }
+        // SAFETY: written by the call, which succeeded; zeroed before in any case.
+        let information = unsafe { information.assume_init() };
+        Some((
+            u64::from(information.volume_serial_number),
+            u64::from(information.file_index_high) << 32 | u64::from(information.file_index_low),
+        ))
+    }
+
+    /// The time of the last change of the file, of its content or of its attributes, which no program sets as it
+    /// sets the date of its last write.
+    pub(super) fn change_time(file: &std::fs::File) -> Option<u64> {
+        let mut information = std::mem::MaybeUninit::<FileBasicInfo>::zeroed();
+        // SAFETY: the handle is that of an open file, and the size is that of the structure the class writes.
+        let ok = unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle(),
+                FILE_BASIC_INFO_CLASS,
+                information.as_mut_ptr().cast(),
+                std::mem::size_of::<FileBasicInfo>() as u32,
+            )
+        };
+        if ok == 0 {
+            return None;
+        }
+        // SAFETY: written by the call, which succeeded; zeroed before in any case.
+        Some(unsafe { information.assume_init() }.change_time as u64)
     }
 }
 
@@ -218,12 +338,22 @@ impl LuaEngine {
         if !meta.is_file() {
             return Ok(None); // A folder, a pipe, a device
         }
+        // Opened by the path that script() resolved inside the site: a folder of it changed in between (a link put in
+        // its place) led out of it. What was opened must be what the path, resolved again, still is.
+        match std::fs::canonicalize(path) {
+            Ok(again) if again == path && same_file(&file, path) => {}
+            _ => {
+                let shown = util::escape_line(path.to_string_lossy().as_bytes());
+                util::log_line(&format!("[dx-lua] {shown}: changed while it was opened, answered 404"));
+                return Ok(None);
+            }
+        }
         let too_large = || format!("a script larger than {} bytes", self.config.max_script);
         if meta.len() > self.config.max_script {
             return Err(too_large());
         }
         let modified = meta.modified().unwrap_or(UNIX_EPOCH);
-        let identity = file_identity(&meta);
+        let identity = file_identity(&file, &meta);
         self.uses += 1;
         if let Some(cached) = self.cache.get_mut(path) {
             if cached.modified == modified && cached.len == meta.len() && cached.identity == identity {

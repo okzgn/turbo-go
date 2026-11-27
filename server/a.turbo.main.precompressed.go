@@ -37,8 +37,9 @@ import (
 
 // acceptedEncodings returns which of the encodings of the precompressed files the request accepts, by its
 // Accept-Encoding (RFC 9110, 12.5.3): "br" and "gzip", the one with the higher q first and br first if they have the
-// same; "" for one it doesn't accept. An encoding is accepted with a q above 0, its own or else that of "*". Without
-// the header, or with one that can't be read as it should be, none is: the file is served as it is.
+// same; "" for one it doesn't accept. An encoding is accepted with a q above 0, its own or else that of "*". Each
+// element is read on its own: one that can't be read as it should be ("br;q=x") accepts nothing, and the others are
+// read as they are ("gzip" after it still is). Without the header, the file is served as it is.
 func acceptedEncodings(header []string) (first string, second string) {
 	const unlisted = -1
 	brotli, gzip, others := unlisted, unlisted, unlisted

@@ -199,7 +199,7 @@ var siteSSLSettingCheckers = map[string]func(bool, ...string) (bool, string){
 		// earlier deletion left there.
 		_, inUse := siteCertificates[siteKey]
 		// While Certbot issues or renews it (or waits to), its files would come back, or be put in use without files
-		if !fromFile && args[0] == "0" && (currentCertDomain == siteKey || certPending[siteKey]) {
+		if !fromFile && args[0] == "0" && (certbotBusyWith(siteKey) || certPending[siteKey]) {
 			return false, certificateBeingIssued
 		}
 		if !fromFile && args[0] == "0" && (anyFile || (stopUsing && inUse)) {
@@ -268,13 +268,13 @@ var siteSSLSettingCheckers = map[string]func(bool, ...string) (bool, string){
 		}
 		certDir := certificatesDir + changeWildcards(siteKey) // One Certbot folder per site: runCertbot removes the previous certificate before each attempt, and keeps the ACME account
 
-		if currentCertDomain == siteKey {
+		if certbotBusyWith(siteKey) {
 			return false, certificateWait("Please wait, certificate being processed")
 		}
 
 		obtainCertificate(siteKey, certDir, siteDir) // Creates a loop of attempts to get a certificate
 
-		if currentCertDomain != siteKey {
+		if !certbotBusyWith(siteKey) {
 			return false, certificateWait("Please wait, certificate busy on " + currentCertDomain)
 		}
 		return false, certificateWait("Please wait, certificate in process")

@@ -605,9 +605,9 @@ fn the_cache_keeps_the_scripts_used_recently() {
     );
 }
 
-/// On Unix, a script replaced by another file of the same size and date (written apart and renamed, keeping the date,
-/// as some deployments do) is read again: its inode changed (v2.5 review X-14).
-#[cfg(unix)]
+/// A script replaced by another file of the same size and date (written apart and renamed, keeping the date, as some
+/// deployments do) is read again: its inode changed (v2.5 review X-14), and on Windows its index (external review of
+/// v2.5.2, GGCH H-15.f), where the old code ran until the worker ended.
 #[test]
 fn a_script_replaced_by_another_file_is_read_again() {
     let site = Site::new();
@@ -621,6 +621,60 @@ fn a_script_replaced_by_another_file_is_read_again() {
     std::fs::File::options().write(true).open(&other).unwrap().set_modified(date).unwrap();
     std::fs::rename(&other, &path).unwrap();
     assert_eq!(site.run_with(&mut engine, &Capabilities::none(), "same.lua", &[], b"").unwrap().body, b"two");
+}
+
+/// A script written again in place, of the same size and with its date put back (as an archive is extracted over it),
+/// is read again: the time of its last change tells it (its ctime; on Windows, from the system), which no program sets
+/// (external review of v2.5.2, GGCH H-15.f).
+#[test]
+fn a_script_written_again_in_place_is_read_again() {
+    use std::io::Write;
+    let site = Site::new();
+    site.script("same.lua", "return 'one'");
+    let mut engine = LuaEngine::new(Config::default());
+    assert_eq!(site.run_with(&mut engine, &Capabilities::none(), "same.lua", &[], b"").unwrap().body, b"one");
+    let path = site.www().join("same.lua");
+    let date = std::fs::metadata(&path).unwrap().modified().unwrap();
+    std::thread::sleep(Duration::from_millis(20)); // A later time of change, whatever its precision
+    let mut file = std::fs::File::options().write(true).truncate(true).open(&path).unwrap();
+    file.write_all(b"return 'two'").unwrap();
+    file.set_modified(date).unwrap();
+    drop(file);
+    assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), date);
+    assert_eq!(site.run_with(&mut engine, &Capabilities::none(), "same.lua", &[], b"").unwrap().body, b"two");
+}
+
+/// A script whose path, resolved again once it is open, isn't the one script() resolved inside the site isn't run: a
+/// folder of the site changed in between (a link put in its place) led out of it (external review of v2.5.2, GGCH
+/// H-15.f).
+#[test]
+fn a_script_whose_path_changed_while_it_was_opened_is_not_run() {
+    let site = Site::new();
+    site.script("a.lua", "return 'a'");
+    std::fs::create_dir_all(site.www().join("d")).unwrap();
+    let mut engine = LuaEngine::new(Config::default());
+    let resolved = std::fs::canonicalize(site.www().join("a.lua")).unwrap();
+    assert!(engine.load(&resolved).unwrap().is_some());
+    // Not what it resolves to, as if it had changed: a "..", which a comparison of paths keeps (a "." it drops)
+    let unresolved = site.www().join("d").join("..").join("a.lua");
+    assert!(engine.load(&unresolved).unwrap().is_none());
+}
+
+/// The same, with a folder of the site that becomes a link out of it after its path was resolved.
+#[cfg(unix)]
+#[test]
+fn a_folder_that_becomes_a_link_out_of_the_site_is_not_followed() {
+    let site = Site::new();
+    std::fs::create_dir_all(site.www().join("d")).unwrap();
+    site.script("d/s.lua", "return 'inside'");
+    let outside = site.root.join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("s.lua"), "return 'outside'").unwrap();
+    let mut engine = LuaEngine::new(Config::default());
+    let resolved = std::fs::canonicalize(site.www().join("d/s.lua")).unwrap(); // As script() resolved it
+    std::fs::rename(site.www().join("d"), site.root.join("d-away")).unwrap();
+    std::os::unix::fs::symlink(&outside, site.www().join("d")).unwrap();
+    assert!(engine.load(&resolved).unwrap().is_none());
 }
 
 /// A number in the answer, and in what print writes, is written as Lua writes it (tostring): one with decimals was
@@ -763,6 +817,38 @@ fn table_insert_out_of_its_bounds_is_an_error() {
         let error = site.run("not-a-number.lua", &extra, b"").unwrap_err();
         assert!(error.contains("bad argument #2 to 'insert'"), "time {timeout:?}: {error}");
     }
+}
+
+/// `table.insert` into a table whose `#t` is large without its elements (30 keys at powers of two, from the largest:
+/// `#t` is 2^29) is
+/// stopped at the time of its request: a position of 1 is inside its bounds, and the move of LuaJIT, in C, held the
+/// worker for as long as it took (external review of v2.5.2, GGCH H-05). A long move into a table that has its elements
+/// moves them as the C did, raw.
+#[test]
+fn table_insert_into_a_sparse_table_keeps_the_time() {
+    let site = Site::new();
+    site.script(
+        "sparse.lua",
+        r##"local t, keys, k = {}, {}, 1
+        while k <= 2^29 do keys[#keys + 1] = k k = k * 2 end
+        for i = #keys, 1, -1 do t[keys[i]] = true end -- From the largest: they stay out of the array part
+        assert(#t >= 2^28, "#t is " .. #t)
+        table.insert(t, 1, 'x')
+        return tostring(#t)"##,
+    )
+    .script(
+        "dense.lua",
+        r#"local t = setmetatable({}, { __newindex = function() error("no metamethods") end })
+        for i = 1, 70000 do rawset(t, i, i) end
+        table.insert(t, 1, 0)
+        return rawget(t, 1) .. "," .. rawget(t, 2) .. "," .. rawget(t, 70001) .. "," .. #t"#,
+    );
+    let start = Instant::now();
+    let error = site.run("sparse.lua", &[("DX_TIMEOUT_MS", "300")], b"").unwrap_err();
+    assert!(error.contains("time of the request is over"), "{error}");
+    assert!(start.elapsed() < Duration::from_secs(3), "{:?}", start.elapsed());
+    let dense = site.run("dense.lua", &[("DX_TIMEOUT_MS", "30000")], b"").unwrap();
+    assert_eq!(String::from_utf8_lossy(&dense.body), "0,1,70000,70001");
 }
 
 /// A Content-Length that a script returns is dropped, in any case: the length is the body's, which the worker knows. One

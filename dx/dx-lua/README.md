@@ -38,9 +38,9 @@ what comes from the request (`turbox.html_escape`), or return a table with its `
 | `method`, `uri`, `query` | `GET`, `/a%20b?x=1`, `x=1`: as they came; through a rewrite whose target has a query, as Turbo gives `REQUEST_URI` and `QUERY_STRING` (the parameters it sets are in `query` only) |
 | `path` | The path asked for, decoded (`/a b`): with a rewrite, the one before it; the script's is `vars.SCRIPT_NAME` |
 | `host`, `remote_addr` | The `Host` of the request and the client's IP |
-| `params` | The query, decoded: `REQUEST.params.x`. When a name repeats, the first wins |
+| `params` | The query, decoded: `REQUEST.params.x`. `&` separates the parameters (`;` doesn't), `+` is a space and a `%` without two hexadecimal digits stays as it is, as `QUERY()` of Turbo's expressions reads them. When a name repeats, the first wins (`QUERY()` gives `''` when the values differ, as PHP takes the last) |
 | `headers` | The headers, by their names in lower case (`REQUEST.headers["user-agent"]`) |
-| `cookies` | The cookies (the session of Turbo's panel never arrives) |
+| `cookies` | The cookies, as they came: `;` separates them, a name and a value lose the spaces around them, and a value its double quotes; nothing is decoded. When a name repeats, the first wins (`COOKIE()` of Turbo's expressions gives `''` where PHP would read something else: a `%XX` that it decodes, double quotes or spaces that it keeps). The session of Turbo's panel never arrives |
 | `form` | The fields of a form, `application/x-www-form-urlencoded` or `multipart/form-data` |
 | `files` | The files of a form `multipart/form-data`, a list of `{ field, filename, content_type, size, data }`: `data` is the file, in memory |
 | `body` | The body as it came; empty for a form `multipart/form-data` (it is in `form` and `files`) |
@@ -67,14 +67,19 @@ What `html_escape` and `json_escape` give counts in the memory of the state, and
   anything a visitor mustn't guess.
 - **Only text:** a script that is LuaJIT bytecode is refused.
 - **Only scripts of the site:** the script, resolved, must be a file inside the folder of the site, resolved: a link
-  that leads out of it is answered 404.
+  that leads out of it is answered 404. Once opened, its path is resolved again and must still be that file: a folder
+  of the site changed in between (a link put in its place) is answered 404 too. On a volume where the system can't
+  resolve a path (some virtual or network drives on Windows), the scripts there can't be run.
 - **Limits:** 16 MiB of memory for each state; 64 KiB for a script (the 256 used last, up to 16 MiB, are kept in memory, while
-  the size, the date and, on Unix, the inode of their file don't change); the time Turbo gives the request (its setting `WT`). When it is over, the script is stopped and the answer
+  the size, the date, the file (its inode, or its index on Windows) and the time of its last change, which no program
+  sets, don't change: a script written again in place with its date put back is read again); the time Turbo gives the request (its setting `WT`). When it is over, the script is stopped and the answer
   is a 500; catching the error with `pcall` or `xpcall` doesn't keep it going. The time is looked at between the
   steps of the script: one held inside a single call of the library (a pattern that backtracks, a sort) goes on until
   Turbo kills the worker at `WT` (504). With `WT` 0 nothing stops a script, as nothing stops a CGI. `table.insert`
   with a position checks it first, as Lua 5.3 does: one that isn't an integer of 1 to `#t + 1` is an error (LuaJIT
-  moved the elements up to it in a single call, 2^31 of them for `2^31`).
+  moved the elements up to it in a single call, 2^31 of them for `2^31`), and a move of 65 536 elements or more is
+  done between the steps of the script, where its time stops it (`#t` of a table with a few keys at powers of two is
+  up to 2^30).
 - **The depth of the calls** is LuaJIT's: a recursion too deep ends in the error `stack overflow`, answered 500 as
   any other error (or caught by `pcall`), and the worker goes on. That holds for a recursion through functions of the
   library too (`string.gsub` with a function, `table.sort` with a comparator, `string.format` with a `__tostring`),

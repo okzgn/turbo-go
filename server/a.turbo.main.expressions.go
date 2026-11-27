@@ -29,7 +29,6 @@ package server
 
 import (
 	"log/slog"
-	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -201,29 +200,148 @@ func (r *expressionRequest) Header(name string) string {
 	return strings.Join(r.request.Header.Values(name), ", ")
 }
 
-// Query is the first value of the parameter name of the request's query, decoded, as a CGI's library reads it ("&"
-// and ";" separate them); "" if its value can't be decoded.
+// Query is the value of the parameter name of the request's query, as the preprocessors read it (REQUEST.params of
+// dx-lua, $_GET of PHP): "&" separates the parameters, of which the first maxQueryParameters are read, and each name
+// and value is decoded by scriptQueryUnescape. With ";" as a separator too, and "" for a value with a "%" that can't be
+// decoded, the guard of an expression saw "123" in "id=123;x=1", where the script got "123;x=1".
+//
+// Where the scripts could read something else, it is "", the value of a parameter that isn't there: when the name
+// repeats with another value (dx-lua keeps the first, PHP the last), or comes in another spelling that PHP reads as the
+// same variable (phpParameterName) with another value, or as an array, or only in that spelling. A guard that lets
+// through what it recognizes (QUERY('id').matches('^[0-9]+$')) stops all of these; one that stops what it recognizes
+// (QUERY('role') != 'admin') doesn't, as with a parameter that isn't there (the documentation says so).
 func (r *expressionRequest) Query(name string) string {
 	_, query, _ := strings.Cut(r.request.RequestURI, "?")
-	for _, parameter := range strings.FieldsFunc(query, func(c rune) bool { return c == '&' || c == ';' }) {
-		key, value, _ := strings.Cut(parameter, "=")
-		if decoded, err := url.QueryUnescape(key); err != nil || decoded != name {
+	same, _ := phpParameterName(name)
+	value, found, exact, read := "", false, false, 0
+	for parameter := range strings.SplitSeq(query, "&") {
+		if parameter == "" {
 			continue
 		}
-		decoded, err := url.QueryUnescape(value)
-		if err != nil {
+		if read++; read > maxQueryParameters {
+			break
+		}
+		key, raw, _ := strings.Cut(parameter, "=")
+		if key = scriptQueryUnescape(key); key != name {
+			php, array := phpParameterName(key)
+			if php == "" || php != same {
+				continue
+			}
+			if array { // $_GET holds an array by this name if this one comes last
+				return ""
+			}
+		}
+		decoded := scriptQueryUnescape(raw)
+		if found && decoded != value {
 			return ""
 		}
-		return decoded
+		value, found = decoded, true
+		exact = exact || key == name
 	}
-	return ""
+	if !exact { // Only another spelling: dx-lua reads nothing by this name, and PHP its value
+		return ""
+	}
+	return value
 }
 
-func (r *expressionRequest) Cookie(name string) string {
-	if cookie, err := r.request.Cookie(name); err == nil {
-		return cookie.Value
+// phpNameCharacters are the characters that PHP turns into "_" in the name of a variable of $_GET.
+var phpNameCharacters = strings.NewReplacer(" ", "_", ".", "_", "[", "_")
+
+// phpParameterName is the name of the variable of $_GET that PHP makes of the (decoded) name of a parameter
+// (php_register_variable_ex): without its leading spaces, up to a NUL byte, up to a "[" that a "]" closes (array tells
+// that it's an array then), and with the spaces, the dots and an unclosed "[" as "_". "a.b", "a b" and "a_b" are one
+// variable for PHP, as are "a", "a[]" and "a[x]" (an array), and "a\x00b". PHP ignores an empty name ("[x]", " ").
+func phpParameterName(name string) (variable string, array bool) {
+	name = strings.TrimLeft(name, " ")
+	if end := strings.IndexByte(name, 0); end != -1 {
+		name = name[:end]
 	}
-	return ""
+	if open := strings.IndexByte(name, '['); open != -1 && strings.IndexByte(name[open+1:], ']') != -1 {
+		name, array = name[:open], true
+	}
+	return phpNameCharacters.Replace(name), array
+}
+
+// Cookie is the value of the cookie name as the preprocessors read the header Cookie, which reaches them as it came
+// (without the panel's session, and its lines joined with "; "): REQUEST.cookies of dx-lua (dxLuaCookie) and $_COOKIE
+// of PHP (phpCookie). Where they read different values it is "", as QUERY: a value with "%XX" (PHP decodes it), between
+// double quotes or with spaces around it (dx-lua drops them), a cookie that PHP takes for another one ("a.b" and "a_b"
+// are one for it) or for an array, and one beyond the first maxQueryParameters of either. Go's reader (RFC 6265)
+// skipped a cookie with a byte that RFC 6265 doesn't take ("\", a double quote inside it, a byte above 127), and the
+// first one it read wasn't the scripts': "a=x\; a=1" was "1" for an expression and "x\" for a script.
+func (r *expressionRequest) Cookie(name string) string {
+	header := strings.Join(r.request.Header["Cookie"], "; ")
+	value, found := dxLuaCookie(header, name)
+	php, phpFound, array := phpCookie(header, name)
+	if !found || !phpFound || array || php != value {
+		return ""
+	}
+	return value
+}
+
+// asciiSpace are the bytes that trim_ascii of Rust drops (dx-core), and cSpace those that isspace of C takes (PHP).
+const (
+	asciiSpace = " \t\n\f\r"
+	cSpace     = " \t\n\v\f\r"
+)
+
+// dxLuaCookie is REQUEST.cookies[name] of dx-lua: the first pair of that name of dx-core's parse_cookies (first_wins).
+// A pair, between two ";", is trimmed of ASCII spaces; one without "=" or with an empty name is skipped, and of the
+// others the first maxQueryParameters are read (MAX_PAIRS). The name and the value are trimmed too, the value loses the
+// double quotes around it, and nothing is decoded.
+func dxLuaCookie(header, name string) (value string, found bool) {
+	read := 0
+	for pair := range strings.SplitSeq(header, ";") {
+		if panelSessionPair(pair) {
+			continue
+		}
+		key, raw, hasValue := strings.Cut(strings.Trim(pair, asciiSpace), "=")
+		if key = strings.Trim(key, asciiSpace); !hasValue || key == "" {
+			continue
+		}
+		if read++; read > maxQueryParameters {
+			break
+		}
+		if key == name {
+			raw = strings.Trim(raw, asciiSpace)
+			if len(raw) >= 2 && raw[0] == '"' && raw[len(raw)-1] == '"' {
+				raw = raw[1 : len(raw)-1]
+			}
+			return raw, true
+		}
+	}
+	return "", false
+}
+
+// phpCookie is $_COOKIE[phpParameterName(name)] of PHP (php_default_treat_data for the cookies, and
+// php_register_variable_ex). A pair, between two ";", loses its leading whitespace; an empty one, or one whose name is
+// empty, is skipped, and of the others the first maxQueryParameters are read (max_input_vars), also those without "="
+// and those whose variable PHP drops ("[x]"). The name isn't decoded; the value, after the first "=" ("" without one),
+// is decoded by phpCookieUnescape. The first pair of a variable wins (the more specific path comes first, PHP says),
+// and one that makes it an array ("a[x]") makes it one wherever it comes: array tells.
+func phpCookie(header, name string) (value string, found, array bool) {
+	variable, _ := phpParameterName(name)
+	read := 0
+	for pair := range strings.SplitSeq(header, ";") {
+		if panelSessionPair(pair) {
+			continue
+		}
+		if pair = strings.TrimLeft(pair, cSpace); pair == "" || pair[0] == '=' {
+			continue
+		}
+		if read++; read > maxQueryParameters {
+			break
+		}
+		key, raw, _ := strings.Cut(pair, "=")
+		switch php, isArray := phpParameterName(key); {
+		case php != variable:
+		case isArray:
+			array = true
+		case !found:
+			value, found = phpCookieUnescape(raw), true
+		}
+	}
+	return value, found, array
 }
 
 func (r *expressionRequest) HTTPS() bool { return r.overTLS }

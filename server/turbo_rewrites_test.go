@@ -126,7 +126,8 @@ func FuzzRewriteTarget(f *testing.F) {
 		if strings.ContainsAny(got, "\r\n") && !strings.ContainsAny(template, "\r\n") {
 			t.Fatalf("CR/LF in %q (template %q, request %q)", got, template, uri)
 		}
-		targetPath := cutAt(got, '?')
+		withoutFragment, fragment := splitFragment(got) // As choose cuts it
+		targetPath := cutAt(withoutFragment, '?')
 		switch template[0] {
 		case 'N':
 			if clean, ok := cleanRequestPath(targetPath[1:]); ok && (!strings.HasPrefix(clean, "/") || strings.Contains(clean+"/", "/../")) {
@@ -134,7 +135,7 @@ func FuzzRewriteTarget(f *testing.F) {
 			}
 		case 'H', 'S':
 			recorder := &responseRecorder{}
-			rewriteRedirect(template[0] == 'S', targetPath[1:], strings.TrimPrefix(got[len(targetPath):], "?"), "localhost", "/x", recorder, req)
+			rewriteRedirect(template[0] == 'S', targetPath[1:], strings.TrimPrefix(withoutFragment[len(targetPath):], "?"), fragment, "localhost", "/x", recorder, req)
 			if loc := recorder.Header().Get("Location"); strings.HasPrefix(loc, "https:///") || strings.HasPrefix(loc, "http:///") {
 				t.Fatalf("redirect to %q", loc)
 			}

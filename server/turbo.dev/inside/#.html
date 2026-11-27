@@ -41,7 +41,7 @@ header a { flex-shrink: 0; }
 aside, .breadcrumb-frame + ul, section, .data-block, .entry-list { flex-wrap: wrap; }
 header, aside, .breadcrumb-frame + ul, section, .data-block, .entry-list, header a { display: flex; }
 main, #panel-subdomain, [data-is-hidden], #form-file-upload, #box-indexes .entry-list a::after { display: none; }
-#list-site-actions [data-is-hidden] { display: none !important; }
+#list-site-actions[data-is-hidden], #list-site-actions [data-is-hidden] { display: none !important; }
 header a:last-child::after, fieldset a::before, .breadcrumb-frame::before, .btn-add-entry::before, [data-error]::after, [data-ok]::after, .data-block a *, #sec-aliases .entry-list a::after, .breadcrumb-frame + ul a, #list-site-actions li::before, [data-action-delete], legend::before { display: inline-block; }
 main[data-active-site], section[data-active-subdomain], .breadcrumb-frame { display: block !important; }
 [data-error]::after, .entry-list [data-action-delete] + a:hover, .entry-list [data-action-delete] + a:active, .entry-list [data-action-delete] + a:focus { background: #fff; }
@@ -349,10 +349,11 @@ document.addEventListener('DOMContentLoaded', function(){
 		xhr.send(requestBody), statusMessageEl.parentNode.dataset.isLoading = '';
 	}
 	function isReservedKey(key){ return Object.prototype.hasOwnProperty.call(reservedKeysMap, key); }
-	function renderSitesList(container, sitesMap, siteKey){
+	function renderSitesList(container, sitesMap, siteKey, settings){
 		for(siteKey in sitesMap){
 			if(isReservedKey(siteKey)){ continue; }
-			createSiteEntry(container, siteKey, sitesMap[siteKey], (!sitesMap[siteKey][CONFIG_KEYS.SITE_CONFIG] ? 0 : sitesMap[siteKey][CONFIG_KEYS.SITE_CONFIG]['S'] != '0'));
+			// HTTPS only with an S that isn't 0: a domain whose root is kept without its @ has no settings ({}), and came out as with HTTPS
+			settings = sitesMap[siteKey][CONFIG_KEYS.SITE_CONFIG], createSiteEntry(container, siteKey, sitesMap[siteKey], !!settings && settings['S'] != null && settings['S'] != '0');
 		}
 	}
 	function renderKeyValueList(container, dataMap, propertyName, extraArgs, entryKey){
@@ -368,6 +369,10 @@ document.addEventListener('DOMContentLoaded', function(){
 	function findEntryByProperty(container, childSelector, propertyPath, matchValue, foundEl){
 		$q(childSelector, 0, container).forEach(function(f){ if(getDeepProperty(f, propertyPath) == matchValue){ foundEl = f; } });
 		return foundEl;
+	}
+	function sameNameIgnoringCase(entries, name, key){ // The key of entries that is name in any capitals, as the server compares the names of headers
+		name = name.toLowerCase();
+		for(key in entries){ if(key.toLowerCase() == name){ return key; } }
 	}
 	function createDeleteButton(referenceEl, href, tagNameOrFlag, newEl){
 		newEl = document.createElement(typeof tagNameOrFlag == 'string' ? tagNameOrFlag : 'a'), newEl.href = href, newEl.dataset.actionDelete = '', newEl.innerText = 'X', (!tagNameOrFlag ? referenceEl.insertAdjacentElement('beforebegin', newEl) : referenceEl.appendChild(newEl));
@@ -513,6 +518,10 @@ document.addEventListener('DOMContentLoaded', function(){
 		return (!tokens.length ? inputValue : inputValue.replace(new RegExp(tokens.join('|'), 'g'), function(token){ return chars[token]; }));
 	}
 	function resetTempEditValues(){ tempEditValues = []; }
+	function showRootActions(site){ // The actions and aliases of a site's root: none while the root is kept without its @, and its subdomains are listed alone. In a subdomain's view (no site given), those of the subdomain
+		if(!site || site['']){ (delete siteActionButtonsList.dataset.isHidden), (delete addAliasLink.parentNode.dataset.isHidden); }
+		else { siteActionButtonsList.dataset.isHidden = '', addAliasLink.parentNode.dataset.isHidden = ''; }
+	}
 	function clearAndRender(container, data, renderFn, extraArgs, childrenToRemove){ childrenToRemove = $q((!childrenToRemove ? 'a:first-child ~ a' : 'a'), 0, container), childrenToRemove.forEach(function(f){ container.removeChild(f); }), (typeof renderFn != 'function' ? 0 : renderFn.apply(0, (!extraArgs ? [container, data] : [container, data].concat(extraArgs)))); };
 	function getCurrentContext(context){
 		context = { site: '' };
@@ -557,7 +566,7 @@ document.addEventListener('DOMContentLoaded', function(){
 		linkEl.onclick = function(event){
 			event.preventDefault();
 			if(event.target == deleteBtn){ return; }
-			statusMessageEl.dataset.ok = 'Turbo keeps the settings of "' + name + '" while its folder or its @ (or that of its site) isn\'t there or can\'t be read: they come back with it. Once its folder is gone, X forgets them (no folder is deleted)';
+			statusMessageEl.dataset.ok = 'Turbo keeps the settings of "' + name + '" while its folder or its @ isn\'t there or can\'t be read: they come back with it. Once its folder is gone, X forgets them (no folder is deleted)';
 		},
 		deleteBtn.onclick = function(event){
 			event.preventDefault(), event.stopPropagation();
@@ -1450,14 +1459,17 @@ document.addEventListener('DOMContentLoaded', function(){
 			okFn: function(z, password){
 				b = z.previous.previous.finalValue, c = d.headerContent,
 				b = applyCharReplacements(b, 1), e = 'header',
-				apiRequest((addHeaderLink.href + getCurrentContext().request + '&a=' + encodeURIComponent(nameAsSent(b)) + '&b=' + encodeURIComponent(applyCharReplacements(c)) + '&c=' + encodeURIComponent(password)), function(r, s, t, u){
-					if(b in subdomainPanel.subdomain[CONFIG_KEYS.HEADERS]){ t = findEntryByProperty(addHeaderLink.nextElementSibling, 'a', [e, 'name'], b); }
+				apiRequest((addHeaderLink.href + getCurrentContext().request + '&a=' + encodeURIComponent(nameAsSent(b)) + '&b=' + encodeURIComponent(applyCharReplacements(c)) + '&c=' + encodeURIComponent(password)), function(r, s, t, u, v){
+					// The server replaced the header of that name in any capitals: so does the list. With the name compared
+					// as written, editing cache-control into Cache-Control offered to delete cache-control, which the server
+					// took for Cache-Control, still shown here
+					if((v = sameNameIgnoringCase(subdomainPanel.subdomain[CONFIG_KEYS.HEADERS], b)) != null){ t = findEntryByProperty(addHeaderLink.nextElementSibling, 'a', [e, 'name'], v), (delete subdomainPanel.subdomain[CONFIG_KEYS.HEADERS][v]); }
 					statusMessageEl.dataset.ok = r, subdomainPanel.subdomain[CONFIG_KEYS.HEADERS][b] = c, createKeyValueEntry(addHeaderLink.nextElementSibling, b, e, c, function(a, b){ return { name: b, content: a } });
+					if(t && t != d){ addHeaderLink.nextElementSibling.removeChild(t.previousSibling), addHeaderLink.nextElementSibling.removeChild(t); }
 					if(tempEditValues[0] != null){
-						if(b != d[e].name){ resetTempEditValues(); return d.previousSibling.click(); }
-						addHeaderLink.nextElementSibling.removeChild(d.previousSibling), addHeaderLink.nextElementSibling.removeChild(d), u = 1;
+						if(b.toLowerCase() != d[e].name.toLowerCase()){ resetTempEditValues(); return d.previousSibling.click(); } // Another name: the old one is deleted, after asking
+						addHeaderLink.nextElementSibling.removeChild(d.previousSibling), addHeaderLink.nextElementSibling.removeChild(d);
 					}
-					if(!u && t){ addHeaderLink.nextElementSibling.removeChild(t.previousSibling), addHeaderLink.nextElementSibling.removeChild(t); }
 					resetTempEditValues();
 				}, function(g){ statusMessageEl.dataset.error = g, resetTempEditValues(); });
 			},
@@ -1486,7 +1498,7 @@ document.addEventListener('DOMContentLoaded', function(){
 			required: true,
 			okFn: function(z, password){
 				b = z.previous.previous.finalValue, c = d.executable,
-				b = applyCharReplacements((b.charAt(0) != '.' ? b : b.slice(1)), 1),
+				b = applyCharReplacements((b.charAt(0) != '.' ? b : b.slice(1)), 1).toLowerCase(), // As the server keeps it: "PHP" was another row, and editing php into PHP offered to delete php, the one the server had just changed
 				e = 'preprocessor',
 				apiRequest((addPreprocessorLink.href + getCurrentContext().request + '&a=' + encodeURIComponent(b) /* Read as sent: the server doesn't undo the replacements of a preprocessor's extension */ + '&b=' + encodeURIComponent(c) /* The path as typed: no character replacements */ + '&c=' + encodeURIComponent(password)), function(r, s, t, u){
 					if(b in subdomainPanel.subdomain[CONFIG_KEYS.PREPROCESSORS]){ t = findEntryByProperty(addPreprocessorLink.nextElementSibling, 'a', [e, 'from'], b); }
@@ -1507,6 +1519,7 @@ document.addEventListener('DOMContentLoaded', function(){
 		d = this, showDialog('prompt', {
 			text: 'Index file:',
 			value: tempEditValues[0] || '',
+			required: true,
 			okFn: function(z, b){
 				e = 'index',
 				apiRequest((addIndexLink.href + getCurrentContext().request + '&a=' + encodeURIComponent(applyCharReplacements(b))), function(s, t, u){
@@ -1569,14 +1582,15 @@ document.addEventListener('DOMContentLoaded', function(){
 			if(a.site && a.dataset.activeSite == a.site._.name){
 				sidebarAside.dataset.isHidden = '', siteBreadcrumbLink.innerText = a.site._.name,
 				clearAndRender(addSubdomainLink.parentNode, a.site, renderSitesList),
-				clearAndRender(addAliasLink.nextElementSibling, a.site[''][CONFIG_KEYS.ALIASES], renderSimpleEntries, 0, 1),
-				applySettingsFromQuery(siteActionButtonsList, a.site[''][CONFIG_KEYS.SITE_CONFIG], siteSettingsDefs);
+				showRootActions(a.site),
+				clearAndRender(addAliasLink.nextElementSibling, (a.site[''] || {})[CONFIG_KEYS.ALIASES], renderSimpleEntries, 0, 1),
+				applySettingsFromQuery(siteActionButtonsList, (a.site[''] || {})[CONFIG_KEYS.SITE_CONFIG], siteSettingsDefs);
 			}
 			else { (delete sidebarAside.dataset.isHidden), (delete a.dataset.activeSite); }
 		}
 		if(a.id == 'panel-subdomain' && this.attributeName == 'data-active-subdomain'){
 			if(a.subdomain && a.dataset.activeSubdomain == a.subdomain._.name){
-				toggleSiteSubdomainView(a), addSubdomainLink.parentNode.dataset.isHidden = '', subdomainBreadcrumbLink.innerText = (a.subdomain._.name || 'Root'),
+				toggleSiteSubdomainView(a), showRootActions(), addSubdomainLink.parentNode.dataset.isHidden = '', subdomainBreadcrumbLink.innerText = (a.subdomain._.name || 'Root'),
 				clearAndRender(addAliasLink.nextElementSibling, a.subdomain[CONFIG_KEYS.ALIASES], renderSimpleEntries, 0, 1);
 				clearAndRender(addRewriteLink.nextElementSibling, a.subdomain[CONFIG_KEYS.REWRITES], renderKeyValueList, ['rewrite'], 1),
 				clearAndRender(addMimeLink.nextElementSibling, a.subdomain[CONFIG_KEYS.MIME_TYPES], renderKeyValueList, ['mime'], 1),
@@ -1586,9 +1600,9 @@ document.addEventListener('DOMContentLoaded', function(){
 				applySettingsFromQuery(siteActionButtonsList, a.subdomain[CONFIG_KEYS.SITE_CONFIG], siteSettingsDefs);
 			}
 			else {
-				toggleSiteSubdomainView(a, 1), (delete addSubdomainLink.parentNode.dataset.isHidden), (delete a.dataset.activeSubdomain),
-				clearAndRender(addAliasLink.nextElementSibling, mainPanel.site[''][CONFIG_KEYS.ALIASES], renderSimpleEntries, 0, 1),
-				applySettingsFromQuery(siteActionButtonsList, mainPanel.site[''][CONFIG_KEYS.SITE_CONFIG], siteSettingsDefs);
+				toggleSiteSubdomainView(a, 1), showRootActions(mainPanel.site), (delete addSubdomainLink.parentNode.dataset.isHidden), (delete a.dataset.activeSubdomain),
+				clearAndRender(addAliasLink.nextElementSibling, (mainPanel.site[''] || {})[CONFIG_KEYS.ALIASES], renderSimpleEntries, 0, 1),
+				applySettingsFromQuery(siteActionButtonsList, (mainPanel.site[''] || {})[CONFIG_KEYS.SITE_CONFIG], siteSettingsDefs);
 			}
 		}
 	});

@@ -96,6 +96,13 @@ const dxTimeoutMargin = 250 * time.Millisecond
 type dxMode struct {
 	mutex sync.Mutex
 	pools map[string]*dxPool
+	// starting counts the starts of workers whose result nobody has taken yet: a request that gave up on its start
+	// leaves it to a goroutine of its own, which stop waits for
+	starting int
+	// unsettled are the workers of those starts, from their process on, until their start has a place (the request's,
+	// the idle workers', or its end): stop kills those left when its wait is over. A worker slower to greet than that
+	// wait, or that didn't end when its input closed, went on after Turbo, in a group of its own.
+	unsettled map[*dxWorker]bool
 }
 
 // dxPool is what is kept of the workers of a program.
@@ -116,7 +123,7 @@ type dxWorker struct {
 	lastUse int64 // monotonicNow when its last request ended
 }
 
-var dxWorkers = &dxMode{pools: map[string]*dxPool{}}
+var dxWorkers = &dxMode{pools: map[string]*dxPool{}, unsettled: map[*dxWorker]bool{}}
 
 func init() { registerPreprocessorMode("dx", dxWorkers) }
 
@@ -240,16 +247,30 @@ func (mode *dxMode) take(executable string, ctx context.Context) (*dxWorker, boo
 		return nil, false, errDXStartsFull
 	}
 	pool.busy++
+	mode.starting++
 	mode.mutex.Unlock()
+	settled := func(worker *dxWorker) { // The result of the start has a place: the request's, the idle workers', or its end
+		mode.mutex.Lock()
+		mode.starting--
+		delete(mode.unsettled, worker)
+		mode.mutex.Unlock()
+	}
 	type start struct {
 		worker *dxWorker
 		err    error
 	}
 	started := make(chan start, 1)
 	go func() {
-		worker, err := startDXWorker(executable)
+		var process *dxWorker // Its worker, once its process has started
+		worker, err := startDXWorker(executable, func(starting *dxWorker) {
+			mode.mutex.Lock()
+			mode.unsettled[starting] = true
+			mode.mutex.Unlock()
+			process = starting
+		})
 		mode.mutex.Lock()
 		if err != nil {
+			delete(mode.unsettled, process) // Killed already, if it started
 			pool.busy--
 			if now := monotonicNow(); now >= pool.failedUntil { // The starts that failed together count once: 1 s, then 2, 4...
 				pool.failures++
@@ -264,12 +285,18 @@ func (mode *dxMode) take(executable string, ctx context.Context) (*dxWorker, boo
 	}()
 	select {
 	case result := <-started:
+		settled(result.worker)
 		return result.worker, false, result.err
 	case <-ctx.Done():
 		go func() {
-			if result := <-started; result.err == nil {
-				mode.give(executable, result.worker) // Ready for the next request
+			// Ready for the next request; or, if Turbo is stopping (stop let go of its program), ended here, where stop
+			// waits for it, and kills it once its wait is over: ended apart, Turbo could stop with the worker still
+			// starting, in a group of its own
+			result := <-started
+			if result.err == nil && !mode.keep(executable, result.worker) {
+				result.worker.end(dxGreetingWait)
 			}
+			settled(result.worker)
 		}()
 		return nil, false, ctx.Err()
 	}
@@ -277,16 +304,23 @@ func (mode *dxMode) take(executable string, ctx context.Context) (*dxWorker, boo
 
 // give returns a worker whose request ended well. Turbo may be stopping (stop let go of its program): then it ends.
 func (mode *dxMode) give(executable string, worker *dxWorker) {
+	if !mode.keep(executable, worker) {
+		go worker.end(dxGreetingWait)
+	}
+}
+
+// keep puts a worker with the idle ones of its program, and reports false if stop let go of the program.
+func (mode *dxMode) keep(executable string, worker *dxWorker) bool {
 	worker.lastUse = monotonicNow()
 	mode.mutex.Lock()
 	defer mode.mutex.Unlock()
 	pool := mode.pools[executable]
 	if pool == nil {
-		go worker.end(dxGreetingWait)
-		return
+		return false
 	}
 	pool.busy--
 	pool.idle = append(pool.idle, worker)
+	return true
 }
 
 // lose counts a worker that ended with its request.
@@ -326,8 +360,12 @@ func (mode *dxMode) idle(inUse func(executable string) bool) {
 
 // stop ends every worker that waits, within wait: its input closes, which ends a worker that keeps the protocol, and
 // what goes on after wait is killed. One still with a request ends with it: the connections that shutdown closes end
-// their requests, and their contexts kill their workers.
+// their requests, and their contexts kill their workers. And it waits, within the same wait, for the starts that a
+// request gave up on (starting): each worker that one brings ends, as its program has no pool any more, and those
+// still starting, or ending, when the wait is over are killed (unsettled). Only the idle workers were ended, and Turbo
+// could stop with a worker still starting.
 func (mode *dxMode) stop(wait time.Duration) {
+	deadline := time.Now().Add(wait)
 	mode.mutex.Lock()
 	var ending []*dxWorker
 	for executable, pool := range mode.pools {
@@ -344,12 +382,34 @@ func (mode *dxMode) stop(wait time.Duration) {
 		}()
 	}
 	wg.Wait()
+	for {
+		mode.mutex.Lock()
+		starting, over := mode.starting, !time.Now().Before(deadline)
+		var left []*dxWorker
+		if starting != 0 && over {
+			for worker := range mode.unsettled {
+				left = append(left, worker)
+			}
+		}
+		mode.mutex.Unlock()
+		if starting == 0 {
+			return
+		}
+		if over {
+			for _, worker := range left { // Its start, or its end, sees it gone, and settles it
+				worker.cut()
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // startDXWorker starts a worker of the program, and waits for its greeting (dxGreetingWait at most). It runs in the
 // folder of its program, as a CGI does, with what a CGI gets of Turbo's environment: what each request has goes in its
-// pairs.
-func startDXWorker(executable string) (*dxWorker, error) {
+// pairs. began gets the worker as soon as its process has started, before the greeting: stop may cut it meanwhile,
+// and the start fails then.
+func startDXWorker(executable string, began func(*dxWorker)) (*dxWorker, error) {
 	inputRead, inputWrite, err := os.Pipe()
 	if err != nil {
 		return nil, err
@@ -389,6 +449,7 @@ func startDXWorker(executable string) (*dxWorker, error) {
 		_ = stderrRead.Close()
 	}()
 	worker := &dxWorker{process: process, input: inputWrite, output: outputRead, reader: bufio.NewReaderSize(outputRead, 32<<10), writer: bufio.NewWriterSize(inputWrite, 32<<10)}
+	began(worker)
 	timer := time.AfterFunc(dxGreetingWait, worker.cut)
 	greeting := make([]byte, len(dxGreeting))
 	_, err = io.ReadFull(worker.reader, greeting)

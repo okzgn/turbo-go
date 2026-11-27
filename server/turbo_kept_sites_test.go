@@ -2,11 +2,12 @@ package server
 
 // V4, V5 and V12 (production review of 775a809): what Turbo keeps of a site without its folder.
 // - V4: creating such a site, or subdomain, from the panel is refused. With the session alone, it dropped what was
-//   kept of it and of its subdomains, and their folders came back with the defaults, their scripts served as text.
+//   kept of it, and its folder came back with the defaults, its scripts served as text.
 // - V5: deleting it from "Sites without their folder" forgets what is kept of that one entry and deletes no folder:
-//   it ran RemoveAll on its folder, which may be there (only its @, or that of its site, missing), with the content of
-//   its subdomains, its certificates and anything outside @.
+//   it ran RemoveAll on its folder, which may be there (only its @ missing), with the content of its subdomains, its
+//   certificates and anything outside @.
 // - V12: delSite waits for a reload in progress, which could bring the site back with the defaults afterwards.
+// Since the external review of v2.5.2 (GGCH H-14), a site without its @ goes alone: its subdomains are still served.
 
 import (
 	"io/fs"
@@ -18,8 +19,8 @@ import (
 )
 
 // keptSitesSetup gives localhost its settings (configureLocalhost) and a subdomain www with a preprocessor for "cgi"
-// and a script, and then takes away the @ of localhost (a deploy in progress): localhost and www are kept without
-// their folder, with www's own folder intact.
+// and a script, and then takes away the @ of localhost (a deploy in progress): localhost is kept without its folder,
+// and www, whose own folder is intact, is still served.
 func keptSitesSetup(t *testing.T) (dir, base, tok string) {
 	t.Helper()
 	dir = initForTest(t)
@@ -48,10 +49,10 @@ func keptSitesSetup(t *testing.T) (dir, base, tok string) {
 	updateSettings(true)
 	globalMutex.RLock()
 	_, rootKept := dormantSites["localhost"][""]
-	_, wwwKept := dormantSites["localhost"]["www"]
+	_, wwwActive := sitesMap["localhost"]["www"]
 	globalMutex.RUnlock()
-	if !rootKept || !wwwKept {
-		t.Fatalf("setup: kept localhost %v, www %v", rootKept, wwwKept)
+	if !rootKept || !wwwActive {
+		t.Fatalf("setup: kept localhost %v, www active %v", rootKept, wwwActive)
 	}
 	return dir, base, tok
 }
@@ -74,12 +75,15 @@ func TestRP2_V4_CreatingKeptSiteRefused(t *testing.T) {
 	}
 	globalMutex.RLock()
 	_, rootKept := dormantSites["localhost"][""]
-	_, wwwKept := dormantSites["localhost"]["www"]
+	_, wwwActive := sitesMap["localhost"]["www"]
 	globalMutex.RUnlock()
-	if !rootKept || !wwwKept {
-		t.Errorf("after addSite: kept localhost %v, www %v; expected both kept", rootKept, wwwKept)
+	if !rootKept || !wwwActive {
+		t.Errorf("after addSite: kept localhost %v, www active %v; expected localhost kept and www active", rootKept, wwwActive)
 	}
-	// The deploy ends: both come back with their settings.
+	if body := wwwScript(t, base); strings.Contains(body, "SOURCE") {
+		t.Errorf("www.localhost/script.cgi during the deploy of localhost: %.60q; expected the output of its preprocessor", body)
+	}
+	// The deploy ends: localhost comes back with its settings, and www is as it was.
 	if err := os.Rename(dir+"localhost/@.away", dir+"localhost/@"); err != nil {
 		t.Fatal(err)
 	}
@@ -128,26 +132,25 @@ func TestRP2_V4_CreatingKeptSubdomainRefused(t *testing.T) {
 
 func TestRP2_V5_ForgettingKeptSiteDeletesNoFolder(t *testing.T) {
 	dir, base, tok := keptSitesSetup(t)
-	listed := func() (root, www bool) {
+	listed := func() (root, wwwKept, wwwActive bool) {
 		globalMutex.RLock()
 		defer globalMutex.RUnlock()
 		_, root = dormantSites["localhost"][""]
-		_, www = dormantSites["localhost"]["www"]
-		return root, www
+		_, wwwKept = dormantSites["localhost"]["www"]
+		_, wwwActive = sitesMap["localhost"]["www"]
+		return root, wwwKept, wwwActive
 	}
 	if code, _, _ := post(base, "/admin:inside:delSite?s=localhost&d=&b=wrong-password", tok); code == 200 {
 		t.Error("delSite without the current password answered 200")
 	}
-	// While their folders are there (only the @ of localhost is missing), the settings stay: forgotten, the folders
-	// would come back as new sites with the defaults, their scripts served as text.
-	for _, d := range []string{"www", ""} {
-		code, body, err := post(base, "/admin:inside:delSite?s=localhost&d="+d+"&b=Admin", tok)
-		if err != nil || code != 400 || !strings.Contains(body, "still has its folder") {
-			t.Errorf("forgetting %q while its folder is there: %d %q %v; expected 400", d, code, body, err)
-		}
+	// While its folder is there (only its @ is missing), the settings stay: forgotten, the folder would come back as a
+	// new site with the defaults, its scripts served as text.
+	code, body, err := post(base, "/admin:inside:delSite?s=localhost&d=&b=Admin", tok)
+	if err != nil || code != 400 || !strings.Contains(body, "still has its folder") {
+		t.Errorf("forgetting localhost while its folder is there: %d %q %v; expected 400", code, body, err)
 	}
-	if root, www := listed(); !root || !www {
-		t.Fatalf("after the refusals: kept localhost %v, www %v; expected both", root, www)
+	if root, _, wwwActive := listed(); !root || !wwwActive {
+		t.Fatalf("after the refusal: kept localhost %v, www active %v; expected both", root, wwwActive)
 	}
 	// The folder of localhost goes (moved out of the sites directory): forgetting localhost forgets www too, whose
 	// folder went with it, and deletes nothing.
@@ -155,12 +158,12 @@ func TestRP2_V5_ForgettingKeptSiteDeletesNoFolder(t *testing.T) {
 	if err := os.Rename(dir+"localhost", away); err != nil {
 		t.Fatal(err)
 	}
-	code, body, err := post(base, "/admin:inside:delSite?s=localhost&d=&b=Admin", tok)
+	code, body, err = post(base, "/admin:inside:delSite?s=localhost&d=&b=Admin", tok)
 	if err != nil || code != 200 || !strings.Contains(body, "no folder is deleted") {
 		t.Fatalf("forgetting localhost without its folder: %d %q %v", code, body, err)
 	}
-	if root, www := listed(); root || www {
-		t.Errorf("after forgetting localhost: kept localhost %v, www %v; expected none", root, www)
+	if root, wwwKept, wwwActive := listed(); root || wwwKept || wwwActive {
+		t.Errorf("after forgetting localhost: kept localhost %v, www kept %v, active %v; expected none", root, wwwKept, wwwActive)
 	}
 	for _, name := range []string{"/outside-public.txt", "/@.away/script.cgi", "/www/@/script.cgi"} {
 		if !fileExists(away + name) {

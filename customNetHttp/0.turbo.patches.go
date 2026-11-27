@@ -75,7 +75,8 @@ func turboIdleTimeout() time.Duration {
 // its own): {TURBO_RESPONSE_CODE} is replaced by the code, a template that
 // starts with '<' is served as HTML, and in the text ones `\n` is a line
 // break. The detail goes on the next line, escaped in the HTML ones (it may
-// carry text from the client). turbo:P1 turbo:P9
+// carry text from the client); without one, the body ends with the template
+// and its line break (it had an empty line more). turbo:P1 turbo:P9
 func turboErrorTemplate(code int, detail string) (contentType, body string) {
 	templates := *TurboErrorTemplates.Load()
 	v, ok := templates[code]
@@ -89,7 +90,11 @@ func turboErrorTemplate(code int, detail string) (contentType, body string) {
 	} else {
 		v = strings.ReplaceAll(v, `\n`, "\n")
 	}
-	return "text/" + kind + "; charset=utf-8", strings.ReplaceAll(v, "{TURBO_RESPONSE_CODE}", strconv.Itoa(code)) + "\n" + detail + "\n"
+	body = strings.ReplaceAll(v, "{TURBO_RESPONSE_CODE}", strconv.Itoa(code)) + "\n"
+	if detail != "" {
+		body += detail + "\n"
+	}
+	return "text/" + kind + "; charset=utf-8", body
 }
 
 // turboErrorCSP is the Content-Security-Policy of every error response with
@@ -161,10 +166,12 @@ func (l *turboRSTLimiter) exceeded(now time.Time, limit int) bool {
 
 // turboConnError writes to the connection a whole HTTP/1.1 error response
 // with Turbo's template and turboErrorCSP, and closes the connection, for the
-// errors that happen before any handler is reached. turbo:P1
+// errors that happen before any handler is reached: with its Date and the
+// length of its body, as every other answer has them (RFC 9110, 6.6.1; only
+// the closing of the connection said where the body ended). turbo:P1
 func turboConnError(w io.Writer, detail string, code int) {
 	contentType, body := turboErrorTemplate(code, detail)
-	io.WriteString(w, "HTTP/1.1 "+strconv.Itoa(code)+" "+StatusText(code)+"\r\nContent-Type: "+contentType+"\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: "+turboErrorCSP+"\r\nServer: "+TurboServerName+"\r\nConnection: close\r\n\r\n"+body)
+	io.WriteString(w, "HTTP/1.1 "+strconv.Itoa(code)+" "+StatusText(code)+"\r\nContent-Type: "+contentType+"\r\nContent-Length: "+strconv.Itoa(len(body))+"\r\nDate: "+time.Now().UTC().Format(TimeFormat)+"\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: "+turboErrorCSP+"\r\nServer: "+TurboServerName+"\r\nConnection: close\r\n\r\n"+body)
 }
 
 // Limits of the headers a CGI writes: each line and the whole block.

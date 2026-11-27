@@ -272,6 +272,21 @@ func hostExist(hostHeader string) (bool, string, string, string) {
 	return true, "", prefix, site
 }
 
+// hostServedBySite reports whether a site serves hostHeader, for an alias of that name, which would hide it: the site
+// whose name ends it (hostExist), and, for that name itself, only the site's root, as a request finds it
+// (detectWildcards). A domain whose root is kept without its @, its subdomains served, answers 404 for its own name:
+// an alias of it was dropped, and lost from turbo.config at the next save. Callers hold the global lock.
+func hostServedBySite(hostHeader string) bool {
+	served, pattern, labels, domain := hostExist(hostHeader)
+	if !served || labels != "" {
+		return served
+	}
+	if pattern != "" { // A wildcard site (*.com, *): its root serves the name
+		domain = pattern
+	}
+	return existWildcards("", domain)
+}
+
 func hostParts(hostHeader string) (string, string, string, string) {
 	if hostHeader == "" {
 		return "", "", "", ""
@@ -344,7 +359,7 @@ func hostOk(hostHeader string, checkExists bool) (bool, string) {
 		}
 	}
 	upperSubdomains, subdomain, domainName, tld := hostParts(hostHeader)
-	if len(tld) > 31 {
+	if len(tld) > 63 {
 		return false, "Invalid TLD"
 	}
 	if len(domainName) > 63 {
@@ -353,8 +368,13 @@ func hostOk(hostHeader string, checkExists bool) (bool, string) {
 	if len(subdomain) > 63 {
 		return false, "Too long"
 	}
-	if len(upperSubdomains) > 63 {
-		return false, "Too long"
+	// Each label up to 63 bytes, as DNS limits them, and the name up to 220 (hostDisposition), as hostNameValid takes
+	// them from a request: the labels above the third level were limited to 63 bytes together (four of 20 were refused),
+	// and a name of one label, such as a host of a local network, to 31
+	for label := range strings.SplitSeq(upperSubdomains, ".") {
+		if len(label) > 63 {
+			return false, "Too long"
+		}
 	}
 	return true, ""
 }
@@ -448,6 +468,11 @@ func putWildcards(input ...string) string {
 func detectWildcards(hostInput string, subdomain string) (bool, string, string, string) {
 	if hostInput == "" && subdomain == "" {
 		return false, "", "", ""
+	}
+	if hostInput == "" {
+		// The domain itself: only its root serves it, never a wildcard subdomain, which serves the labels before it.
+		// While the root is kept without its @ (its subdomains still served), "*" served the domain, with its rewrites
+		return existWildcards("", subdomain), "", "", ""
 	}
 	var currentSegment string
 	var prefixSegments string
@@ -1364,13 +1389,19 @@ const (
 func renewCertificates() {
 	type renewal struct{ siteKey, certDir, siteDir, lineageDir string }
 	var candidates, due []renewal
-	certificatesDir := sitesDir.Get() + putSlash(certificatesDirName)
-	panelDir := sitesDir.Get() + panelCertDirName + "/"
+	var certificatesDir, panelDir string
+	var epoch uint64
 	panelCandidate := false
-	withReadLock(func() { // The sites with an e-mail; the disk is looked at after, without the lock
+	// The sites with an e-mail, with the folders of the sites directory that the lock shows with them (certSitesEpoch):
+	// with the directory read before, a setM in between gave an attempt of the new directory the folders of the one
+	// left. The disk is looked at after, without the lock.
+	withReadLock(func() {
+		base := sitesDir.Get()
+		epoch = certSitesEpoch
+		certificatesDir, panelDir = base+putSlash(certificatesDirName), base+panelCertDirName+"/"
 		for domain := range sitesMap {
 			for subdomain := range sitesMap[domain] {
-				siteKey, siteDir := domain, sitesDir.Get()+changeWildcards(domain)+"/"
+				siteKey, siteDir := domain, base+changeWildcards(domain)+"/"
 				lineageDir := ""
 				if subdomain != "" {
 					siteKey = subdomain + "." + domain
@@ -1386,7 +1417,8 @@ func renewCertificates() {
 	})
 	for _, site := range candidates {
 		// Issued by Turbo: its own folder, or (subdomains issued before each site had one) its lineage in the
-		// folder of the domain.
+		// folder of the domain, which gets a folder of its own before an attempt of the domain empties that one
+		// (keepSubdomainLineages)
 		if !dirExists(site.certDir) && (site.lineageDir == "" || !dirExists(site.lineageDir)) {
 			continue
 		}
@@ -1401,12 +1433,20 @@ func renewCertificates() {
 		}
 	}
 	for _, site := range due {
-		slog.Info("Renewing the certificate", "site", site.siteKey)
-		withGlobalLock(func() { obtainCertificate(site.siteKey, site.certDir, site.siteDir) })
+		withGlobalLock(func() {
+			if epoch == certSitesEpoch { // Else the sites directory changed (setM): these folders are of the one left
+				slog.Info("Renewing the certificate", "site", site.siteKey)
+				obtainCertificate(site.siteKey, site.certDir, site.siteDir)
+			}
+		})
 	}
 	if panelDue {
-		slog.Info("Renewing the panel certificate")
-		withGlobalLock(func() { obtainPanelCertificate(certificatesDir+panelCertDirName, panelDir) })
+		withGlobalLock(func() {
+			if epoch == certSitesEpoch {
+				slog.Info("Renewing the panel certificate")
+				obtainPanelCertificate(certificatesDir+panelCertDirName, panelDir)
+			}
+		})
 	}
 }
 
@@ -1522,7 +1562,7 @@ func panelCertSettingsJSON(withStatus bool) string {
 	}
 	if withStatus {
 		status := "false"
-		if currentCertDomain == panelCertDirName {
+		if certbotBusyWith(panelCertDirName) {
 			status = "\"WAIT\""
 		} else if panelCertificate != nil {
 			status = "true"
@@ -1568,7 +1608,7 @@ func panelCertificateAction(action string, email string, adapter string, setAdap
 		panelCertAdapter = adapter
 	}
 	panelDir := sitesDir.Get() + panelCertDirName + "/"
-	if action == "0" && (currentCertDomain == panelCertDirName || certPending[panelCertDirName]) {
+	if action == "0" && (certbotBusyWith(panelCertDirName) || certPending[panelCertDirName]) {
 		return false, certificateBeingIssued
 	}
 	if action == "0" {
@@ -1597,7 +1637,7 @@ func panelCertificateAction(action string, email string, adapter string, setAdap
 		publishCertificates()
 		return true, "Panel certificate deleted"
 	}
-	if currentCertDomain == panelCertDirName {
+	if certbotBusyWith(panelCertDirName) {
 		return false, certificateWait("Please wait, certificate being processed")
 	}
 	hosts := panelOwnHosts()
@@ -1623,7 +1663,7 @@ func panelCertificateAction(action string, email string, adapter string, setAdap
 	}
 	panelCertStatus = false
 	obtainPanelCertificate(certificatesDir+panelCertDirName, panelDir)
-	if currentCertDomain != panelCertDirName {
+	if !certbotBusyWith(panelCertDirName) {
 		return false, certificateWait("Please wait, certificate busy on " + currentCertDomain)
 	}
 	return false, certificateWait("Please wait, certificate in process")
@@ -1686,7 +1726,8 @@ const certificateBeingIssued = "The certificate is being issued or renewed: dele
 var acmeToken = regexp.MustCompile(`^[A-Za-z0-9_-]{1,256}$`)
 
 // certbotJob is what a Certbot attempt needs: the names to cover, the e-mail, the DNS adapter or else the webroot
-// folder, Certbot's own folder (emptied first) and the folder where fullchain.pem and privkey.pem end up.
+// folder, Certbot's own folder (emptied first) and the folder where fullchain.pem and privkey.pem end up. site is
+// true for a site's attempt, whose folder may hold the lineages of its subdomains (keepSubdomainLineages).
 type certbotJob struct {
 	names   []string
 	email   string
@@ -1694,6 +1735,7 @@ type certbotJob struct {
 	webroot string
 	certDir string
 	destDir string
+	site    bool
 }
 
 // obtainCertificate starts a Certbot attempt for the site domain. Callers hold the global lock.
@@ -1704,7 +1746,7 @@ func obtainCertificate(domain string, certDir string, siteDir string) {
 			slog.Warn("Certificate issuance interrupted: the site was deleted", "site", domain)
 			return certbotJob{}, false
 		}
-		return certbotJob{names: []string{domain}, email: settings.email, adapter: settings.adapter, webroot: siteDir + publicDirName, certDir: certDir, destDir: siteDir}, true
+		return certbotJob{names: []string{domain}, email: settings.email, adapter: settings.adapter, webroot: siteDir + publicDirName, certDir: certDir, destDir: siteDir, site: true}, true
 	}, func(status interface{}) {
 		if settings, siteFound := siteSSLConfig[domain]; siteFound {
 			settings.certificate = certificateStateOf(status)
@@ -1745,23 +1787,39 @@ func obtainPanelCertificate(certDir string, panelDir string) {
 // startCertbot starts a Certbot attempt for key (a site, or the panel) if none is running. prepare reads, with
 // the lock, what the attempt needs (false: it is no longer wanted), and finish records the result, also with the
 // lock: true, or why it failed. While another key's attempt runs, there is a single retry after certRetryDelay,
-// whose delay doesn't grow. Callers hold the global lock.
+// whose delay doesn't grow. The attempt and its retry belong to the sites directory in use (certSitesEpoch): the
+// folders they were given are its own, and after setM neither applies anything. Nothing starts while Turbo stops
+// (certbotStopping), and the attempt in progress is cancelled then. Callers hold the global lock.
 func startCertbot(key string, prepare func() (certbotJob, bool), finish func(status interface{})) {
+	if certbotStopping.Load() {
+		return
+	}
+	epoch := certSitesEpoch
 	if currentCertDomain == "" {
-		currentCertDomain = key
+		currentCertDomain, currentCertEpoch = key, epoch
+		certbotAttempts.Add(1) // Before it starts: once stopCertbot has set certbotStopping, waitCertbot sees it
 		go func() {
+			defer certbotAttempts.Add(-1)
 			var job certbotJob
 			var wanted bool
 			withGlobalLock(func() {
-				if job, wanted = prepare(); !wanted {
+				if epoch == certSitesEpoch && !certbotStopping.Load() {
+					job, wanted = prepare()
+				}
+				if !wanted {
 					currentCertDomain = ""
 				}
 			})
 			if !wanted {
 				return
 			}
-			timeoutCtx, cancelFn := context.WithTimeout(context.Background(), certbotTimeLimitFor(job))
+			certbotContextMutex.Lock()
+			stopped := certbotContext // Cancelled already if Turbo began to stop after prepare
+			certbotContextMutex.Unlock()
+			timeoutCtx, cancelFn := context.WithTimeout(stopped, certbotTimeLimitFor(job))
 			defer cancelFn()
+			// Cancelled when Turbo stops; a certificate it puts in place is put whole, as installCertificate doesn't look at
+			// the context
 			status := runCertbot(timeoutCtx, job)
 			var issued *diskLook // The files just installed, read before taking the lock that puts them in use
 			if status == true {
@@ -1770,22 +1828,74 @@ func startCertbot(key string, prepare func() (certbotJob, bool), finish func(sta
 			}
 			withDiskLook(issued, func() {
 				currentCertDomain = ""
+				if epoch != certSitesEpoch { // Issued in the folders of the sites directory left (setM): nothing here changes
+					if status == true {
+						slog.Warn("Certificate issued for the sites directory used before it changed: it stays in that directory, and isn't put in use", "key", key)
+					}
+					return
+				}
 				finish(status)
 			})
 		}()
 		return
 	}
-	if currentCertDomain == key || certPending[key] {
+	if (currentCertDomain == key && currentCertEpoch == epoch) || certPending[key] {
 		return
 	}
 	certPending[key] = true
-	time.AfterFunc(certRetryDelay, func() {
+	var retry func()
+	retry = func() {
+		// While another attempt runs, looked at with the read lock: the write lock emptied the views of every site
+		// (siteViews), for each key waiting, every certRetryDelay of a batch of renewals
+		busy := false
+		withReadLock(func() { busy = currentCertDomain != "" && epoch == certSitesEpoch && !certbotStopping.Load() })
+		if busy {
+			time.AfterFunc(certRetryDelay, retry)
+			return
+		}
 		withGlobalLock(func() {
+			if epoch != certSitesEpoch || certbotStopping.Load() { // setM emptied certPending, or Turbo stops
+				return
+			}
 			delete(certPending, key)
 			startCertbot(key, prepare, finish)
 		})
-	})
+	}
+	time.AfterFunc(certRetryDelay, retry)
 }
+
+// certbotBusyWith reports whether the attempt of Certbot in progress is that of key in the sites directory in use: one
+// of the directory left (setM) applies nothing here, and took "Create SSL" for being processed (nothing was queued)
+// and refused "Delete SSL". Callers hold the global lock.
+func certbotBusyWith(key string) bool {
+	return currentCertDomain == key && currentCertEpoch == certSitesEpoch
+}
+
+// stopCertbot keeps any attempt of Certbot from starting, and cancels the one in progress, when Turbo stops: a retry
+// waiting could start Certbot during the wait of the requests, and nothing ended the one in progress. Without the
+// global lock: shutdown doesn't wait for it.
+func stopCertbot() {
+	certbotStopping.Store(true)
+	certbotContextMutex.Lock()
+	certbotStop()
+	certbotContextMutex.Unlock()
+}
+
+// waitCertbot waits, up to wait, for the attempt of Certbot in progress to end, with the certificate it may be
+// putting in place (two renames: Turbo stopped between them left the new key with the old chain). An attempt is
+// counted (certbotAttempts) from before it starts until after it has recorded its result; without the global lock.
+func waitCertbot(wait time.Duration) {
+	for deadline := time.Now().Add(wait); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		if certbotAttempts.Load() == 0 {
+			return
+		}
+	}
+	slog.Warn("Certbot didn't end in time while Turbo stops: it isn't waited for any more")
+}
+
+// certbotStopWait is how long shutdown waits for the attempt of Certbot that stopCertbot cancelled: it is killed, and
+// its output is waited for certbotWaitDelay at most.
+func certbotStopWait() time.Duration { return certbotWaitDelay + 5*time.Second }
 
 // certbotTimeLimit is how long a Certbot attempt may take, and certbotDNSTimeLimit how long with a DNS adapter,
 // which waits for its records to propagate: with the 3 minutes of the others, an issuance for several hosts could
@@ -1832,11 +1942,37 @@ func certbotEnvironment() []string {
 	return kept
 }
 
+// keepSubdomainLineages gives a folder of its own, next to certDir, to each subdomain of site whose certificate Turbo
+// issued in certDir, the Certbot folder of site (v2.3, before each site had its own), before an attempt of site empties
+// it: renewCertificates renews a subdomain that Turbo issued, known by its folder or by its lineage there, and once that
+// attempt took the lineage, the subdomain was renewed no more. renewCertificates gave it its folder at its pass, and an
+// issuance of site by hand before the pass (after the start, or after setM) still took the lineage. Without the lock.
+func keepSubdomainLineages(certDir string, site string) {
+	entries, err := os.ReadDir(certDir + "/archive")
+	if err != nil {
+		return
+	}
+	certificatesDir := certDir[:strings.LastIndexByte(certDir, '/')+1]
+	for _, entry := range entries {
+		subdomain := entry.Name()
+		own := certificatesDir + changeWildcards(subdomain)
+		if !entry.IsDir() || !strings.HasSuffix(subdomain, "."+site) || dirExists(own) {
+			continue
+		}
+		if err := os.MkdirAll(own, 0700); err != nil {
+			slog.Warn("A subdomain issued in the folder of its domain can't get a folder of its own: it won't be renewed", "site", subdomain, "error", err)
+		}
+	}
+}
+
 // runCertbot runs Certbot for job and moves the new certificate to job.destDir. It returns true, or why it
 // failed (Certbot's output when Certbot fails).
 func runCertbot(timeoutCtx context.Context, job certbotJob) interface{} {
 	if _, err := certbotCommand(timeoutCtx, "--version").CombinedOutput(); err != nil {
 		return "Certbot is not installed"
+	}
+	if job.site {
+		keepSubdomainLineages(job.certDir, job.names[0])
 	}
 	// The certificate of an earlier attempt goes (the new one is found below by its date), but not the ACME account
 	// (accounts/): with a new account on each attempt, Let's Encrypt, which allows 10 new accounts per IP every 3

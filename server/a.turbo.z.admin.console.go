@@ -35,7 +35,6 @@ import (
 	"io/fs"
 	"log/slog"
 	"mime"
-	"mime/multipart"
 	"net"
 	"net/netip"
 	"os"
@@ -476,7 +475,8 @@ func consoleActions(actionPath string, responseWriter customNetHttp.ResponseWrit
 		request.RequestURI = request.RequestURI[colonIdx+1:]
 		actionPath = actionPath[:colonIdx]
 	}
-	if request.RequestURI == "" {
+	withoutAction := request.RequestURI == "" // The page, for a GET
+	if withoutAction {
 		request.RequestURI = panelPageName
 	}
 
@@ -513,6 +513,10 @@ func consoleActions(actionPath string, responseWriter customNetHttp.ResponseWrit
 			}
 			renewSession(currentSession, request)
 
+			if withoutAction && request.Method == customNetHttp.MethodPost { // No action to take: the page answered it with 200
+				reqMsg(responseWriter, 400)
+				return true
+			}
 			if consoleActionsAPI(request.RequestURI, currentSession, fromCookie, responseWriter, request) {
 				return true
 			}
@@ -595,6 +599,8 @@ func consoleActions(actionPath string, responseWriter customNetHttp.ResponseWrit
 			}
 			return true
 		}
+		reqMsg(responseWriter, 400) // A login without its credentials (API §10): the login page answered it with 200
+		return true
 	}
 	return false
 }
@@ -618,9 +624,22 @@ type loginFailures struct {
 }
 
 var (
-	loginFailuresMutex sync.Mutex // Guards loginFailuresByIP, apart from globalMutex
+	loginFailuresMutex sync.Mutex // Guards loginFailuresByIP and loginFailuresPeak, apart from globalMutex
 	loginFailuresByIP  = make(map[string]*loginFailures)
+	// loginFailuresPeak is the most entries loginFailuresByIP had since it was made: cleanLoginFailures makes it anew
+	// once it holds far fewer, as Go never gives back the room of a map.
+	loginFailuresPeak int
 )
+
+// loginFailuresLimit is how many clients and networks the failed logins keep. Beyond it, the attempts of a client
+// without an entry count in loginOverflowKey, with those of every other new client, as the limiter's entries do
+// (ipReferenceLimit): a burst of addresses, each with one attempt, grew the map without a bound. A trusted client
+// (loginTrustDuration) keeps its own. A variable so that tests can lower it.
+var loginFailuresLimit = 100000
+
+// loginOverflowKey is the entry of the clients that come once loginFailuresLimit is reached: no IP nor network is
+// written so. Its limit is that of a network (loginMaxNetworkFailures).
+const loginOverflowKey = "*"
 
 // loginMaxNetworkFailures is how many failed logins the /64s of an IPv6 /48 may make together within
 // loginFailureWindow: a /48, which a tunnel broker gives away, is 65 536 /64s, each with its own loginMaxFailures.
@@ -676,26 +695,50 @@ func startLoginAttempt(ip string) (loginAttempt, int64) {
 	loginFailuresMutex.Lock()
 	defer loginFailuresMutex.Unlock()
 	limits := loginLimitsLocked(ip)
+	if len(loginFailuresByIP) >= loginFailuresLimit && !trustedClientLocked(ip) {
+		// Full: the counts without an entry yet go to the one of every other new client
+		shared := false
+		kept := make([]loginLimit, 0, len(limits))
+		for _, limit := range limits {
+			if _, found := loginFailuresByIP[limit.key]; found {
+				kept = append(kept, limit)
+			} else if !shared {
+				kept, shared = append(kept, loginLimit{loginOverflowKey, loginMaxNetworkFailures}), true
+			}
+		}
+		limits = kept
+	}
 	now := time.Now()
+	// Looked at before any entry is made: an attempt that a block of its /48 refused left an entry for its /64, and a
+	// /48 has 65 536 of them
+	for _, limit := range limits {
+		failures, found := loginFailuresByIP[limit.key]
+		if !found {
+			continue // No failures nor attempts: nothing holds it
+		}
+		if left := failures.blockedUntil.Sub(now); left > 0 {
+			return nil, int64((left + time.Second - 1) / time.Second)
+		}
+		count := failures.count
+		if now.After(failures.windowEnd) {
+			count = 0 // The next failure opens a new window
+		}
+		if count+failures.inFlight >= limit.max {
+			return nil, int64(passwordSlotWait / time.Second)
+		}
+	}
 	for _, limit := range limits {
 		failures, found := loginFailuresByIP[limit.key]
 		if !found {
 			failures = &loginFailures{}
 			loginFailuresByIP[limit.key] = failures
 		}
-		if left := failures.blockedUntil.Sub(now); left > 0 {
-			return nil, int64((left + time.Second - 1) / time.Second)
-		}
 		if now.After(failures.windowEnd) {
-			failures.count = 0 // The next failure opens a new window
+			failures.count = 0
 		}
-		if failures.count+failures.inFlight >= limit.max {
-			return nil, int64(passwordSlotWait / time.Second)
-		}
+		failures.inFlight++
 	}
-	for _, limit := range limits {
-		loginFailuresByIP[limit.key].inFlight++
-	}
+	loginFailuresPeak = max(loginFailuresPeak, len(loginFailuresByIP))
 	return limits, 0
 }
 
@@ -761,6 +804,15 @@ func cleanLoginFailures() {
 		if failures.inFlight == 0 && failures.windowEnd.Before(forgetBefore) && failures.blockedUntil.Before(forgetBefore) {
 			delete(loginFailuresByIP, ip)
 		}
+	}
+	// Go never gives back the room of a map: made anew once it holds far fewer than it once did, a burst of addresses
+	// kept its room for good
+	if loginFailuresPeak >= 1024 && len(loginFailuresByIP)*8 < loginFailuresPeak {
+		kept := make(map[string]*loginFailures, len(loginFailuresByIP))
+		for ip, failures := range loginFailuresByIP {
+			kept[ip] = failures
+		}
+		loginFailuresByIP, loginFailuresPeak = kept, len(kept)
 	}
 	for client, until := range loginTrusted {
 		if now.After(until) {
@@ -1436,10 +1488,16 @@ func addSite(domain string, folderMade bool) (bool, string) {
 	if problem := newSiteProblem(domain, ""); problem != "" {
 		return false, problem
 	}
-	// Subdomains map keys coincidence detection
-	if matched, matchedSite, _, subdomain := detectWildcards(domain, ""); matched {
-		if matched, _, _, matchedSite = detectWildcards(matchedSite, subdomain); matched {
-			return false, "Matches site: " + matchedSite + "." + subdomain
+	// A subdomain of another site that serves this name already: one written so ("app" of example.com, for
+	// app.example.com) is the same host twice. One that only a wildcard covers isn't, a wildcard subdomain ("*" of
+	// example.com) or a wildcard site (*.com, *, which took example.com for its root): the name written wins over it
+	// when a request is served, as addSubdomain accepts that wildcard after this site.
+	if matched, labels, _, site := detectWildcards(domain, ""); matched && strings.IndexByte(site, '*') == -1 {
+		if matched, _, _, key := detectWildcards(labels, site); matched && strings.IndexByte(key, '*') == -1 {
+			if key != "" {
+				site = key + "." + site
+			}
+			return false, "Matches site: " + site
 		}
 	}
 	_, domainExisted := sitesMap[domain] // With subdomains and no root: they stay when the root is undone
@@ -1458,10 +1516,10 @@ func addSite(domain string, folderMade bool) (bool, string) {
 // deleteSiteFromPanel deletes, for delSite, the site (or subdomain) domain: an active one with its folder, which it
 // moves aside, to a name no look at the disk takes for a site, for the caller to remove once settingsUpdateMutex is
 // free (deleting a large site held every reload, and Turbo's stop, for as long as it took); one only kept without its
-// folder by forgetting the settings kept for it, once its folder is gone (for a site, also those of its subdomains,
-// whose folders went with it). While that folder is there (only its @, or that of its site, missing) or can't be
-// looked at, the settings stay: forgotten, the folder came back as a new site with the defaults, its scripts served
-// as text. It holds settingsUpdateMutex, as the reloads do (before the global lock): one that had looked at the disk
+// folder by forgetting the settings kept for it, once its folder is gone (for a site, also its subdomains, whose
+// folders went with it). While that folder is there (only its @ missing) or can't be looked at, the settings stay:
+// forgotten, the folder came back as a new site with the defaults, its scripts served as text. A subdomain is served
+// while the @ of its site is missing: deleting it deletes it, with its folder. It holds settingsUpdateMutex, as the reloads do (before the global lock): one that had looked at the disk
 // before the folder went brought the site back afterwards, with the defaults.
 func deleteSiteFromPanel(domain string, subdomain string) (deleted bool, message string, moved string) {
 	what, name := "Site", domain
@@ -1484,13 +1542,19 @@ func deleteSiteFromPanel(domain string, subdomain string) (deleted bool, message
 	}
 	if !exists {
 		if _, err := siteDirStat(siteDir); err == nil {
-			return false, name + " still has its folder, without its @ (or without that of its site): its settings stay until the folder is gone. Delete that folder, or put its @ back and delete the site with its files", ""
+			if subdomain == "" { // The folder holds its subdomains, served while only its @ is missing
+				return false, name + " still has its folder, without its @: its settings stay until the folder is gone. That folder holds its subdomains too, which are still served: put its @ back and delete the site with its files, or delete the folder and then the site", ""
+			}
+			return false, name + " still has its folder, without its @: its settings stay until the folder is gone. Delete that folder, or put its @ back and delete the site with its files", ""
 		} else if !errors.Is(err, fs.ErrNotExist) {
 			return false, "The folder of " + name + " can't be looked at (" + err.Error() + "): its settings stay until it can", ""
 		}
 		withGlobalLock(func() {
 			if subdomain == "" {
-				forgetDormantLocked(domain, "") // Its subdomains' folders went with its own
+				// Its subdomains' folders went with its own: those still active until the next look at the disk, and those
+				// kept, go with it
+				deleteSiteLocked(domain, "")
+				forgetDormantLocked(domain, "")
 			} else {
 				forgetDormantEntryLocked(domain, subdomain)
 			}
@@ -1605,6 +1669,11 @@ func currentPasswordOK(responseWriter customNetHttp.ResponseWriter, request *cus
 // b, and the start of the first file's part.
 const uploadFieldsBeforeFiles = 64 << 10
 
+// uploadFramingAllowance is what the body of a hardUpload may have besides MBB and the fields before its files: the
+// end of the form after its last part. The framing of each part (its boundary and headers) takes less than what the
+// form counts for it against MBB (customNetHttp's readForm).
+const uploadFramingAllowance = 16 << 10
+
 // replayedBody is a request body whose first bytes, already read, are read again.
 type replayedBody struct {
 	io.Reader
@@ -1624,7 +1693,14 @@ func uploadPasswordFirst(responseWriter customNetHttp.ResponseWriter, request *c
 	}
 	original := request.Body
 	var consumed bytes.Buffer
-	reader := multipart.NewReader(io.TeeReader(io.LimitReader(original, uploadFieldsBeforeFiles), &consumed), params["boundary"])
+	// The reader of customNetHttp, which reads the form afterwards, with its own limits (not those of the GODEBUG of the
+	// process, which the standard mime/multipart takes): on a copy of the request, as MultipartReader marks the one it reads
+	peek := request.WithContext(request.Context())
+	peek.Body = io.NopCloser(io.TeeReader(io.LimitReader(original, uploadFieldsBeforeFiles), &consumed))
+	reader, err := peek.MultipartReader()
+	if err != nil {
+		return false, false
+	}
 	var password []string
 	for password == nil {
 		part, err := reader.NextPart()
@@ -2623,6 +2699,10 @@ func consoleActionsAPI(apiPath string, currentSession string, viaCookie bool, re
 	default:
 		switch apiPath {
 		case "hardUpload":
+			// The whole body is bounded, as a CGI's is (dynamic): a part without a name, or one that isn't form-data,
+			// counts for no limit of the form, and was read to its end. MBB bounds what the form keeps; the multipart
+			// framing around it fits in the fields before the files and uploadFramingAllowance.
+			request.Body = customNetHttp.MaxBytesReader(responseWriter, request.Body, maxBodySize.Load()+uploadFieldsBeforeFiles+uploadFramingAllowance)
 			// The current password goes in the body, before the files, and is checked before they are read.
 			passwordChecked, answered := uploadPasswordFirst(responseWriter, request, currentSession)
 			if answered {
@@ -2706,7 +2786,8 @@ func consoleActionsAPI(apiPath string, currentSession string, viaCookie bool, re
 				var exists bool
 				response := ""
 				withReadLock(func() {
-					if exists = siteExists(request.Form["s"][0], ""); exists {
+					// Also a domain whose root is kept without its @: its subdomains are still served
+					if _, exists = sitesMap[request.Form["s"][0]]; exists {
 						response = createSubdomainsList(false, request.Form["s"][0])
 					}
 				})

@@ -25,7 +25,8 @@ import (
 	"turbo/customNetHttp"
 )
 
-// expectedTemplate reproduces Turbo's error response for a code.
+// expectedTemplate reproduces Turbo's error response for a code: the template and its line break, and the detail on
+// a line of its own if there is one (without one there was an empty line more: GGCH H-15.g).
 func expectedTemplate(code int, detail string) string {
 	templates := *customNetHttp.TurboErrorTemplates.Load()
 	v, ok := templates[code]
@@ -35,7 +36,11 @@ func expectedTemplate(code int, detail string) string {
 	if !strings.HasPrefix(v, "<") {
 		v = strings.ReplaceAll(v, `\n`, "\n")
 	}
-	return strings.ReplaceAll(v, "{TURBO_RESPONSE_CODE}", strconv.Itoa(code)) + "\n" + detail + "\n"
+	body := strings.ReplaceAll(v, "{TURBO_RESPONSE_CODE}", strconv.Itoa(code)) + "\n"
+	if detail != "" {
+		body += detail + "\n"
+	}
+	return body
 }
 
 // withLimit changes an atomic limit of the fork during the test.

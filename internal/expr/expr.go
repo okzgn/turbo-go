@@ -156,8 +156,8 @@ func ClassOf(name string) (Class, bool) {
 type Request interface {
 	Variable(v Variable) string
 	Header(name string) string // The values of the header name (any case), joined with ", "
-	Query(name string) string  // The first value of the parameter name of the query, decoded
-	Cookie(name string) string // The value of the first cookie name
+	Query(name string) string  // The value of the parameter name of the query, as the scripts read it
+	Cookie(name string) string // The value of the cookie name, as the scripts read it
 	HTTPS() bool
 }
 
@@ -227,6 +227,8 @@ type Program struct {
 	labelsOneLabel bool
 	// The host of a redirection may be SUBDOMAIN or FIRST_SUBDOMAIN, a "." and FIRST_DOMAIN or FIRST_SITE
 	labelsAliasName bool
+	// A value that may give nothing may leave two texts together as "//" or ".."
+	valueJoinsTexts bool
 }
 
 // LabelsBeforeOneLabel reports whether the target of a rewrite may have, as the host of a redirection, SUBDOMAIN or
@@ -240,6 +242,14 @@ func (p *Program) LabelsBeforeOneLabel() bool { return p.labelsOneLabel }
 // alias and no wildcard domain: such a request answers 500, as the client's labels and a "." would be the host. It
 // compiles, as through an alias it is what is meant; the caller may warn of it, as for a target written as a text.
 func (p *Program) LabelsBeforeAnAliasName() bool { return p.labelsAliasName }
+
+// ValueMayJoinTexts reports whether the target of a rewrite has, between a text that ends in "/" or "." and one that
+// starts with the same character, only values that may give nothing for a request (EXT, FILE, QUERY('x')…), which the
+// evaluation drops: "'/' + EXT + '/x'" gives "//x" for a request without an extension, and "'https://app.' + SUBDOMAIN
+// + '.example.com/'" a host with "..". It compiles, as the value is meant to be there: a path of the site is cleaned as
+// a request's (a ".." segment answers 404), a redirection gets its path as it is, and one whose host is left so
+// answers 500. The caller may warn of it.
+func (p *Program) ValueMayJoinTexts() bool { return p.valueJoinsTexts }
 
 // Source is the expression as it was written.
 func (p *Program) Source() string { return p.source }
@@ -287,7 +297,7 @@ func Compile(source string, options Options) (*Program, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Program{source: source, target: options.Target, root: root, headers: c.headers, cookies: c.cookies, labelsOneLabel: c.labelsOneLabel, labelsAliasName: c.labelsAliasName}, nil
+	return &Program{source: source, target: options.Target, root: root, headers: c.headers, cookies: c.cookies, labelsOneLabel: c.labelsOneLabel, labelsAliasName: c.labelsAliasName, valueJoinsTexts: c.valueJoinsTexts}, nil
 }
 
 // Header evaluates a header expression for r: the value of the header, without the spaces and tabs at its ends, or

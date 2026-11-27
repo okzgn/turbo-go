@@ -5,6 +5,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -124,6 +125,10 @@ func resetTestState(dir string) {
 	publishDeniedIPs(map[string]int64{}) // With its /64s, which a test's denial of an IPv6 would leave behind
 	configFileStamp = configStamp{}
 	globalMutex.Unlock()
+	certbotStopping.Store(false) // Certbot starts again, also after a test that stopped it (stopCertbot)
+	certbotContextMutex.Lock()
+	certbotContext, certbotStop = context.WithCancel(context.Background())
+	certbotContextMutex.Unlock()
 
 	ipReferences.Clear()
 	for level := range ipReferenceCounts {
@@ -494,7 +499,7 @@ func waitIdle() {
 	busy := func() bool {
 		globalMutex.RLock()
 		defer globalMutex.RUnlock()
-		return currentCertDomain != "" || len(certPending) > 0
+		return currentCertDomain != "" || len(certPending) > 0 || certbotAttempts.Load() != 0
 	}
 	waited := false
 	for i := 0; i < 100 && busy(); i++ {

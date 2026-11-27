@@ -103,7 +103,8 @@ func TestRP3_RootSectionKeepsItsIndexes(t *testing.T) {
 }
 
 // A site kept without its folder that the file names only through its subdomains comes back, with its folder, as
-// a site found on disk (index.html), and its subdomain with its section.
+// a site found on disk (index.html). Its subdomain, with its own folder, is served all along, with its section
+// (before the external review of v2.5.2, GGCH H-14, it was kept with its site, and answered 404).
 func TestRP3_KeptRootWithoutSectionComesBack(t *testing.T) {
 	dir := rootWithoutSectionDir(t)
 	if err := os.Rename(dir+"localhost/@", dir+"localhost/@.away"); err != nil { // A deploy in progress
@@ -111,11 +112,12 @@ func TestRP3_KeptRootWithoutSectionComesBack(t *testing.T) {
 	}
 	loadConfig(t, dir, `{"^":{"v":"2"},"localhost":{"www":{"-":{"index.html":"1"},".":{"X-Www":"kept"}}}}`)
 	globalMutex.RLock()
-	_, rootActive := sitesMap["localhost"]
-	_, wwwKept := dormantSites["localhost"]["www"]
+	_, rootActive := sitesMap["localhost"][""]
+	_, wwwActive := sitesMap["localhost"]["www"]
+	wwwHeader := customHeaders["www.localhost"]["X-Www"]
 	globalMutex.RUnlock()
-	if rootActive || !wwwKept {
-		t.Fatalf("without its @: localhost active %v, www kept %v; expected localhost inactive and www kept", rootActive, wwwKept)
+	if rootActive || !wwwActive || wwwHeader != "kept" {
+		t.Fatalf("without its @: localhost active %v, www active %v with its header %q; expected only www, with it", rootActive, wwwActive, wwwHeader)
 	}
 	if err := os.Rename(dir+"localhost/@.away", dir+"localhost/@"); err != nil {
 		t.Fatal(err)

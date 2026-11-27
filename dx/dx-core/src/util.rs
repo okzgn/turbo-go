@@ -432,6 +432,112 @@ mod tests {
         );
     }
 
+    /// The value of a name as a script reads it of a query: the first, after parse_query (REQUEST.params of dx-lua).
+    fn first_value(query: &[u8], name: &[u8]) -> Vec<u8> {
+        parse_query(query).into_iter().find(|(n, _)| n == name).map(|(_, v)| v).unwrap_or_default()
+    }
+
+    /// The same cases as `queryAsTheScriptsReadIt` of Turbo (server/turbo_review_ggch_expressions_test.go): QUERY() of
+    /// an expression reads a query as a script does, and a guard decides on what the script gets.
+    #[test]
+    fn query_as_the_expressions_read_it() {
+        let cases: [(&str, &str, &str); 15] = [
+            ("id=123;x=1", "id", "123;x=1"),
+            ("a=1;rol=admin", "rol", ""),
+            ("q=%zz<s>", "q", "%zz<s>"),
+            ("q=%4", "q", "%4"),
+            ("q=50%", "q", "50%"),
+            ("q=a+b%20c", "q", "a b c"),
+            ("q=%41%e2%82%ac", "q", "A€"),
+            ("a=1&a=1", "a", "1"),
+            ("%71=x", "q", "x"),
+            ("q%zz=1&q=2", "q", "2"),
+            ("q+r=1", "q r", "1"),
+            ("&&q=1", "q", "1"),
+            ("q", "q", ""),
+            ("q=1=2", "q", "1=2"),
+            ("", "q", ""),
+        ];
+        for (query, name, want) in cases {
+            assert_eq!(first_value(query.as_bytes(), name.as_bytes()), want.as_bytes(), "{query:?} {name:?}");
+        }
+        let many = "a=1&".repeat(MAX_PAIRS - 1);
+        assert_eq!(first_value(format!("{many}q=1").as_bytes(), b"q"), b"1");
+        assert_eq!(first_value(format!("{many}b=2&q=1").as_bytes(), b"q"), b"");
+        assert_eq!(first_value(format!("{many}&&&q=1").as_bytes(), b"q"), b"1");
+    }
+
+    /// A cookie as a script reads it: the first of its name, after parse_cookies (REQUEST.cookies of dx-lua).
+    fn first_cookie(header: &[u8], name: &[u8]) -> Option<Vec<u8>> {
+        parse_cookies(header).into_iter().find(|(n, _)| n == name).map(|(_, v)| v)
+    }
+
+    /// The column of dx-lua of `cookieAsTheScriptsReadIt` of Turbo (server/turbo_review_ggch_expressions_test.go):
+    /// COOKIE() of an expression gives a cookie where dx-lua and PHP read the same value.
+    #[test]
+    fn cookies_as_the_expressions_read_them() {
+        let cases: &[(&str, &str, Option<&str>)] = &[
+            ("a=1; b=2", "a", Some("1")),
+            ("a=1;b=2", "b", Some("2")),
+            ("   a=1", "a", Some("1")),
+            ("\ta=1", "a", Some("1")),
+            ("a = 1", "a", Some("1")),
+            ("a\t=1", "a", Some("1")),
+            ("a= 1", "a", Some("1")),
+            ("a=1 ; b=2", "a", Some("1")),
+            ("a=1\t", "a", Some("1")),
+            (r#"a="x""#, "a", Some("x")),
+            (r#"a="""#, "a", Some("")),
+            (r#"a=""#, "a", Some("\"")),
+            (r#"a=x"y"#, "a", Some("x\"y")),
+            (r"a=x\y; a=1", "a", Some(r"x\y")),
+            ("a=é", "a", Some("é")),
+            ("a=%61dmin", "a", Some("%61dmin")),
+            ("a=x+y", "a", Some("x+y")),
+            ("a=%zz", "a", Some("%zz")),
+            ("a=%2", "a", Some("%2")),
+            ("%61=1", "a", None),
+            ("%61=1", "%61", Some("1")),
+            ("a=1; a=2", "a", Some("1")),
+            ("a=1=2", "a", Some("1=2")),
+            ("a=1,b=2", "a", Some("1,b=2")),
+            ("a=", "a", Some("")),
+            (";;a=1;;", "a", Some("1")),
+            ("=1; a=2", "a", Some("2")),
+            (" =1; a=2", "a", Some("2")),
+            ("a; a=2", "a", Some("2")),
+            ("a.b=1; a_b=2", "a.b", Some("1")),
+            ("a.b=1; a_b=2", "a_b", Some("2")),
+            ("a_b=2; a.b=1", "a.b", Some("1")),
+            ("a b=1", "a_b", None),
+            ("a.=1", "a_", None),
+            ("a[=1", "a_", None),
+            ("a[x]=1; a=2", "a", Some("2")),
+            ("a=2; a[x]=1", "a", Some("2")),
+            ("[x]=1; a=2", "a", Some("2")),
+            ("", "a", None),
+            ("turbo_session=s; turbo.session=1", "turbo.session", Some("1")),
+        ];
+        for &(header, name, want) in cases {
+            assert_eq!(
+                first_cookie(header.as_bytes(), name.as_bytes()).as_deref(),
+                want.map(str::as_bytes),
+                "{header:?} {name:?}"
+            );
+        }
+        // The first MAX_PAIRS cookies with "=" and a name: one without "=" doesn't count, and one that PHP drops does
+        let many: String = (1..MAX_PAIRS).map(|i| format!("x{i}=1;")).collect();
+        for (last, want) in
+            [("a=1", Some("1")), ("y;a=1", Some("1")), ("=v;a=1", Some("1")), (" ;a=1", Some("1")), ("[z]=1;a=1", None)]
+        {
+            assert_eq!(
+                first_cookie(format!("{many}{last}").as_bytes(), b"a").as_deref(),
+                want.map(str::as_bytes),
+                "{last:?}"
+            );
+        }
+    }
+
     const FORM: &[u8] = b"preamble\r\n--XyZ\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nHello\r\n--XyZ\r\n\
 Content-Disposition: form-data; name=\"file\"; filename=\"a %22b%22.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n\
 \x00\x01\r\n--XyZnot\r\n\r\n--XyZ \t\r\nContent-Disposition: form-data; name=empty\r\n\r\n\r\n--XyZ--\r\nepilogue";

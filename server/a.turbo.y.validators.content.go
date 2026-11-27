@@ -177,6 +177,9 @@ var subdomainContentCheckers = map[string]func(bool, interface{}, bool, ...strin
 					if program.LabelsBeforeAnAliasName() {
 						slog.Warn("Rewrite whose host is SUBDOMAIN and FIRST_DOMAIN or FIRST_SITE: these give nothing for a request that comes through no alias and no wildcard domain, and such a request answers 500", "site", joinedSite(siteKeys[1], siteKeys[0]), "source", targetURI)
 					}
+					if program.ValueMayJoinTexts() {
+						slog.Warn(valueJoinsTextsWarning, "site", joinedSite(siteKeys[1], siteKeys[0]), "source", targetURI)
+					}
 				}
 				if isExisting && current == "X"+source {
 					if printErrors {
@@ -289,6 +292,9 @@ var subdomainContentCheckers = map[string]func(bool, interface{}, bool, ...strin
 			}
 			if labelsBeforeAnAliasKeyword(schemeMode + strVal) {
 				slog.Warn("Rewrite whose host is {SUBDOMAIN} and {FIRST_DOMAIN} or {FIRST_SITE}: these give nothing for a request that comes through no alias and no wildcard domain, and such a request answers 500", "site", joinedSite(siteKeys[1], siteKeys[0]), "source", targetURI)
+			}
+			if textTargetValueJoins(schemeMode + strVal) {
+				slog.Warn(valueJoinsTextsWarning, "site", joinedSite(siteKeys[1], siteKeys[0]), "source", targetURI)
 			}
 			sitesMap[siteKeys[0]][siteKeys[1]][targetURI] = schemeMode + strVal
 			if printErrors {
@@ -681,6 +687,10 @@ var subdomainContentCheckers = map[string]func(bool, interface{}, bool, ...strin
 				}
 				continue
 			}
+			if _, exists := indexFiles[siteKeys[1]][name]; exists && printErrors {
+				// It keeps its place: "Index assigned" made the panel move it to the end of its list
+				return false, "Index unchanged"
+			}
 			addIndex(siteKeys[1], name)
 			if printErrors {
 				return true, "Index assigned"
@@ -729,7 +739,7 @@ var subdomainContentCheckers = map[string]func(bool, interface{}, bool, ...strin
 				discardedFromFile(isFromFile, "alias", siteKeys[1], alias, "only the site * serves an IP address")
 				continue
 			}
-			if served, _, _, _ := hostExist(alias); served { // The alias would hide the site (aliases go first)
+			if hostServedBySite(alias) { // The alias would hide the site (aliases go first)
 				if printErrors {
 					return false, "The alias is a site's host"
 				}
