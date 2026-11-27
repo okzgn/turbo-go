@@ -176,7 +176,7 @@ Before upgrading:
 
 ## v2.5.3
 
-Not published yet: the next version after v2.5.2, with what an external review of v2.5.2 found (15 findings: one was wrong, and two described what was meant, one of which changes now). Each fix has a test that failed before it.
+The next version after v2.5.2, with what an external review of v2.5.2 found (15 findings: one was wrong, and two described what was meant, one of which changes now). Each fix has a test that failed before it.
 
 ### Fixes
 - **The sites without their `@`:** a site and each of its subdomains go and come back on their own (above); the domain itself is served only by its root, never by a wildcard subdomain, which served it with its own rewrites while the root was kept; the subdomains of a domain whose folder is gone are kept with it; and a copy of a site's folder in the sites directory isn't served.

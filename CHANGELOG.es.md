@@ -176,7 +176,7 @@ Antes de actualizar:
 
 ## v2.5.3
 
-Aún no publicada: la versión siguiente a v2.5.2, con lo que encontró una revisión externa de v2.5.2 (15 hallazgos: uno era erróneo, y dos describían lo que se quería, uno de los cuales cambia ahora). Cada corrección tiene una prueba que fallaba antes de ella.
+La versión siguiente a v2.5.2, con lo que encontró una revisión externa de v2.5.2 (15 hallazgos: uno era erróneo, y dos describían lo que se quería, uno de los cuales cambia ahora). Cada corrección tiene una prueba que fallaba antes de ella.
 
 ### Correcciones
 - **Los sitios sin su `@`:** un sitio y cada uno de sus subdominios se van y vuelven por su cuenta (arriba); el propio dominio solo lo sirve su raíz, nunca un subdominio comodín, que lo servía con sus propias reescrituras mientras la raíz se conservaba; los subdominios de un dominio cuya carpeta ya no está se conservan con él; y una copia de la carpeta de un sitio en el directorio de sitios no se sirve.
